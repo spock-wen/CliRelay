@@ -413,6 +413,80 @@ func TestGetModelPathAvailabilityFiltersConfiguredPathByRouteGroup(t *testing.T)
 	}
 }
 
+func TestGetModelPathAvailabilityFiltersRootByDefaultAllowedModels(t *testing.T) {
+	allowedModelID := "model-path-availability-default-allowed"
+	blockedModelID := "model-path-availability-default-blocked"
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("model-path-availability-default-auth", "openai", []*registry.ModelInfo{
+		{ID: allowedModelID, Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: blockedModelID, Object: "model", OwnedBy: "openai", Type: "openai"},
+	})
+	t.Cleanup(func() {
+		reg.UnregisterClient("model-path-availability-default-auth")
+	})
+
+	cfg := &config.Config{
+		Routing: config.RoutingConfig{
+			IncludeDefaultGroup: true,
+			ChannelGroups: []config.RoutingChannelGroup{
+				{
+					Name:          "default",
+					AllowedModels: []string{allowedModelID},
+				},
+			},
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "model-path-availability-default-auth",
+		Provider: "openai",
+	}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	h := NewHandler(cfg, "", manager)
+	rec := performModelsRequest(http.MethodGet, "/model-path-availability", nil, h.GetModelPathAvailability)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GetModelPathAvailability status = %d body = %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Data []struct {
+			ID    string `json:"id"`
+			Paths []struct {
+				Method string `json:"method"`
+				Path   string `json:"path"`
+			} `json:"paths"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	hasRootPath := func(modelID string) bool {
+		t.Helper()
+		for _, item := range payload.Data {
+			if item.ID != modelID {
+				continue
+			}
+			for _, path := range item.Paths {
+				if path.Method == http.MethodGet && path.Path == "/v1/models" {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	if !hasRootPath(allowedModelID) {
+		t.Fatalf("expected %q to have root /v1/models path", allowedModelID)
+	}
+	if hasRootPath(blockedModelID) {
+		t.Fatalf("did not expect %q to have root /v1/models path", blockedModelID)
+	}
+}
+
 func TestGetModelPathAvailabilityIncludesCcSwitchRoutePaths(t *testing.T) {
 	initManagementModelsTestDB(t)
 

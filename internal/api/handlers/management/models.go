@@ -233,6 +233,34 @@ func (h *Handler) modelPathRouteScopedModels(models []map[string]any, routeGroup
 	return filtered
 }
 
+func (h *Handler) modelRootRouteScopedModels(models []map[string]any) []map[string]any {
+	if h == nil || h.authManager == nil || h.cfg == nil || !h.cfg.Routing.IncludeDefaultGroup {
+		return models
+	}
+	restricted := false
+	for _, group := range h.cfg.Routing.ChannelGroups {
+		if internalrouting.NormalizeGroupName(group.Name) == "default" && len(group.AllowedModels) > 0 {
+			restricted = true
+			break
+		}
+	}
+	if !restricted {
+		return models
+	}
+	allowedGroups := map[string]struct{}{"default": {}}
+	filtered := make([]map[string]any, 0, len(models))
+	for _, model := range models {
+		id := strings.TrimSpace(modelPathStringValue(model["id"]))
+		if id == "" {
+			continue
+		}
+		if h.authManager.CanServeModelWithScopes(id, nil, allowedGroups, "") {
+			filtered = append(filtered, model)
+		}
+	}
+	return filtered
+}
+
 func modelConfigScope(c *gin.Context) string {
 	scope := strings.ToLower(strings.TrimSpace(c.Query("scope")))
 	switch scope {
@@ -410,8 +438,8 @@ func (h *Handler) GetModelPathAvailability(c *gin.Context) {
 
 	rootOpenAICapabilities := openAIV1Capabilities("/")
 	rootGeminiCapabilities := geminiV1BetaCapabilities("/")
-	appendModelPaths(items, modelRegistry.GetAvailableModels("openai"), "/", rootOpenAICapabilities)
-	appendModelPaths(items, modelRegistry.GetAvailableModels("gemini"), "/", rootGeminiCapabilities)
+	appendModelPaths(items, h.modelRootRouteScopedModels(modelRegistry.GetAvailableModels("openai")), "/", rootOpenAICapabilities)
+	appendModelPaths(items, h.modelRootRouteScopedModels(modelRegistry.GetAvailableModels("gemini")), "/", rootGeminiCapabilities)
 
 	routes := []modelPathRouteResponse{
 		{

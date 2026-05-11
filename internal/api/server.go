@@ -1184,8 +1184,10 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 			}
 		}
 
+		scopedRoutingRestricted := s.hasScopedRoutingModelRestriction(routeGroup, allowedChannelGroups)
+
 		// If no restriction, just call the handler directly
-		if allowedModels == nil && allowedChannels == nil && allowedChannelGroups == nil && routeGroup == "" {
+		if allowedModels == nil && allowedChannels == nil && allowedChannelGroups == nil && routeGroup == "" && !scopedRoutingRestricted {
 			userAgent := c.GetHeader("User-Agent")
 			if strings.HasPrefix(userAgent, "claude-cli") {
 				claudeHandler.ClaudeModels(c)
@@ -1234,6 +1236,9 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 					if s.handlers == nil || s.handlers.AuthManager == nil || !s.handlers.AuthManager.CanServeModelWithScopes(id, allowedChannels, allowedChannelGroups, routeGroup) {
 						continue
 					}
+				}
+				if scopedRoutingRestricted && !s.modelAllowedByScopedRoutingGroups(id, routeGroup, allowedChannelGroups) {
+					continue
 				}
 				filtered = append(filtered, model)
 			}
@@ -1877,6 +1882,11 @@ func (s *Server) scopedRoutingAllowedModels(routeGroup string, allowedGroups map
 			if normalized := internalrouting.NormalizeGroupName(group); normalized != "" {
 				scopedGroups[normalized] = struct{}{}
 			}
+		}
+	}
+	if len(scopedGroups) == 0 {
+		if s.cfg.Routing.IncludeDefaultGroup {
+			scopedGroups["default"] = struct{}{}
 		}
 	}
 	if len(scopedGroups) == 0 {
