@@ -9,6 +9,7 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
@@ -168,6 +169,41 @@ func TestRegisterModelsForAuth_AddsUserModelConfigsForOAuthProvider(t *testing.T
 	if !hasModelID(registry.GetAvailableModelsByProvider("claude"), "claude-opus-4-7") {
 		t.Fatal("expected user-defined Claude model config to be registered for Claude OAuth auth")
 	}
+}
+
+func TestRegisterModelsForAuth_ClaudeOAuthStaticMaxModelIsRouteableWithoutModelConfig(t *testing.T) {
+	usage.CloseDB()
+	dbPath := filepath.Join(t.TempDir(), "usage.db")
+	if err := usage.InitDB(dbPath, internalconfig.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB() error = %v", err)
+	}
+	t.Cleanup(usage.CloseDB)
+
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:       "claude-oauth-static-max-models",
+		Provider: "claude",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"email": "claude@example.com",
+		},
+	}
+
+	registry := GlobalModelRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() {
+		registry.UnregisterClient(auth.ID)
+	})
+
+	service.registerModelsForAuth(context.Background(), auth)
+
+	providers := util.GetProviderName("claude-opus-4-7")
+	for _, provider := range providers {
+		if provider == "claude" {
+			return
+		}
+	}
+	t.Fatalf("expected claude-opus-4-7 to route to claude after Claude OAuth registration, got providers %v", providers)
 }
 
 func TestRegisterModelsForAuth_AddsUserModelConfigsForOAuthProviderInferredFromAccountInfo(t *testing.T) {
