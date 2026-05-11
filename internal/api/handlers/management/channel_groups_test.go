@@ -451,6 +451,42 @@ func TestBuildChannelGroupItemsSkipsDisabledAuthChannels(t *testing.T) {
 	}
 }
 
+func TestBuildChannelGroupItemsIncludesDisabledAuthFileChannels(t *testing.T) {
+	auths := []*coreauth.Auth{
+		{
+			ID:       "disabled-auth",
+			Label:    "GptPlus8",
+			Prefix:   "chatgpt-mix",
+			Provider: "codex",
+			Disabled: true,
+			Status:   coreauth.StatusDisabled,
+			Attributes: map[string]string{
+				"path": "/tmp/codex-gpt-plus-8.json",
+			},
+		},
+	}
+
+	items := buildChannelGroupItems(&config.Config{}, auths)
+	byName := make(map[string]channelGroupItem, len(items))
+	for _, item := range items {
+		byName[item.Name] = item
+	}
+
+	chatgptMix, ok := byName["chatgpt-mix"]
+	if !ok {
+		t.Fatal("expected chatgpt-mix group for disabled auth-file channel")
+	}
+	if !containsString(chatgptMix.Channels, "GptPlus8") {
+		t.Fatalf("chatgpt-mix channels = %v, want disabled channel GptPlus8", chatgptMix.Channels)
+	}
+	if len(chatgptMix.ChannelDetails) != 1 {
+		t.Fatalf("channel details = %#v, want one disabled channel detail", chatgptMix.ChannelDetails)
+	}
+	if !chatgptMix.ChannelDetails[0].Disabled {
+		t.Fatalf("channel detail = %#v, want disabled=true", chatgptMix.ChannelDetails[0])
+	}
+}
+
 func TestBuildChannelGroupItemsDoesNotSurfaceDeletedConfiguredChannels(t *testing.T) {
 	cfg := &config.Config{
 		Routing: config.RoutingConfig{
