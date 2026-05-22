@@ -1189,7 +1189,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 					return
 				}
 				deleted++
-				h.disableAuth(ctx, full)
+				h.removeAuth(ctx, full)
 				if errCleanup := h.removeChannelReferences(deletedChannels); errCleanup != nil {
 					c.JSON(500, gin.H{"error": errCleanup.Error()})
 					return
@@ -1223,7 +1223,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	h.disableAuth(ctx, full)
+	h.removeAuth(ctx, full)
 	if err := h.removeChannelReferences(deletedChannels); err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
@@ -1698,23 +1698,31 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-func (h *Handler) disableAuth(ctx context.Context, id string) {
+func (h *Handler) removeAuth(ctx context.Context, id string) {
 	if h == nil || h.authManager == nil {
 		return
 	}
-	authID := h.authIDForPath(id)
-	if authID == "" {
-		authID = strings.TrimSpace(id)
+	candidates := []string{
+		h.authIDForPath(id),
+		strings.TrimSpace(id),
+		filepath.Base(strings.TrimSpace(id)),
 	}
-	if authID == "" {
-		return
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || candidate == "." {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		if deleted, _ := h.authManager.Delete(coreauth.WithSkipPersist(ctx), candidate); deleted != nil {
+			return
+		}
 	}
-	if auth, ok := h.authManager.GetByID(authID); ok {
-		auth.Disabled = true
-		auth.Status = coreauth.StatusDisabled
-		auth.StatusMessage = "removed via management API"
-		auth.UpdatedAt = time.Now()
-		_, _ = h.authManager.Update(ctx, auth)
+	if auth := h.findAuthByNameOrID(filepath.Base(strings.TrimSpace(id))); auth != nil {
+		_, _ = h.authManager.Delete(coreauth.WithSkipPersist(ctx), auth.ID)
 	}
 }
 

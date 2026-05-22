@@ -121,6 +121,12 @@ func TestDeleteAuthFileRemovesDeletedChannelReferences(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("DELETE status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
 	}
+	if _, ok := manager.GetByID("kimi-a.json"); ok {
+		t.Fatal("expected deleted auth to be removed from manager")
+	}
+	if _, ok := manager.GetByID("kimi-b.json"); !ok {
+		t.Fatal("expected remaining auth to stay in manager")
+	}
 
 	profiles := usage.ListAPIKeyPermissionProfiles()
 	if len(profiles) != 1 {

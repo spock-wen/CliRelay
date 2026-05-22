@@ -575,6 +575,33 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	return snapshot.Clone(), nil
 }
 
+// Delete removes an auth entry from the runtime manager and persistence store.
+func (m *Manager) Delete(ctx context.Context, id string) (*Auth, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, nil
+	}
+	m.mu.Lock()
+	previous, ok := m.auths[id]
+	if !ok || previous == nil {
+		m.mu.Unlock()
+		return nil, nil
+	}
+	snapshot := previous.Clone()
+	delete(m.auths, id)
+	m.mu.Unlock()
+
+	if err := m.deletePersist(ctx, snapshot); err != nil {
+		m.mu.Lock()
+		m.auths[id] = snapshot
+		m.mu.Unlock()
+		m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+		return nil, err
+	}
+	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	return snapshot.Clone(), nil
+}
+
 // Load resets manager state from the backing store.
 func (m *Manager) Load(ctx context.Context) error {
 	m.mu.Lock()
@@ -2302,6 +2329,24 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	}
 	_, err := m.store.Save(ctx, auth)
 	return err
+}
+
+func (m *Manager) deletePersist(ctx context.Context, auth *Auth) error {
+	if m.store == nil || auth == nil || auth.ID == "" {
+		return nil
+	}
+	if shouldSkipPersist(ctx) {
+		return nil
+	}
+	if auth.Attributes != nil {
+		if v := strings.ToLower(strings.TrimSpace(auth.Attributes["runtime_only"])); v == "true" {
+			return nil
+		}
+	}
+	if auth.Metadata == nil {
+		return nil
+	}
+	return m.store.Delete(ctx, auth.ID)
 }
 
 // StartAutoRefresh launches a background loop that evaluates auth freshness
