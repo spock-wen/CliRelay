@@ -2,6 +2,7 @@ package usage
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -13,17 +14,19 @@ import (
 )
 
 type ModelConfigRow struct {
-	ModelID               string  `json:"model_id"`
-	OwnedBy               string  `json:"owned_by"`
-	Description           string  `json:"description"`
-	Enabled               bool    `json:"enabled"`
-	PricingMode           string  `json:"pricing_mode"`
-	InputPricePerMillion  float64 `json:"input_price_per_million"`
-	OutputPricePerMillion float64 `json:"output_price_per_million"`
-	CachedPricePerMillion float64 `json:"cached_price_per_million"`
-	PricePerCall          float64 `json:"price_per_call"`
-	Source                string  `json:"source"`
-	UpdatedAt             string  `json:"updated_at"`
+	ModelID               string   `json:"model_id"`
+	OwnedBy               string   `json:"owned_by"`
+	Description           string   `json:"description"`
+	Enabled               bool     `json:"enabled"`
+	InputModalities       []string `json:"input_modalities,omitempty"`
+	OutputModalities      []string `json:"output_modalities,omitempty"`
+	PricingMode           string   `json:"pricing_mode"`
+	InputPricePerMillion  float64  `json:"input_price_per_million"`
+	OutputPricePerMillion float64  `json:"output_price_per_million"`
+	CachedPricePerMillion float64  `json:"cached_price_per_million"`
+	PricePerCall          float64  `json:"price_per_call"`
+	Source                string   `json:"source"`
+	UpdatedAt             string   `json:"updated_at"`
 }
 
 type ModelOwnerPresetRow struct {
@@ -40,6 +43,8 @@ CREATE TABLE IF NOT EXISTS model_configs (
   owned_by                 TEXT NOT NULL DEFAULT '',
   description              TEXT NOT NULL DEFAULT '',
   enabled                  INTEGER NOT NULL DEFAULT 1,
+  input_modalities         TEXT NOT NULL DEFAULT '',
+  output_modalities        TEXT NOT NULL DEFAULT '',
   pricing_mode             TEXT NOT NULL DEFAULT 'token',
   input_price_per_million  REAL NOT NULL DEFAULT 0,
   output_price_per_million REAL NOT NULL DEFAULT 0,
@@ -109,6 +114,7 @@ func initModelConfigTables(db *sql.DB) {
 		log.Errorf("usage: create model config tables: %v", err)
 		return
 	}
+	ensureModelConfigSchema(db)
 	ensureOpenRouterModelSyncStateSchema(db)
 	seedDefaultModelConfigRows(db)
 	mergeLegacyPricingIntoModelConfigs(db)
@@ -140,6 +146,63 @@ func intToBool(value int) bool {
 
 func nowRFC3339() string {
 	return time.Now().UTC().Format(time.RFC3339)
+}
+
+func ensureModelConfigSchema(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	if !sqliteColumnExists(db, "model_configs", "input_modalities") {
+		if _, err := db.Exec("ALTER TABLE model_configs ADD COLUMN input_modalities TEXT NOT NULL DEFAULT ''"); err != nil {
+			log.Warnf("usage: add model config input_modalities column: %v", err)
+		}
+	}
+	if !sqliteColumnExists(db, "model_configs", "output_modalities") {
+		if _, err := db.Exec("ALTER TABLE model_configs ADD COLUMN output_modalities TEXT NOT NULL DEFAULT ''"); err != nil {
+			log.Warnf("usage: add model config output_modalities column: %v", err)
+		}
+	}
+}
+
+func normalizeModelModalities(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		modality := strings.ToLower(strings.TrimSpace(value))
+		if modality == "" {
+			continue
+		}
+		if _, ok := seen[modality]; ok {
+			continue
+		}
+		seen[modality] = struct{}{}
+		out = append(out, modality)
+	}
+	return out
+}
+
+func encodeModelModalities(values []string) string {
+	values = normalizeModelModalities(values)
+	if len(values) == 0 {
+		return ""
+	}
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func decodeModelModalities(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(value), &values); err != nil {
+		return nil
+	}
+	return normalizeModelModalities(values)
 }
 
 func defaultModelConfigRows() []ModelConfigRow {
@@ -191,6 +254,8 @@ func defaultModelConfigRows() []ModelConfigRow {
 			}
 			if modelID == "gpt-image-2" {
 				row.Description = "Image generation model billed per invocation"
+				row.InputModalities = []string{"text"}
+				row.OutputModalities = []string{"image"}
 				row.PricingMode = "call"
 				row.PricePerCall = 0.04
 			}
@@ -209,12 +274,14 @@ func seedDefaultModelConfigRows(db *sql.DB) {
 	for _, row := range defaultModelConfigRows() {
 		_, err := db.Exec(
 			`INSERT OR IGNORE INTO model_configs
-			 (model_id, owned_by, description, enabled, pricing_mode, input_price_per_million, output_price_per_million, cached_price_per_million, price_per_call, source, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 (model_id, owned_by, description, enabled, input_modalities, output_modalities, pricing_mode, input_price_per_million, output_price_per_million, cached_price_per_million, price_per_call, source, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			row.ModelID,
 			row.OwnedBy,
 			row.Description,
 			boolToInt(row.Enabled),
+			encodeModelModalities(row.InputModalities),
+			encodeModelModalities(row.OutputModalities),
 			normalizePricingMode(row.PricingMode),
 			row.InputPricePerMillion,
 			row.OutputPricePerMillion,
@@ -325,7 +392,7 @@ func mergeLegacyPricingIntoModelConfigs(db *sql.DB) {
 
 func reloadModelConfigCache(db *sql.DB) {
 	rows, err := db.Query(
-		`SELECT model_id, owned_by, description, enabled, pricing_mode, input_price_per_million, output_price_per_million, cached_price_per_million, price_per_call, source, updated_at
+		`SELECT model_id, owned_by, description, enabled, input_modalities, output_modalities, pricing_mode, input_price_per_million, output_price_per_million, cached_price_per_million, price_per_call, source, updated_at
 		 FROM model_configs`,
 	)
 	if err != nil {
@@ -338,11 +405,14 @@ func reloadModelConfigCache(db *sql.DB) {
 	for rows.Next() {
 		var row ModelConfigRow
 		var enabled int
+		var inputModalities, outputModalities string
 		if err := rows.Scan(
 			&row.ModelID,
 			&row.OwnedBy,
 			&row.Description,
 			&enabled,
+			&inputModalities,
+			&outputModalities,
 			&row.PricingMode,
 			&row.InputPricePerMillion,
 			&row.OutputPricePerMillion,
@@ -355,6 +425,8 @@ func reloadModelConfigCache(db *sql.DB) {
 			continue
 		}
 		row.Enabled = intToBool(enabled)
+		row.InputModalities = decodeModelModalities(inputModalities)
+		row.OutputModalities = decodeModelModalities(outputModalities)
 		row.PricingMode = normalizePricingMode(row.PricingMode)
 		cache[row.ModelID] = row
 	}
@@ -454,6 +526,8 @@ func UpsertModelConfig(row ModelConfigRow) error {
 		return fmt.Errorf("usage: model id is required")
 	}
 	row.OwnedBy = normalizeModelOwnerValue(row.OwnedBy)
+	row.InputModalities = normalizeModelModalities(row.InputModalities)
+	row.OutputModalities = normalizeModelModalities(row.OutputModalities)
 	row.PricingMode = normalizePricingMode(row.PricingMode)
 	if row.Source == "" {
 		row.Source = "user"
@@ -461,12 +535,14 @@ func UpsertModelConfig(row ModelConfigRow) error {
 	row.UpdatedAt = nowRFC3339()
 	_, err := db.Exec(
 		`INSERT INTO model_configs
-		 (model_id, owned_by, description, enabled, pricing_mode, input_price_per_million, output_price_per_million, cached_price_per_million, price_per_call, source, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 (model_id, owned_by, description, enabled, input_modalities, output_modalities, pricing_mode, input_price_per_million, output_price_per_million, cached_price_per_million, price_per_call, source, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(model_id) DO UPDATE SET
 		   owned_by = excluded.owned_by,
 		   description = excluded.description,
 		   enabled = excluded.enabled,
+		   input_modalities = excluded.input_modalities,
+		   output_modalities = excluded.output_modalities,
 		   pricing_mode = excluded.pricing_mode,
 		   input_price_per_million = excluded.input_price_per_million,
 		   output_price_per_million = excluded.output_price_per_million,
@@ -478,6 +554,8 @@ func UpsertModelConfig(row ModelConfigRow) error {
 		row.OwnedBy,
 		row.Description,
 		boolToInt(row.Enabled),
+		encodeModelModalities(row.InputModalities),
+		encodeModelModalities(row.OutputModalities),
 		row.PricingMode,
 		row.InputPricePerMillion,
 		row.OutputPricePerMillion,

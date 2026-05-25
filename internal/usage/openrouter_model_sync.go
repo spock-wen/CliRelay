@@ -27,11 +27,18 @@ type OpenRouterRemotePricing struct {
 	InputCacheRead string `json:"input_cache_read"`
 }
 
+type OpenRouterRemoteArchitecture struct {
+	Modality         string   `json:"modality"`
+	InputModalities  []string `json:"input_modalities"`
+	OutputModalities []string `json:"output_modalities"`
+}
+
 type OpenRouterRemoteModel struct {
-	ID          string                  `json:"id"`
-	Name        string                  `json:"name"`
-	Description string                  `json:"description"`
-	Pricing     OpenRouterRemotePricing `json:"pricing"`
+	ID           string                       `json:"id"`
+	Name         string                       `json:"name"`
+	Description  string                       `json:"description"`
+	Architecture OpenRouterRemoteArchitecture `json:"architecture"`
+	Pricing      OpenRouterRemotePricing      `json:"pricing"`
 }
 
 type OpenRouterModelSyncResult struct {
@@ -137,6 +144,7 @@ func SyncOpenRouterModelList(ctx context.Context, models []OpenRouterRemoteModel
 			CachedPricePerMillion: openRouterPricePerMillion(model.Pricing.InputCacheRead),
 			Source:                openRouterModelSource,
 		}
+		row.InputModalities, row.OutputModalities = openRouterModelModalities(model)
 		if err := UpsertModelConfig(row); err != nil {
 			return result, fmt.Errorf("sync openrouter model %s: %w", modelID, err)
 		}
@@ -500,6 +508,13 @@ func openRouterApplyModelSync(row *ModelConfigRow, model OpenRouterRemoteModel, 
 	row.OutputPricePerMillion = openRouterPricePerMillion(model.Pricing.Completion)
 	row.CachedPricePerMillion = openRouterPricePerMillion(model.Pricing.InputCacheRead)
 	row.PricePerCall = 0
+	inputModalities, outputModalities := openRouterModelModalities(model)
+	if len(inputModalities) > 0 {
+		row.InputModalities = inputModalities
+	}
+	if len(outputModalities) > 0 {
+		row.OutputModalities = outputModalities
+	}
 }
 
 func openRouterShouldSyncDescription(row ModelConfigRow) bool {
@@ -589,6 +604,37 @@ func openRouterModelDescription(model OpenRouterRemoteModel) string {
 		return description
 	}
 	return strings.TrimSpace(model.Name)
+}
+
+func openRouterModelModalities(model OpenRouterRemoteModel) ([]string, []string) {
+	input := normalizeModelModalities(model.Architecture.InputModalities)
+	output := normalizeModelModalities(model.Architecture.OutputModalities)
+	if len(input) > 0 && len(output) > 0 {
+		return input, output
+	}
+
+	modality := strings.TrimSpace(model.Architecture.Modality)
+	if modality == "" {
+		return input, output
+	}
+	left, right, found := strings.Cut(modality, "->")
+	if !found {
+		return input, output
+	}
+	if len(input) == 0 {
+		input = parseOpenRouterModalityPart(left)
+	}
+	if len(output) == 0 {
+		output = parseOpenRouterModalityPart(right)
+	}
+	return input, output
+}
+
+func parseOpenRouterModalityPart(value string) []string {
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == '+' || r == ',' || r == '|' || r == '/'
+	})
+	return normalizeModelModalities(parts)
 }
 
 func openRouterPricePerMillion(value string) float64 {

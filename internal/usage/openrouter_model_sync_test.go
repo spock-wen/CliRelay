@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -13,6 +14,11 @@ func TestSyncOpenRouterModelsAddsNewModelsWithLocalModelIDPricingAndOwner(t *tes
 			ID:          "openai/gpt-openrouter-test",
 			Name:        "OpenAI: GPT OpenRouter Test",
 			Description: "Agentic test model",
+			Architecture: OpenRouterRemoteArchitecture{
+				Modality:         "text+image->text",
+				InputModalities:  []string{"text", "image"},
+				OutputModalities: []string{"text"},
+			},
 			Pricing: OpenRouterRemotePricing{
 				Prompt:         "0.00000175",
 				Completion:     "0.000014",
@@ -40,6 +46,9 @@ func TestSyncOpenRouterModelsAddsNewModelsWithLocalModelIDPricingAndOwner(t *tes
 	if model.InputPricePerMillion != 1.75 || model.OutputPricePerMillion != 14 || model.CachedPricePerMillion != 0.175 {
 		t.Fatalf("unexpected imported model pricing: %+v", model)
 	}
+	if strings.Join(model.InputModalities, ",") != "text,image" || strings.Join(model.OutputModalities, ",") != "text" {
+		t.Fatalf("unexpected imported model modalities: %+v -> %+v", model.InputModalities, model.OutputModalities)
+	}
 	if _, ok := GetModelOwnerPreset("openai"); !ok {
 		t.Fatal("expected openai owner preset to exist")
 	}
@@ -65,6 +74,9 @@ func TestSyncOpenRouterModelsUpdatesExistingUserModelPricingOnly(t *testing.T) {
 		{
 			ID:          "openai/gpt-openrouter-test",
 			Description: "Remote description",
+			Architecture: OpenRouterRemoteArchitecture{
+				Modality: "text+image->text",
+			},
 			Pricing: OpenRouterRemotePricing{
 				Prompt:         "0.00000175",
 				Completion:     "0.000014",
@@ -88,6 +100,9 @@ func TestSyncOpenRouterModelsUpdatesExistingUserModelPricingOnly(t *testing.T) {
 	}
 	if model.InputPricePerMillion != 1.75 || model.OutputPricePerMillion != 14 || model.CachedPricePerMillion != 0.175 {
 		t.Fatalf("existing user model pricing should be synced: %+v", model)
+	}
+	if strings.Join(model.InputModalities, ",") != "text,image" || strings.Join(model.OutputModalities, ",") != "text" {
+		t.Fatalf("existing user model modalities should be synced: %+v -> %+v", model.InputModalities, model.OutputModalities)
 	}
 }
 

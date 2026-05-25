@@ -37,6 +37,9 @@ func TestInitDBSeedsDefaultModelConfigs(t *testing.T) {
 	if imageModel.PricePerCall <= 0 {
 		t.Fatalf("expected gpt-image-2 default per-call price, got %v", imageModel.PricePerCall)
 	}
+	if len(imageModel.OutputModalities) != 1 || imageModel.OutputModalities[0] != "image" {
+		t.Fatalf("expected gpt-image-2 image output modality, got %+v", imageModel.OutputModalities)
+	}
 
 	owners := ListModelOwnerPresets()
 	if len(owners) == 0 {
@@ -51,12 +54,14 @@ func TestUpsertModelConfigAndPerCallCost(t *testing.T) {
 	initModelConfigTestDB(t)
 
 	err := UpsertModelConfig(ModelConfigRow{
-		ModelID:      "custom-image",
-		OwnedBy:      "acme-ai",
-		Description:  "Custom image model",
-		Enabled:      true,
-		PricingMode:  "call",
-		PricePerCall: 0.12,
+		ModelID:          "custom-image",
+		OwnedBy:          "acme-ai",
+		Description:      "Custom image model",
+		Enabled:          true,
+		InputModalities:  []string{"Text", "image", "text"},
+		OutputModalities: []string{"Image"},
+		PricingMode:      "call",
+		PricePerCall:     0.12,
 	})
 	if err != nil {
 		t.Fatalf("UpsertModelConfig() error = %v", err)
@@ -68,6 +73,12 @@ func TestUpsertModelConfigAndPerCallCost(t *testing.T) {
 	}
 	if model.OwnedBy != "acme-ai" || model.PricePerCall != 0.12 {
 		t.Fatalf("unexpected model config: %+v", model)
+	}
+	if len(model.InputModalities) != 2 || model.InputModalities[0] != "text" || model.InputModalities[1] != "image" {
+		t.Fatalf("unexpected normalized input modalities: %+v", model.InputModalities)
+	}
+	if len(model.OutputModalities) != 1 || model.OutputModalities[0] != "image" {
+		t.Fatalf("unexpected normalized output modalities: %+v", model.OutputModalities)
 	}
 
 	cost := CalculateCost("custom-image", 123, 456, 0)

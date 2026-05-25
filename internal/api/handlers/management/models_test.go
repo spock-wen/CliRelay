@@ -50,6 +50,8 @@ func TestModelConfigHandlersCreateListAndDelete(t *testing.T) {
 		"owned_by": "acme-ai",
 		"description": "Custom image model",
 		"enabled": true,
+		"input_modalities": ["text", "image"],
+		"output_modalities": ["text"],
 		"pricing": {
 			"mode": "call",
 			"price_per_call": 0.12
@@ -66,9 +68,12 @@ func TestModelConfigHandlersCreateListAndDelete(t *testing.T) {
 	}
 	var listPayload struct {
 		Data []struct {
-			ID      string `json:"id"`
-			OwnedBy string `json:"owned_by"`
-			Pricing struct {
+			ID               string   `json:"id"`
+			OwnedBy          string   `json:"owned_by"`
+			InputModalities  []string `json:"input_modalities"`
+			OutputModalities []string `json:"output_modalities"`
+			SupportsVision   bool     `json:"supports_vision"`
+			Pricing          struct {
 				Mode         string  `json:"mode"`
 				PricePerCall float64 `json:"price_per_call"`
 			} `json:"pricing"`
@@ -83,6 +88,9 @@ func TestModelConfigHandlersCreateListAndDelete(t *testing.T) {
 			found = true
 			if item.OwnedBy != "acme-ai" || item.Pricing.Mode != "call" || item.Pricing.PricePerCall != 0.12 {
 				t.Fatalf("unexpected custom-image payload: %+v", item)
+			}
+			if !item.SupportsVision || len(item.InputModalities) != 2 || item.InputModalities[1] != "image" || len(item.OutputModalities) != 1 || item.OutputModalities[0] != "text" {
+				t.Fatalf("unexpected custom-image capabilities: %+v", item)
 			}
 		}
 	}

@@ -53,11 +53,13 @@ type configuredModelPathRoute struct {
 }
 
 type modelConfigPayload struct {
-	ID          string `json:"id"`
-	OwnedBy     string `json:"owned_by"`
-	Description string `json:"description"`
-	Enabled     bool   `json:"enabled"`
-	Pricing     struct {
+	ID               string    `json:"id"`
+	OwnedBy          string    `json:"owned_by"`
+	Description      string    `json:"description"`
+	Enabled          bool      `json:"enabled"`
+	InputModalities  *[]string `json:"input_modalities"`
+	OutputModalities *[]string `json:"output_modalities"`
+	Pricing          struct {
 		Mode                  string  `json:"mode"`
 		InputPricePerMillion  float64 `json:"input_price_per_million"`
 		OutputPricePerMillion float64 `json:"output_price_per_million"`
@@ -67,7 +69,7 @@ type modelConfigPayload struct {
 }
 
 func modelConfigResponse(row usage.ModelConfigRow) map[string]any {
-	return map[string]any{
+	response := map[string]any{
 		"id":          row.ModelID,
 		"owned_by":    row.OwnedBy,
 		"description": row.Description,
@@ -82,6 +84,30 @@ func modelConfigResponse(row usage.ModelConfigRow) map[string]any {
 		"source":     row.Source,
 		"updated_at": row.UpdatedAt,
 	}
+	attachModelConfigCapabilities(response, row)
+	return response
+}
+
+func modelConfigModalitiesJSON(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	return values
+}
+
+func modelConfigSupportsVision(row usage.ModelConfigRow) bool {
+	for _, modality := range row.InputModalities {
+		if strings.EqualFold(strings.TrimSpace(modality), "image") {
+			return true
+		}
+	}
+	return false
+}
+
+func attachModelConfigCapabilities(target map[string]any, row usage.ModelConfigRow) {
+	target["input_modalities"] = modelConfigModalitiesJSON(row.InputModalities)
+	target["output_modalities"] = modelConfigModalitiesJSON(row.OutputModalities)
+	target["supports_vision"] = modelConfigSupportsVision(row)
 }
 
 func capabilityPath(prefix, suffix string) string {
@@ -315,7 +341,7 @@ func modelConfigPayloadToRow(payload modelConfigPayload, scope string) usage.Mod
 	if scope == "library" {
 		source = "seed"
 	}
-	return usage.ModelConfigRow{
+	row := usage.ModelConfigRow{
 		ModelID:               strings.TrimSpace(payload.ID),
 		OwnedBy:               strings.TrimSpace(payload.OwnedBy),
 		Description:           strings.TrimSpace(payload.Description),
@@ -327,6 +353,13 @@ func modelConfigPayloadToRow(payload modelConfigPayload, scope string) usage.Mod
 		PricePerCall:          payload.Pricing.PricePerCall,
 		Source:                source,
 	}
+	if payload.InputModalities != nil {
+		row.InputModalities = *payload.InputModalities
+	}
+	if payload.OutputModalities != nil {
+		row.OutputModalities = *payload.OutputModalities
+	}
+	return row
 }
 
 func modelConfigParamID(c *gin.Context) string {
@@ -408,6 +441,9 @@ func (h *Handler) GetModels(c *gin.Context) {
 
 		// Attach pricing if available
 		if modelID, ok := model["id"].(string); ok {
+			if row, exists := usage.GetModelConfig(modelID); exists {
+				attachModelConfigCapabilities(filteredModel, row)
+			}
 			if pricing, exists := pricingMap[modelID]; exists {
 				filteredModel["pricing"] = map[string]any{
 					"input_price_per_million":  pricing.InputPricePerMillion,
@@ -519,6 +555,14 @@ func (h *Handler) PostModelConfig(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "model id is required"})
 		return
 	}
+	if existing, ok := usage.GetModelConfig(row.ModelID); ok {
+		if payload.InputModalities == nil {
+			row.InputModalities = existing.InputModalities
+		}
+		if payload.OutputModalities == nil {
+			row.OutputModalities = existing.OutputModalities
+		}
+	}
 	if err := usage.UpsertModelConfig(row); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -546,6 +590,19 @@ func (h *Handler) PutModelConfig(c *gin.Context) {
 	if row.ModelID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "model id is required"})
 		return
+	}
+	var existing usage.ModelConfigRow
+	var hasExisting bool
+	if originalID != "" {
+		existing, hasExisting = usage.GetModelConfig(originalID)
+	}
+	if hasExisting {
+		if payload.InputModalities == nil {
+			row.InputModalities = existing.InputModalities
+		}
+		if payload.OutputModalities == nil {
+			row.OutputModalities = existing.OutputModalities
+		}
 	}
 	if originalID != "" && originalID != row.ModelID {
 		if err := usage.DeleteModelConfig(originalID); err != nil {
