@@ -731,6 +731,9 @@ type OpenCodeGoKey struct {
 
 	// ExcludedModels lists model IDs that should be excluded for this provider.
 	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
+
+	// VisionFallbackModel is used for image requests whose requested model lacks vision support.
+	VisionFallbackModel string `yaml:"vision-fallback-model,omitempty" json:"vision-fallback-model,omitempty"`
 }
 
 // LoadConfig reads a YAML configuration file from the given path,
@@ -1162,6 +1165,7 @@ func (cfg *Config) SanitizeOpenCodeGoKeys() {
 		entry.ProxyID = strings.TrimSpace(entry.ProxyID)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
+		entry.VisionFallbackModel = strings.TrimSpace(entry.VisionFallbackModel)
 		out = append(out, entry)
 	}
 	cfg.OpenCodeGoKey = out

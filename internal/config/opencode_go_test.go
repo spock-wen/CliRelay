@@ -20,6 +20,7 @@ opencode-go-api-key:
       X-Test: " yes "
     excluded-models:
       - " deepseek-v4-pro "
+    vision-fallback-model: " qwen3.5-plus "
 `), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -44,6 +45,9 @@ opencode-go-api-key:
 	if len(got.ExcludedModels) != 1 || got.ExcludedModels[0] != "deepseek-v4-pro" {
 		t.Fatalf("excluded models = %#v", got.ExcludedModels)
 	}
+	if got.VisionFallbackModel != "qwen3.5-plus" {
+		t.Fatalf("vision fallback model = %q, want qwen3.5-plus", got.VisionFallbackModel)
+	}
 }
 
 func TestSanitizeOpenCodeGoKeysDropsEmptyAndDeduplicates(t *testing.T) {
@@ -52,7 +56,7 @@ func TestSanitizeOpenCodeGoKeysDropsEmptyAndDeduplicates(t *testing.T) {
 			{APIKey: " "},
 			{APIKey: "go-key", Prefix: " team "},
 			{APIKey: "go-key", Prefix: "duplicate"},
-			{APIKey: "go-key-2", Headers: map[string]string{" X-Trace ": " on "}},
+			{APIKey: "go-key-2", Headers: map[string]string{" X-Trace ": " on "}, VisionFallbackModel: " qwen3.6-plus "},
 		},
 	}
 
@@ -66,5 +70,8 @@ func TestSanitizeOpenCodeGoKeysDropsEmptyAndDeduplicates(t *testing.T) {
 	}
 	if cfg.OpenCodeGoKey[1].Headers["X-Trace"] != "on" {
 		t.Fatalf("headers = %#v, want normalized header", cfg.OpenCodeGoKey[1].Headers)
+	}
+	if cfg.OpenCodeGoKey[1].VisionFallbackModel != "qwen3.6-plus" {
+		t.Fatalf("vision fallback model = %q, want qwen3.6-plus", cfg.OpenCodeGoKey[1].VisionFallbackModel)
 	}
 }

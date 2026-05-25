@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -26,6 +27,11 @@ var opencodeGoBaseURL = "https://opencode.ai/zen/go/v1"
 var opencodeGoMessagesModels = map[string]struct{}{
 	"minimax-m2.7": {},
 	"minimax-m2.5": {},
+}
+
+var opencodeGoVisionModels = map[string]struct{}{
+	"qwen3.5-plus": {},
+	"qwen3.6-plus": {},
 }
 
 // OpenCodeGoExecutor routes OpenCode Go models to the provider's mixed OpenAI/Anthropic endpoints.
@@ -70,6 +76,7 @@ func (e *OpenCodeGoExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth
 }
 
 func (e *OpenCodeGoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	req = e.applyVisionFallback(auth, req)
 	if opencodeGoUsesMessages(req.Model) {
 		return e.executeMessages(ctx, auth, req, opts)
 	}
@@ -77,6 +84,7 @@ func (e *OpenCodeGoExecutor) Execute(ctx context.Context, auth *cliproxyauth.Aut
 }
 
 func (e *OpenCodeGoExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	req = e.applyVisionFallback(auth, req)
 	if opencodeGoUsesMessages(req.Model) {
 		return e.executeMessagesStream(ctx, auth, req, opts)
 	}
@@ -97,6 +105,130 @@ func (e *OpenCodeGoExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Aut
 
 func (e *OpenCodeGoExecutor) openAIExecutor() *OpenAICompatExecutor {
 	return NewOpenAICompatExecutor(openCodeGoProvider, e.cfg)
+}
+
+func (e *OpenCodeGoExecutor) applyVisionFallback(auth *cliproxyauth.Auth, req cliproxyexecutor.Request) cliproxyexecutor.Request {
+	fallback := opencodeGoVisionFallbackModel(e.cfg, auth)
+	if fallback == "" || !opencodeGoPayloadHasImage(req.Payload) {
+		return req
+	}
+	if !opencodeGoSupportsNativeVision(fallback) {
+		return req
+	}
+	baseModel := thinking.ParseSuffix(req.Model).ModelName
+	if strings.EqualFold(baseModel, fallback) || opencodeGoSupportsNativeVision(baseModel) {
+		return req
+	}
+	req.Model = fallback
+	req.Payload, _ = sjson.SetBytes(req.Payload, "model", fallback)
+	if opencodeGoDisablesThinkingForVisionFallback(fallback) {
+		req.Payload, _ = sjson.SetBytes(req.Payload, "enable_thinking", false)
+	}
+	return req
+}
+
+func opencodeGoVisionFallbackModel(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if fallback := strings.TrimSpace(auth.Attributes["vision_fallback_model"]); fallback != "" {
+			if opencodeGoModelExcluded(fallback, auth.Attributes["excluded_models"]) {
+				return ""
+			}
+			return fallback
+		}
+	}
+	if cfg == nil {
+		return ""
+	}
+	apiKey := ""
+	if auth.Attributes != nil {
+		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
+	}
+	if apiKey == "" {
+		return ""
+	}
+	for i := range cfg.OpenCodeGoKey {
+		entry := &cfg.OpenCodeGoKey[i]
+		if strings.EqualFold(strings.TrimSpace(entry.APIKey), apiKey) {
+			fallback := strings.TrimSpace(entry.VisionFallbackModel)
+			if opencodeGoModelExcluded(fallback, strings.Join(entry.ExcludedModels, ",")) {
+				return ""
+			}
+			return fallback
+		}
+	}
+	return ""
+}
+
+func opencodeGoModelExcluded(model, excluded string) bool {
+	model = strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
+	if model == "" {
+		return true
+	}
+	for _, entry := range strings.Split(excluded, ",") {
+		entry = strings.ToLower(strings.TrimSpace(entry))
+		if entry == "" {
+			continue
+		}
+		if entry == "*" || entry == model {
+			return true
+		}
+	}
+	return false
+}
+
+func opencodeGoPayloadHasImage(payload []byte) bool {
+	if len(payload) == 0 || !json.Valid(payload) {
+		return false
+	}
+	var value any
+	if err := json.Unmarshal(payload, &value); err != nil {
+		return false
+	}
+	return opencodeGoValueHasImage(value)
+}
+
+func opencodeGoValueHasImage(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		if rawType, ok := typed["type"].(string); ok {
+			switch strings.ToLower(strings.TrimSpace(rawType)) {
+			case "image", "image_url", "input_image":
+				return true
+			}
+		}
+		if _, ok := typed["image_url"]; ok {
+			return true
+		}
+		for _, child := range typed {
+			if opencodeGoValueHasImage(child) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range typed {
+			if opencodeGoValueHasImage(child) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func opencodeGoSupportsNativeVision(model string) bool {
+	baseModel := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
+	if baseModel == "" {
+		return false
+	}
+	_, ok := opencodeGoVisionModels[baseModel]
+	return ok
+}
+
+func opencodeGoDisablesThinkingForVisionFallback(model string) bool {
+	baseModel := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
+	return strings.HasPrefix(baseModel, "qwen")
 }
 
 func (e *OpenCodeGoExecutor) executeMessages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {

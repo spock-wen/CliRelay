@@ -1058,6 +1058,7 @@ func (h *Handler) PatchOpenCodeGoKey(c *gin.Context) {
 		ProxyID        *string            `json:"proxy-id"`
 		Headers        *map[string]string `json:"headers"`
 		ExcludedModels *[]string          `json:"excluded-models"`
+		VisionFallback *string            `json:"vision-fallback-model"`
 	}
 	var body struct {
 		APIKey *string          `json:"api-key"`
@@ -1120,6 +1121,9 @@ func (h *Handler) PatchOpenCodeGoKey(c *gin.Context) {
 	}
 	if body.Value.ExcludedModels != nil {
 		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	if body.Value.VisionFallback != nil {
+		entry.VisionFallbackModel = strings.TrimSpace(*body.Value.VisionFallback)
 	}
 	normalizeOpenCodeGoKey(&entry)
 	if entry.APIKey == "" {
@@ -1822,6 +1826,7 @@ func normalizeOpenCodeGoKey(entry *config.OpenCodeGoKey) {
 	entry.ProxyID = strings.TrimSpace(entry.ProxyID)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	entry.VisionFallbackModel = strings.TrimSpace(entry.VisionFallbackModel)
 }
 
 func normalizedOpenCodeGoKeyEntries(entries []config.OpenCodeGoKey) []config.OpenCodeGoKey {

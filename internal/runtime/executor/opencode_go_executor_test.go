@@ -56,6 +56,154 @@ func TestOpenCodeGoExecutorRoutesOpenAIModelsToChatCompletions(t *testing.T) {
 	}
 }
 
+func TestOpenCodeGoExecutorUsesVisionFallbackForImageRequests(t *testing.T) {
+	var gotPath string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_vision","object":"chat.completion","created":1,"model":"qwen3.5-plus","choices":[{"index":0,"message":{"role":"assistant","content":"vision ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`))
+	}))
+	defer server.Close()
+
+	oldBaseURL := opencodeGoBaseURL
+	opencodeGoBaseURL = server.URL + "/zen/go/v1"
+	t.Cleanup(func() { opencodeGoBaseURL = oldBaseURL })
+
+	exec := NewOpenCodeGoExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":               "test-key",
+			"vision_fallback_model": "qwen3.5-plus",
+		},
+	}
+	payload := []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":[{"type":"text","text":"what is this?"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]}]}`)
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "deepseek-v4-flash",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if gotPath != "/zen/go/v1/chat/completions" {
+		t.Fatalf("path = %q, want /zen/go/v1/chat/completions", gotPath)
+	}
+	if gotModel := gjson.GetBytes(gotBody, "model").String(); gotModel != "qwen3.5-plus" {
+		t.Fatalf("upstream model = %q, want qwen3.5-plus; body=%s", gotModel, string(gotBody))
+	}
+	if !gjson.GetBytes(gotBody, "enable_thinking").Exists() || gjson.GetBytes(gotBody, "enable_thinking").Bool() {
+		t.Fatalf("enable_thinking = %s, want false; body=%s", gjson.GetBytes(gotBody, "enable_thinking").Raw, string(gotBody))
+	}
+	if gotText := gjson.GetBytes(resp.Payload, "choices.0.message.content").String(); gotText != "vision ok" {
+		t.Fatalf("response text = %q, want vision ok; payload=%s", gotText, string(resp.Payload))
+	}
+}
+
+func TestOpenCodeGoExecutorLeavesTextRequestsOnRequestedModel(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_text","object":"chat.completion","created":1,"model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"text ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	oldBaseURL := opencodeGoBaseURL
+	opencodeGoBaseURL = server.URL + "/zen/go/v1"
+	t.Cleanup(func() { opencodeGoBaseURL = oldBaseURL })
+
+	exec := NewOpenCodeGoExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":               "test-key",
+			"vision_fallback_model": "qwen3.5-plus",
+		},
+	}
+	payload := []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}]}`)
+	if _, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "deepseek-v4-flash",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if gotModel := gjson.GetBytes(gotBody, "model").String(); gotModel != "deepseek-v4-flash" {
+		t.Fatalf("upstream model = %q, want deepseek-v4-flash; body=%s", gotModel, string(gotBody))
+	}
+	if gjson.GetBytes(gotBody, "enable_thinking").Exists() {
+		t.Fatalf("enable_thinking should not be added for text requests; body=%s", string(gotBody))
+	}
+}
+
+func TestOpenCodeGoExecutorIgnoresExcludedVisionFallback(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_excluded","object":"chat.completion","created":1,"model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	oldBaseURL := opencodeGoBaseURL
+	opencodeGoBaseURL = server.URL + "/zen/go/v1"
+	t.Cleanup(func() { opencodeGoBaseURL = oldBaseURL })
+
+	exec := NewOpenCodeGoExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":               "test-key",
+			"vision_fallback_model": "qwen3.5-plus",
+			"excluded_models":       "qwen3.5-plus",
+		},
+	}
+	payload := []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":[{"type":"text","text":"what is this?"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]}]}`)
+	if _, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "deepseek-v4-flash",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if gotModel := gjson.GetBytes(gotBody, "model").String(); gotModel != "deepseek-v4-flash" {
+		t.Fatalf("upstream model = %q, want deepseek-v4-flash; body=%s", gotModel, string(gotBody))
+	}
+}
+
+func TestOpenCodeGoExecutorIgnoresNonVisionFallback(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_nonvision","object":"chat.completion","created":1,"model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	oldBaseURL := opencodeGoBaseURL
+	opencodeGoBaseURL = server.URL + "/zen/go/v1"
+	t.Cleanup(func() { opencodeGoBaseURL = oldBaseURL })
+
+	exec := NewOpenCodeGoExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":               "test-key",
+			"vision_fallback_model": "deepseek-v4-pro",
+		},
+	}
+	payload := []byte(`{"model":"deepseek-v4-flash","messages":[{"role":"user","content":[{"type":"text","text":"what is this?"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]}]}`)
+	if _, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "deepseek-v4-flash",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if gotModel := gjson.GetBytes(gotBody, "model").String(); gotModel != "deepseek-v4-flash" {
+		t.Fatalf("upstream model = %q, want deepseek-v4-flash; body=%s", gotModel, string(gotBody))
+	}
+}
+
 func TestOpenCodeGoExecutorRoutesMiniMaxModelsToMessages(t *testing.T) {
 	var gotPath, gotAuth string
 	var gotBody []byte
