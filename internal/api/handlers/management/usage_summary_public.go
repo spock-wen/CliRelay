@@ -23,6 +23,7 @@ type usageStatsBody struct {
 
 // GetPublicUsageSummary returns today's call count and quota cost for an API key.
 // This is a lightweight endpoint designed for CC Switch Provider card polling.
+// `found` reflects API Key existence (not disabled), not whether it was used today.
 func (h *Handler) GetPublicUsageSummary(c *gin.Context) {
 	apiKey := ""
 	var req publicLookupRequest
@@ -47,9 +48,6 @@ func (h *Handler) GetPublicUsageSummary(c *gin.Context) {
 	}
 
 	if apiKey == "" {
-		apiKey = strings.TrimSpace(c.Query("api_key"))
-	}
-	if apiKey == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "api_key parameter is required"})
 		return
 	}
@@ -60,8 +58,11 @@ func (h *Handler) GetPublicUsageSummary(c *gin.Context) {
 		return
 	}
 
+	row := usage.GetAPIKey(apiKey)
+	found := row != nil && !row.Disabled
+
 	resp := usageSummaryResponse{
-		Found: stats.Total > 0,
+		Found: found,
 		Range: "today",
 		Stats: usageStatsBody{
 			TotalCalls: stats.Total,
