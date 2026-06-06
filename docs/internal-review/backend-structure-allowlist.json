@@ -3,7 +3,7 @@
     "allow_above_1200": [
       {
         "path": "internal/api/handlers/management/config_lists.go",
-        "max_lines": 2307,
+        "max_lines": 2184,
         "reason": "Phase 1/2 legacy management config-list debt; move settings/API-key/provider-key use cases behind services and DB-first stores."
       },
       {
