@@ -22,12 +22,12 @@ docs/internal-review/backend-structure-allowlist.json
 
 | 指标 | 数量 |
 | --- | ---: |
-| Go 文件总数 | 598 |
-| 生产 Go 文件 | 412 |
-| 测试 Go 文件 | 186 |
-| `internal/` Go 文件 | 475 |
-| `internal/` 生产 Go 文件 | 341 |
-| `internal/` 测试 Go 文件 | 134 |
+| Go 文件总数 | 600 |
+| 生产 Go 文件 | 413 |
+| 测试 Go 文件 | 187 |
+| `internal/` Go 文件 | 477 |
+| `internal/` 生产 Go 文件 | 342 |
+| `internal/` 测试 Go 文件 | 135 |
 | 生产 Go 文件中 `>800` 行 | 26 |
 | 生产 Go 文件中 `>1200` 行 | 14 |
 | `internal/` 生产 Go 文件中 `>800` 行 | 23 |
@@ -45,7 +45,7 @@ docs/internal-review/backend-structure-allowlist.json
 
 | 文件 | 行数 | 治理阶段 |
 | --- | ---: | --- |
-| `internal/api/handlers/management/auth_files.go` | 2497 | Phase 1 |
+| `internal/api/handlers/management/auth_files.go` | 2441 | Phase 1 |
 | `sdk/cliproxy/auth/conductor.go` | 3223 | Phase 5 |
 | `internal/usage/usage_db.go` | 2530 | Phase 3 |
 | `internal/api/handlers/management/config_lists.go` | 2307 | Phase 1/2 |

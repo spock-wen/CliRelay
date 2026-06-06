@@ -350,16 +350,12 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 
 // Download single auth file by name
 func (h *Handler) DownloadAuthFile(c *gin.Context) {
-	name := c.Query("name")
-	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
-		c.JSON(400, gin.H{"error": "invalid name"})
+	name, errValidate := managementauthfiles.ValidateFileQueryName(c.Query("name"), true)
+	if errValidate != nil {
+		c.JSON(400, gin.H{"error": errValidate.Error()})
 		return
 	}
-	if !strings.HasSuffix(strings.ToLower(name), ".json") {
-		c.JSON(400, gin.H{"error": "name must end with .json"})
-		return
-	}
-	full := filepath.Join(h.cfg.AuthDir, name)
+	full := managementauthfiles.FilePath(h.cfg.AuthDir, name)
 	_, err := os.Stat(full)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -397,17 +393,12 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "file too large"})
 			return
 		}
-		name := filepath.Base(file.Filename)
-		if !strings.HasSuffix(strings.ToLower(name), ".json") {
-			c.JSON(400, gin.H{"error": "file must be .json"})
+		name, errValidate := managementauthfiles.ValidateUploadedFileName(file.Filename)
+		if errValidate != nil {
+			c.JSON(400, gin.H{"error": errValidate.Error()})
 			return
 		}
-		dst := filepath.Join(h.cfg.AuthDir, name)
-		if !filepath.IsAbs(dst) {
-			if abs, errAbs := filepath.Abs(dst); errAbs == nil {
-				dst = abs
-			}
-		}
+		dst := managementauthfiles.FilePath(h.cfg.AuthDir, name)
 		if errSave := c.SaveUploadedFile(file, dst); errSave != nil {
 			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to save file: %v", errSave)})
 			return
@@ -428,13 +419,9 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 		return
 	}
-	name := c.Query("name")
-	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
-		c.JSON(400, gin.H{"error": "invalid name"})
-		return
-	}
-	if !strings.HasSuffix(strings.ToLower(name), ".json") {
-		c.JSON(400, gin.H{"error": "name must end with .json"})
+	name, errValidate := managementauthfiles.ValidateFileQueryName(c.Query("name"), true)
+	if errValidate != nil {
+		c.JSON(400, gin.H{"error": errValidate.Error()})
 		return
 	}
 	data, err := bodyutil.ReadRequestBody(c, bodyutil.AuthFileBodyLimit)
@@ -446,12 +433,7 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
 	}
-	dst := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
-	if !filepath.IsAbs(dst) {
-		if abs, errAbs := filepath.Abs(dst); errAbs == nil {
-			dst = abs
-		}
-	}
+	dst := managementauthfiles.FilePath(h.cfg.AuthDir, name)
 	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to write file: %v", errWrite)})
 		return
@@ -474,7 +456,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		return
 	}
 	ctx := c.Request.Context()
-	if all := c.Query("all"); all == "true" || all == "1" || all == "*" {
+	if managementauthfiles.IsDeleteAllValue(c.Query("all")) {
 		entries, err := os.ReadDir(h.cfg.AuthDir)
 		if err != nil {
 			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
@@ -486,15 +468,10 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 				continue
 			}
 			name := e.Name()
-			if !strings.HasSuffix(strings.ToLower(name), ".json") {
+			if !managementauthfiles.IsJSONFileName(name) {
 				continue
 			}
-			full := filepath.Join(h.cfg.AuthDir, name)
-			if !filepath.IsAbs(full) {
-				if abs, errAbs := filepath.Abs(full); errAbs == nil {
-					full = abs
-				}
-			}
+			full := managementauthfiles.FilePath(h.cfg.AuthDir, name)
 			deletedChannels := deletedAuthChannelIdentifiers(h.findAuthByNameOrID(name))
 			if err = os.Remove(full); err == nil {
 				if errDel := h.deleteTokenRecord(ctx, full); errDel != nil {
@@ -512,17 +489,12 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok", "deleted": deleted})
 		return
 	}
-	name := c.Query("name")
-	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
-		c.JSON(400, gin.H{"error": "invalid name"})
+	name, errValidate := managementauthfiles.ValidateFileQueryName(c.Query("name"), false)
+	if errValidate != nil {
+		c.JSON(400, gin.H{"error": errValidate.Error()})
 		return
 	}
-	full := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
-	if !filepath.IsAbs(full) {
-		if abs, errAbs := filepath.Abs(full); errAbs == nil {
-			full = abs
-		}
-	}
+	full := managementauthfiles.FilePath(h.cfg.AuthDir, name)
 	deletedChannels := deletedAuthChannelIdentifiers(h.findAuthByNameOrID(name))
 	if err := os.Remove(full); err != nil {
 		if os.IsNotExist(err) {
@@ -581,38 +553,10 @@ func deletedAuthChannelIdentifiers(auth *coreauth.Auth) []string {
 }
 
 func (h *Handler) authIDForPath(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return ""
-	}
 	if h == nil || h.cfg == nil {
-		return filepath.Clean(path)
+		return managementauthfiles.AuthIDForPath("", path)
 	}
-	authDir, errResolve := util.ResolveAuthDir(h.cfg.AuthDir)
-	if errResolve != nil || strings.TrimSpace(authDir) == "" {
-		return filepath.Clean(path)
-	}
-	if !filepath.IsAbs(authDir) {
-		if abs, errAbs := filepath.Abs(authDir); errAbs == nil {
-			authDir = abs
-		}
-	}
-	if evaluated, errEval := filepath.EvalSymlinks(authDir); errEval == nil {
-		authDir = evaluated
-	}
-	normalizedPath := filepath.Clean(path)
-	if !filepath.IsAbs(normalizedPath) {
-		if abs, errAbs := filepath.Abs(normalizedPath); errAbs == nil {
-			normalizedPath = abs
-		}
-	}
-	if evaluated, errEval := filepath.EvalSymlinks(normalizedPath); errEval == nil {
-		normalizedPath = evaluated
-	}
-	if rel, err := filepath.Rel(authDir, normalizedPath); err == nil && rel != "" && rel != "." && !strings.HasPrefix(rel, "..") {
-		return rel
-	}
-	return normalizedPath
+	return managementauthfiles.AuthIDForPath(h.cfg.AuthDir, path)
 }
 
 func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []byte) error {
