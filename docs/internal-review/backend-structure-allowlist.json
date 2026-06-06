@@ -8,7 +8,7 @@
       },
       {
         "path": "internal/api/server.go",
-        "max_lines": 2090,
+        "max_lines": 1851,
         "reason": "Phase 6 legacy server wiring debt; split routes, middleware, management panel, keep-alive, and reload logic."
       },
       {
