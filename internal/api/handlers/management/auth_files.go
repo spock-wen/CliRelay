@@ -725,36 +725,14 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 			defer oauthcallback.StopInstance(ctx, callbackPort, forwarder)
 		}
 
-		// Helper: wait for callback file
-		waitFile := filepath.Join(h.cfg.AuthDir, fmt.Sprintf(".oauth-anthropic-%s.oauth", state))
-		waitForFile := func(path string, timeout time.Duration) (map[string]string, error) {
-			deadline := time.Now().Add(timeout)
-			for {
-				if !IsOAuthSessionPending(state, "anthropic") {
-					return nil, errOAuthSessionNotPending
-				}
-				if time.Now().After(deadline) {
-					SetOAuthSessionError(state, "Timeout waiting for OAuth callback")
-					return nil, fmt.Errorf("timeout waiting for OAuth callback")
-				}
-				data, errRead := os.ReadFile(path)
-				if errRead == nil {
-					var m map[string]string
-					_ = json.Unmarshal(data, &m)
-					_ = os.Remove(path)
-					return m, nil
-				}
-				time.Sleep(500 * time.Millisecond)
-			}
-		}
-
 		fmt.Println("Waiting for authentication callback...")
 		// Keep the callback waiter alive for the full session lifetime.
-		resultMap, errWait := waitForFile(waitFile, oauthCallbackWaitTimeout)
+		resultMap, errWait := WaitOAuthCallbackFile(h.cfg.AuthDir, "anthropic", state, oauthCallbackWaitTimeout)
 		if errWait != nil {
 			if errors.Is(errWait, errOAuthSessionNotPending) {
 				return
 			}
+			SetOAuthSessionError(state, "Timeout waiting for OAuth callback")
 			authErr := claude.NewAuthenticationError(claude.ErrCallbackTimeout, errWait)
 			log.Error(claude.GetUserFriendlyMessage(authErr))
 			return
