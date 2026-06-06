@@ -144,3 +144,113 @@ func TestVertexCompatKeysNormalizePatchAndDelete(t *testing.T) {
 		t.Fatalf("VertexCompatAPIKey after delete = %#v, want empty", cfg.VertexCompatAPIKey)
 	}
 }
+
+func TestGeminiKeysReplacePatchDeleteAndRollback(t *testing.T) {
+	validationErr := errors.New("invalid channel")
+	cfg := &config.Config{
+		GeminiKey: []config.GeminiKey{{APIKey: "existing"}},
+	}
+	svc := NewService(cfg, func() error { return validationErr })
+
+	err := svc.ReplaceGeminiKeys([]config.GeminiKey{{APIKey: " next "}})
+	if !errors.Is(err, validationErr) {
+		t.Fatalf("ReplaceGeminiKeys() error = %v, want validation error", err)
+	}
+	if got := cfg.GeminiKey; len(got) != 1 || got[0].APIKey != "existing" {
+		t.Fatalf("GeminiKey after rollback = %#v, want existing entry", got)
+	}
+
+	svc = NewService(cfg, nil)
+	err = svc.ReplaceGeminiKeys([]config.GeminiKey{{APIKey: " next ", Prefix: " /team/ ", ProxyURL: " http://proxy.example "}})
+	if err != nil {
+		t.Fatalf("ReplaceGeminiKeys() error = %v, want nil", err)
+	}
+	if got := cfg.GeminiKey[0]; got.APIKey != "next" || got.Prefix != "team" || got.ProxyURL != "http://proxy.example" {
+		t.Fatalf("normalized gemini key = %#v", got)
+	}
+
+	match := " next "
+	emptyAPIKey := " "
+	err = svc.PatchGeminiKey(nil, &match, GeminiKeyPatch{APIKey: &emptyAPIKey})
+	if err != nil {
+		t.Fatalf("PatchGeminiKey(delete) error = %v, want nil", err)
+	}
+	if len(cfg.GeminiKey) != 0 {
+		t.Fatalf("GeminiKey after delete = %#v, want empty", cfg.GeminiKey)
+	}
+}
+
+func TestClaudeKeysReplacePatchAndDelete(t *testing.T) {
+	cfg := &config.Config{}
+	svc := NewService(cfg, nil)
+
+	err := svc.ReplaceClaudeKeys([]config.ClaudeKey{
+		{Name: "oauth-row", APIKey: ""},
+		{
+			Name:    " claude ",
+			APIKey:  " sk-claude ",
+			BaseURL: " https://claude.example ",
+			Models:  []config.ClaudeModel{{Name: " claude-sonnet-4 ", Alias: " sonnet "}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ReplaceClaudeKeys() error = %v, want nil", err)
+	}
+	if len(cfg.ClaudeKey) != 1 {
+		t.Fatalf("ClaudeKey len = %d, want 1", len(cfg.ClaudeKey))
+	}
+	if got := cfg.ClaudeKey[0]; got.Name != "claude" || got.APIKey != "sk-claude" || got.BaseURL != "https://claude.example" {
+		t.Fatalf("normalized claude key = %#v", got)
+	}
+
+	match := "sk-claude"
+	blankAPIKey := " "
+	err = svc.PatchClaudeKey(nil, &match, ClaudeKeyPatch{APIKey: &blankAPIKey})
+	if err != nil {
+		t.Fatalf("PatchClaudeKey(blank api key) error = %v, want nil", err)
+	}
+	if len(cfg.ClaudeKey) != 0 {
+		t.Fatalf("ClaudeKey after blank api key patch = %#v, want empty", cfg.ClaudeKey)
+	}
+}
+
+func TestCodexKeysReplacePatchDeleteAndRollback(t *testing.T) {
+	validationErr := errors.New("channel conflict")
+	cfg := &config.Config{
+		CodexKey: []config.CodexKey{{APIKey: "existing", BaseURL: "https://old.example"}},
+	}
+	svc := NewService(cfg, func() error { return validationErr })
+
+	err := svc.ReplaceCodexKeys([]config.CodexKey{{APIKey: "next", BaseURL: "https://new.example"}})
+	if !errors.Is(err, validationErr) {
+		t.Fatalf("ReplaceCodexKeys() error = %v, want validation error", err)
+	}
+	if got := cfg.CodexKey; len(got) != 1 || got[0].APIKey != "existing" {
+		t.Fatalf("CodexKey after rollback = %#v, want existing entry", got)
+	}
+
+	svc = NewService(cfg, nil)
+	err = svc.ReplaceCodexKeys([]config.CodexKey{
+		{APIKey: "next", BaseURL: " https://codex.example ", ProxyURL: " http://proxy.example "},
+		{APIKey: "drop", BaseURL: " "},
+	})
+	if err != nil {
+		t.Fatalf("ReplaceCodexKeys() error = %v, want nil", err)
+	}
+	if len(cfg.CodexKey) != 1 {
+		t.Fatalf("CodexKey len = %d, want 1", len(cfg.CodexKey))
+	}
+	if got := cfg.CodexKey[0]; got.BaseURL != "https://codex.example" || got.ProxyURL != "http://proxy.example" {
+		t.Fatalf("normalized codex key = %#v", got)
+	}
+
+	match := "next"
+	emptyBaseURL := " "
+	err = svc.PatchCodexKey(nil, &match, CodexKeyPatch{BaseURL: &emptyBaseURL})
+	if err != nil {
+		t.Fatalf("PatchCodexKey(delete) error = %v, want nil", err)
+	}
+	if len(cfg.CodexKey) != 0 {
+		t.Fatalf("CodexKey after delete = %#v, want empty", cfg.CodexKey)
+	}
+}

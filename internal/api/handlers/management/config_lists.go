@@ -506,7 +506,7 @@ func shouldDeleteAPIKeyLogs(c *gin.Context) bool {
 
 // gemini-api-key: []GeminiKey
 func (h *Handler) GetGeminiKeys(c *gin.Context) {
-	c.JSON(200, gin.H{"gemini-api-key": h.cfg.GeminiKey})
+	c.JSON(200, gin.H{"gemini-api-key": providerSettingsService(h).GeminiKeys()})
 }
 func (h *Handler) PutGeminiKeys(c *gin.Context) {
 	data, err := c.GetRawData()
@@ -525,89 +525,27 @@ func (h *Handler) PutGeminiKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
-	prev := append([]config.GeminiKey(nil), h.cfg.GeminiKey...)
-	h.cfg.GeminiKey = append([]config.GeminiKey(nil), arr...)
-	h.cfg.SanitizeGeminiKeys()
-	if err := h.validateChannelNames(); err != nil {
-		h.cfg.GeminiKey = prev
+	if err := providerSettingsService(h).ReplaceGeminiKeys(arr); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	h.persist(c)
 }
 func (h *Handler) PatchGeminiKey(c *gin.Context) {
-	type geminiKeyPatch struct {
-		APIKey         *string            `json:"api-key"`
-		Prefix         *string            `json:"prefix"`
-		BaseURL        *string            `json:"base-url"`
-		ProxyURL       *string            `json:"proxy-url"`
-		ProxyID        *string            `json:"proxy-id"`
-		Headers        *map[string]string `json:"headers"`
-		ExcludedModels *[]string          `json:"excluded-models"`
-	}
 	var body struct {
-		Index *int            `json:"index"`
-		Match *string         `json:"match"`
-		Value *geminiKeyPatch `json:"value"`
+		Index *int                             `json:"index"`
+		Match *string                          `json:"match"`
+		Value *providersettings.GeminiKeyPatch `json:"value"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-	targetIndex := -1
-	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.GeminiKey) {
-		targetIndex = *body.Index
-	}
-	if targetIndex == -1 && body.Match != nil {
-		match := strings.TrimSpace(*body.Match)
-		if match != "" {
-			for i := range h.cfg.GeminiKey {
-				if h.cfg.GeminiKey[i].APIKey == match {
-					targetIndex = i
-					break
-				}
-			}
-		}
-	}
-	if targetIndex == -1 {
-		c.JSON(404, gin.H{"error": "item not found"})
-		return
-	}
-
-	entry := h.cfg.GeminiKey[targetIndex]
-	if body.Value.APIKey != nil {
-		trimmed := strings.TrimSpace(*body.Value.APIKey)
-		if trimmed == "" {
-			h.cfg.GeminiKey = append(h.cfg.GeminiKey[:targetIndex], h.cfg.GeminiKey[targetIndex+1:]...)
-			h.cfg.SanitizeGeminiKeys()
-			h.persist(c)
+	if err := providerSettingsService(h).PatchGeminiKey(body.Index, body.Match, *body.Value); err != nil {
+		if errors.Is(err, providersettings.ErrItemNotFound) {
+			c.JSON(404, gin.H{"error": "item not found"})
 			return
 		}
-		entry.APIKey = trimmed
-	}
-	if body.Value.Prefix != nil {
-		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
-	}
-	if body.Value.BaseURL != nil {
-		entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
-	}
-	if body.Value.ProxyURL != nil {
-		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
-	}
-	if body.Value.ProxyID != nil {
-		entry.ProxyID = strings.TrimSpace(*body.Value.ProxyID)
-	}
-	if body.Value.Headers != nil {
-		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
-	}
-	if body.Value.ExcludedModels != nil {
-		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
-	}
-	prev := append([]config.GeminiKey(nil), h.cfg.GeminiKey...)
-	h.cfg.GeminiKey[targetIndex] = entry
-	h.cfg.SanitizeGeminiKeys()
-	if err := h.validateChannelNames(); err != nil {
-		h.cfg.GeminiKey = prev
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -616,15 +554,7 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 
 func (h *Handler) DeleteGeminiKey(c *gin.Context) {
 	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
-		out := make([]config.GeminiKey, 0, len(h.cfg.GeminiKey))
-		for _, v := range h.cfg.GeminiKey {
-			if v.APIKey != val {
-				out = append(out, v)
-			}
-		}
-		if len(out) != len(h.cfg.GeminiKey) {
-			h.cfg.GeminiKey = out
-			h.cfg.SanitizeGeminiKeys()
+		if providerSettingsService(h).DeleteGeminiKeyByAPIKey(val) {
 			h.persist(c)
 		} else {
 			c.JSON(404, gin.H{"error": "item not found"})
@@ -633,9 +563,7 @@ func (h *Handler) DeleteGeminiKey(c *gin.Context) {
 	}
 	if idxStr := c.Query("index"); idxStr != "" {
 		var idx int
-		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil && idx >= 0 && idx < len(h.cfg.GeminiKey) {
-			h.cfg.GeminiKey = append(h.cfg.GeminiKey[:idx], h.cfg.GeminiKey[idx+1:]...)
-			h.cfg.SanitizeGeminiKeys()
+		if _, err := fmt.Sscanf(idxStr, "%d", &idx); err == nil && providerSettingsService(h).DeleteGeminiKeyByIndex(idx) {
 			h.persist(c)
 			return
 		}
@@ -645,7 +573,7 @@ func (h *Handler) DeleteGeminiKey(c *gin.Context) {
 
 // claude-api-key: []ClaudeKey
 func (h *Handler) GetClaudeKeys(c *gin.Context) {
-	c.JSON(200, gin.H{"claude-api-key": h.cfg.ClaudeKey})
+	c.JSON(200, gin.H{"claude-api-key": providerSettingsService(h).ClaudeKeys()})
 }
 func (h *Handler) PutClaudeKeys(c *gin.Context) {
 	data, err := c.GetRawData()
@@ -664,92 +592,27 @@ func (h *Handler) PutClaudeKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
-	for i := range arr {
-		normalizeClaudeKey(&arr[i])
-	}
-	prev := append([]config.ClaudeKey(nil), h.cfg.ClaudeKey...)
-	h.cfg.ClaudeKey = arr
-	h.cfg.SanitizeClaudeKeys()
-	if err := h.validateChannelNames(); err != nil {
-		h.cfg.ClaudeKey = prev
+	if err := providerSettingsService(h).ReplaceClaudeKeys(arr); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	h.persist(c)
 }
 func (h *Handler) PatchClaudeKey(c *gin.Context) {
-	type claudeKeyPatch struct {
-		Name           *string               `json:"name"`
-		APIKey         *string               `json:"api-key"`
-		Prefix         *string               `json:"prefix"`
-		BaseURL        *string               `json:"base-url"`
-		ProxyURL       *string               `json:"proxy-url"`
-		ProxyID        *string               `json:"proxy-id"`
-		Models         *[]config.ClaudeModel `json:"models"`
-		Headers        *map[string]string    `json:"headers"`
-		ExcludedModels *[]string             `json:"excluded-models"`
-	}
 	var body struct {
-		Index *int            `json:"index"`
-		Match *string         `json:"match"`
-		Value *claudeKeyPatch `json:"value"`
+		Index *int                             `json:"index"`
+		Match *string                          `json:"match"`
+		Value *providersettings.ClaudeKeyPatch `json:"value"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-	targetIndex := -1
-	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.ClaudeKey) {
-		targetIndex = *body.Index
-	}
-	if targetIndex == -1 && body.Match != nil {
-		match := strings.TrimSpace(*body.Match)
-		for i := range h.cfg.ClaudeKey {
-			if h.cfg.ClaudeKey[i].APIKey == match {
-				targetIndex = i
-				break
-			}
+	if err := providerSettingsService(h).PatchClaudeKey(body.Index, body.Match, *body.Value); err != nil {
+		if errors.Is(err, providersettings.ErrItemNotFound) {
+			c.JSON(404, gin.H{"error": "item not found"})
+			return
 		}
-	}
-	if targetIndex == -1 {
-		c.JSON(404, gin.H{"error": "item not found"})
-		return
-	}
-
-	entry := h.cfg.ClaudeKey[targetIndex]
-	if body.Value.Name != nil {
-		entry.Name = strings.TrimSpace(*body.Value.Name)
-	}
-	if body.Value.APIKey != nil {
-		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
-	}
-	if body.Value.Prefix != nil {
-		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
-	}
-	if body.Value.BaseURL != nil {
-		entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
-	}
-	if body.Value.ProxyURL != nil {
-		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
-	}
-	if body.Value.ProxyID != nil {
-		entry.ProxyID = strings.TrimSpace(*body.Value.ProxyID)
-	}
-	if body.Value.Models != nil {
-		entry.Models = append([]config.ClaudeModel(nil), (*body.Value.Models)...)
-	}
-	if body.Value.Headers != nil {
-		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
-	}
-	if body.Value.ExcludedModels != nil {
-		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
-	}
-	normalizeClaudeKey(&entry)
-	prev := append([]config.ClaudeKey(nil), h.cfg.ClaudeKey...)
-	h.cfg.ClaudeKey[targetIndex] = entry
-	h.cfg.SanitizeClaudeKeys()
-	if err := h.validateChannelNames(); err != nil {
-		h.cfg.ClaudeKey = prev
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -758,23 +621,14 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 
 func (h *Handler) DeleteClaudeKey(c *gin.Context) {
 	if val := c.Query("api-key"); val != "" {
-		out := make([]config.ClaudeKey, 0, len(h.cfg.ClaudeKey))
-		for _, v := range h.cfg.ClaudeKey {
-			if v.APIKey != val {
-				out = append(out, v)
-			}
-		}
-		h.cfg.ClaudeKey = out
-		h.cfg.SanitizeClaudeKeys()
+		providerSettingsService(h).DeleteClaudeKeyByAPIKey(val)
 		h.persist(c)
 		return
 	}
 	if idxStr := c.Query("index"); idxStr != "" {
 		var idx int
 		_, err := fmt.Sscanf(idxStr, "%d", &idx)
-		if err == nil && idx >= 0 && idx < len(h.cfg.ClaudeKey) {
-			h.cfg.ClaudeKey = append(h.cfg.ClaudeKey[:idx], h.cfg.ClaudeKey[idx+1:]...)
-			h.cfg.SanitizeClaudeKeys()
+		if err == nil && providerSettingsService(h).DeleteClaudeKeyByIndex(idx) {
 			h.persist(c)
 			return
 		}
@@ -1438,7 +1292,7 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 
 // codex-api-key: []CodexKey
 func (h *Handler) GetCodexKeys(c *gin.Context) {
-	c.JSON(200, gin.H{"codex-api-key": h.cfg.CodexKey})
+	c.JSON(200, gin.H{"codex-api-key": providerSettingsService(h).CodexKeys()})
 }
 func (h *Handler) PutCodexKeys(c *gin.Context) {
 	data, err := c.GetRawData()
@@ -1457,102 +1311,27 @@ func (h *Handler) PutCodexKeys(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
-	// Filter out codex entries with empty base-url (treat as removed)
-	filtered := make([]config.CodexKey, 0, len(arr))
-	for i := range arr {
-		entry := arr[i]
-		normalizeCodexKey(&entry)
-		if entry.BaseURL == "" {
-			continue
-		}
-		filtered = append(filtered, entry)
-	}
-	prev := append([]config.CodexKey(nil), h.cfg.CodexKey...)
-	h.cfg.CodexKey = filtered
-	h.cfg.SanitizeCodexKeys()
-	if err := h.validateChannelNames(); err != nil {
-		h.cfg.CodexKey = prev
+	if err := providerSettingsService(h).ReplaceCodexKeys(arr); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	h.persist(c)
 }
 func (h *Handler) PatchCodexKey(c *gin.Context) {
-	type codexKeyPatch struct {
-		APIKey         *string              `json:"api-key"`
-		Prefix         *string              `json:"prefix"`
-		BaseURL        *string              `json:"base-url"`
-		ProxyURL       *string              `json:"proxy-url"`
-		ProxyID        *string              `json:"proxy-id"`
-		Models         *[]config.CodexModel `json:"models"`
-		Headers        *map[string]string   `json:"headers"`
-		ExcludedModels *[]string            `json:"excluded-models"`
-	}
 	var body struct {
-		Index *int           `json:"index"`
-		Match *string        `json:"match"`
-		Value *codexKeyPatch `json:"value"`
+		Index *int                            `json:"index"`
+		Match *string                         `json:"match"`
+		Value *providersettings.CodexKeyPatch `json:"value"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
-	targetIndex := -1
-	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.CodexKey) {
-		targetIndex = *body.Index
-	}
-	if targetIndex == -1 && body.Match != nil {
-		match := strings.TrimSpace(*body.Match)
-		for i := range h.cfg.CodexKey {
-			if h.cfg.CodexKey[i].APIKey == match {
-				targetIndex = i
-				break
-			}
-		}
-	}
-	if targetIndex == -1 {
-		c.JSON(404, gin.H{"error": "item not found"})
-		return
-	}
-
-	entry := h.cfg.CodexKey[targetIndex]
-	if body.Value.APIKey != nil {
-		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
-	}
-	if body.Value.Prefix != nil {
-		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
-	}
-	if body.Value.BaseURL != nil {
-		trimmed := strings.TrimSpace(*body.Value.BaseURL)
-		if trimmed == "" {
-			h.cfg.CodexKey = append(h.cfg.CodexKey[:targetIndex], h.cfg.CodexKey[targetIndex+1:]...)
-			h.cfg.SanitizeCodexKeys()
-			h.persist(c)
+	if err := providerSettingsService(h).PatchCodexKey(body.Index, body.Match, *body.Value); err != nil {
+		if errors.Is(err, providersettings.ErrItemNotFound) {
+			c.JSON(404, gin.H{"error": "item not found"})
 			return
 		}
-		entry.BaseURL = trimmed
-	}
-	if body.Value.ProxyURL != nil {
-		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
-	}
-	if body.Value.ProxyID != nil {
-		entry.ProxyID = strings.TrimSpace(*body.Value.ProxyID)
-	}
-	if body.Value.Models != nil {
-		entry.Models = append([]config.CodexModel(nil), (*body.Value.Models)...)
-	}
-	if body.Value.Headers != nil {
-		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
-	}
-	if body.Value.ExcludedModels != nil {
-		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
-	}
-	normalizeCodexKey(&entry)
-	prev := append([]config.CodexKey(nil), h.cfg.CodexKey...)
-	h.cfg.CodexKey[targetIndex] = entry
-	h.cfg.SanitizeCodexKeys()
-	if err := h.validateChannelNames(); err != nil {
-		h.cfg.CodexKey = prev
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -1561,23 +1340,14 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 
 func (h *Handler) DeleteCodexKey(c *gin.Context) {
 	if val := c.Query("api-key"); val != "" {
-		out := make([]config.CodexKey, 0, len(h.cfg.CodexKey))
-		for _, v := range h.cfg.CodexKey {
-			if v.APIKey != val {
-				out = append(out, v)
-			}
-		}
-		h.cfg.CodexKey = out
-		h.cfg.SanitizeCodexKeys()
+		providerSettingsService(h).DeleteCodexKeyByAPIKey(val)
 		h.persist(c)
 		return
 	}
 	if idxStr := c.Query("index"); idxStr != "" {
 		var idx int
 		_, err := fmt.Sscanf(idxStr, "%d", &idx)
-		if err == nil && idx >= 0 && idx < len(h.cfg.CodexKey) {
-			h.cfg.CodexKey = append(h.cfg.CodexKey[:idx], h.cfg.CodexKey[idx+1:]...)
-			h.cfg.SanitizeCodexKeys()
+		if err == nil && providerSettingsService(h).DeleteCodexKeyByIndex(idx) {
 			h.persist(c)
 			return
 		}
@@ -1617,33 +1387,6 @@ func normalizedOpenCodeGoKeyEntries(entries []config.OpenCodeGoKey) []config.Ope
 	return out
 }
 
-func normalizeClaudeKey(entry *config.ClaudeKey) {
-	if entry == nil {
-		return
-	}
-	entry.Name = strings.TrimSpace(entry.Name)
-	entry.APIKey = strings.TrimSpace(entry.APIKey)
-	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
-	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
-	entry.ProxyID = strings.TrimSpace(entry.ProxyID)
-	entry.Headers = config.NormalizeHeaders(entry.Headers)
-	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
-	if len(entry.Models) == 0 {
-		return
-	}
-	normalized := make([]config.ClaudeModel, 0, len(entry.Models))
-	for i := range entry.Models {
-		model := entry.Models[i]
-		model.Name = strings.TrimSpace(model.Name)
-		model.Alias = strings.TrimSpace(model.Alias)
-		if model.Name == "" && model.Alias == "" {
-			continue
-		}
-		normalized = append(normalized, model)
-	}
-	entry.Models = normalized
-}
-
 func normalizeBedrockKey(entry *config.BedrockKey) {
 	if entry == nil {
 		return
@@ -1665,33 +1408,6 @@ func normalizeBedrockKey(entry *config.BedrockKey) {
 		return
 	}
 	normalized := make([]config.BedrockModel, 0, len(entry.Models))
-	for i := range entry.Models {
-		model := entry.Models[i]
-		model.Name = strings.TrimSpace(model.Name)
-		model.Alias = strings.TrimSpace(model.Alias)
-		if model.Name == "" && model.Alias == "" {
-			continue
-		}
-		normalized = append(normalized, model)
-	}
-	entry.Models = normalized
-}
-
-func normalizeCodexKey(entry *config.CodexKey) {
-	if entry == nil {
-		return
-	}
-	entry.APIKey = strings.TrimSpace(entry.APIKey)
-	entry.Prefix = strings.TrimSpace(entry.Prefix)
-	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
-	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
-	entry.ProxyID = strings.TrimSpace(entry.ProxyID)
-	entry.Headers = config.NormalizeHeaders(entry.Headers)
-	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
-	if len(entry.Models) == 0 {
-		return
-	}
-	normalized := make([]config.CodexModel, 0, len(entry.Models))
 	for i := range entry.Models {
 		model := entry.Models[i]
 		model.Name = strings.TrimSpace(model.Name)
