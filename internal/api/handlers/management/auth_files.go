@@ -233,40 +233,21 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 	c.JSON(200, gin.H{"status": "ok"})
 }
 
-func (h *Handler) findAuthByNameOrID(name string) *coreauth.Auth {
-	if h == nil {
-		return nil
-	}
-	return managementauthfiles.FindByNameOrID(h.authManager, name)
-}
-
-func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []byte) error {
-	if h.authManager == nil {
-		return nil
-	}
-	authDir := ""
-	if h.cfg != nil {
-		authDir = h.cfg.AuthDir
-	}
-	return managementauthfiles.Registrar{
-		Manager: h.authManager,
-		AuthDir: authDir,
-	}.RegisterFile(ctx, path, data)
-}
-
 func newAuthFileUploadService(h *Handler) managementauthfiles.UploadService {
 	authDir := ""
+	repository := managementauthfiles.Repository{}
 	if h != nil && h.cfg != nil {
 		authDir = h.cfg.AuthDir
 	}
 	var manager *coreauth.Manager
 	if h != nil {
 		manager = h.authManager
+		repository = h.authFileRepository()
 	}
 	return managementauthfiles.UploadService{
 		AuthDir:    authDir,
 		Manager:    manager,
-		Repository: h.authFileRepository(),
+		Repository: repository,
 	}
 }
 
@@ -283,7 +264,8 @@ func writeAuthFileUploadError(c *gin.Context, err error) {
 
 // PatchAuthFileStatus toggles the disabled state of an auth file
 func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
-	if h.authManager == nil {
+	service := newAuthFilePatchService(h)
+	if !service.Available() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
 	}
@@ -297,40 +279,22 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 		return
 	}
 
-	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
-		return
-	}
-	if req.Disabled == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "disabled is required"})
-		return
-	}
-
-	ctx := c.Request.Context()
-
-	targetAuth := h.findAuthByNameOrID(name)
-	if targetAuth == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+	result, errPatch := service.PatchStatus(c.Request.Context(), managementauthfiles.StatusPatch{
+		Name:     req.Name,
+		Disabled: req.Disabled,
+	})
+	if errPatch != nil {
+		writeAuthFilePatchError(c, errPatch)
 		return
 	}
 
-	if errPatch := managementauthfiles.ApplyStatusPatch(targetAuth, *req.Disabled, time.Now()); errPatch != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errPatch.Error()})
-		return
-	}
-
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": result.Disabled})
 }
 
 // PatchAuthFileFields updates editable fields of an auth file.
 func (h *Handler) PatchAuthFileFields(c *gin.Context) {
-	if h.authManager == nil {
+	service := newAuthFilePatchService(h)
+	if !service.Available() {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
 		return
 	}
@@ -341,46 +305,48 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		return
 	}
 
-	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+	if errPatch := service.PatchFields(c.Request.Context(), req); errPatch != nil {
+		writeAuthFilePatchError(c, errPatch)
 		return
-	}
-
-	ctx := c.Request.Context()
-
-	targetAuth := h.findAuthByNameOrID(name)
-	if targetAuth == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
-		return
-	}
-
-	patchResult, errPatch := managementauthfiles.ApplyFieldPatch(targetAuth, req, managementauthfiles.FieldPatchOptions{
-		ValidateLabel: h.validateAuthChannelName,
-	})
-	if errPatch != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errPatch.Error()})
-		return
-	}
-
-	if _, err := h.authManager.Update(ctx, targetAuth); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", err)})
-		return
-	}
-	if path := strings.TrimSpace(managementauthfiles.Attribute(targetAuth, "path")); path != "" {
-		if err := h.persistAuthFileChange(ctx, "Update auth "+targetAuth.FileName, path); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-	}
-	if len(patchResult.OldChannelIdentifiers) > 0 {
-		if err := h.renameChannelReferences(patchResult.OldChannelIdentifiers, patchResult.NewChannelLabel); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func newAuthFilePatchService(h *Handler) managementauthfiles.PatchService {
+	var manager *coreauth.Manager
+	repository := managementauthfiles.Repository{}
+	var validateLabel func(label, excludeAuthID string) (string, error)
+	var renameChannels func(oldNames []string, newName string) error
+	if h != nil {
+		manager = h.authManager
+		repository = h.authFileRepository()
+		validateLabel = h.validateAuthChannelName
+		renameChannels = h.renameChannelReferences
+	}
+	return managementauthfiles.PatchService{
+		Manager:        manager,
+		Repository:     repository,
+		ValidateLabel:  validateLabel,
+		RenameChannels: renameChannels,
+	}
+}
+
+func writeAuthFilePatchError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, managementauthfiles.ErrAuthManagerUnavailable):
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+	case errors.Is(err, managementauthfiles.ErrNameRequired):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+	case errors.Is(err, managementauthfiles.ErrDisabledRequired):
+		c.JSON(http.StatusBadRequest, gin.H{"error": "disabled is required"})
+	case errors.Is(err, managementauthfiles.ErrAuthFileNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
+	case managementauthfiles.IsInternalPatchError(err):
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	}
 }
 
 func (h *Handler) authFileRepository() managementauthfiles.Repository {
@@ -401,10 +367,6 @@ func (h *Handler) authFileRepository() managementauthfiles.Repository {
 		BaseDir:      baseDir,
 		PostAuthHook: h.postAuthHook,
 	}
-}
-
-func (h *Handler) persistAuthFileChange(ctx context.Context, message string, paths ...string) error {
-	return h.authFileRepository().PersistChange(ctx, message, paths...)
 }
 
 func (h *Handler) saveTokenRecord(ctx context.Context, record *coreauth.Auth) (string, error) {

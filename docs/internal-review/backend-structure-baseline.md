@@ -18,22 +18,22 @@ docs/internal-review/backend-structure-allowlist.json
 
 ## 当前结构指标
 
-基于 2026-06-06 Phase 1 auth files upload service 拆分后的基线：
+基于 2026-06-06 Phase 1 auth files patch service 拆分后的基线：
 
 | 指标 | 数量 |
 | --- | ---: |
-| Go 文件总数 | 652 |
-| 生产 Go 文件 | 439 |
-| 测试 Go 文件 | 213 |
-| `internal/` Go 文件 | 529 |
-| `internal/` 生产 Go 文件 | 368 |
-| `internal/` 测试 Go 文件 | 161 |
+| Go 文件总数 | 654 |
+| 生产 Go 文件 | 440 |
+| 测试 Go 文件 | 214 |
+| `internal/` Go 文件 | 531 |
+| `internal/` 生产 Go 文件 | 369 |
+| `internal/` 测试 Go 文件 | 162 |
 | 生产 Go 文件中 `>800` 行 | 25 |
 | 生产 Go 文件中 `>1200` 行 | 13 |
 | `internal/` 生产 Go 文件中 `>800` 行 | 22 |
 | `internal/` 生产 Go 文件中 `>1200` 行 | 11 |
 | 生产 `sdk/**` 中直接导入 `internal/**` 的文件 | 40 |
-| 管理端 `Handler` receiver 方法 | 248 |
+| 管理端 `Handler` receiver 方法 | 245 |
 | `server.go` 内管理路由注册 | 194 |
 | `internal/` 生产目录 | 90 |
 | `internal/` 有同级测试目录 | 45 |
