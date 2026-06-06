@@ -337,93 +337,15 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 }
 
 func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
-	if auth == nil {
-		return nil
-	}
-	auth.EnsureIndex()
-	runtimeOnly := managementauthfiles.IsRuntimeOnly(auth)
-	if runtimeOnly && (auth.Disabled || auth.Status == coreauth.StatusDisabled) {
-		return nil
-	}
-	path := strings.TrimSpace(managementauthfiles.Attribute(auth, "path"))
-	if path == "" && !runtimeOnly {
-		return nil
-	}
-	name := strings.TrimSpace(auth.FileName)
-	if name == "" {
-		name = auth.ID
-	}
-	entry := gin.H{
-		"id":             auth.ID,
-		"auth_index":     auth.Index,
-		"name":           name,
-		"type":           strings.TrimSpace(auth.Provider),
-		"provider":       strings.TrimSpace(auth.Provider),
-		"label":          auth.ChannelName(),
-		"status":         auth.Status,
-		"status_message": auth.StatusMessage,
-		"disabled":       auth.Disabled,
-		"unavailable":    auth.Unavailable,
-		"runtime_only":   runtimeOnly,
-		"source":         "memory",
-		"size":           int64(0),
-	}
-	if email := managementauthfiles.Email(auth); email != "" {
-		entry["email"] = email
-	}
-	if accountType, account := auth.AccountInfo(); accountType != "" || account != "" {
-		if accountType != "" {
-			entry["account_type"] = accountType
-		}
-		if account != "" {
-			entry["account"] = account
-		}
-	}
-	tags := managementauthfiles.BuildTagPayload(auth)
-	entry["default_tags"] = tags.DefaultTags
-	entry["custom_tags"] = tags.CustomTags
-	entry["hidden_default_tags"] = tags.HiddenDefaultTags
-	entry["display_tags"] = tags.DisplayTags
-	if planType := managementauthfiles.NormalizeTagValue(managementauthfiles.MetadataString(auth.Metadata, "plan_type", "planType")); planType != "" {
-		entry["plan_type"] = planType
-	}
-	managementauthfiles.AddSubscriptionFields(entry, auth.Metadata, time.Now())
-	if !auth.CreatedAt.IsZero() {
-		entry["created_at"] = auth.CreatedAt
-	}
-	if !auth.UpdatedAt.IsZero() {
-		entry["modtime"] = auth.UpdatedAt
-		entry["updated_at"] = auth.UpdatedAt
-	}
-	if !auth.LastRefreshedAt.IsZero() {
-		entry["last_refresh"] = auth.LastRefreshedAt
-	}
-	if !auth.NextRetryAfter.IsZero() {
-		entry["next_retry_after"] = auth.NextRetryAfter
-	}
-	if restrictions := managementauthfiles.BuildRestrictionPayload(auth, time.Now()); len(restrictions) > 0 {
-		entry["restrictions"] = restrictions
-	}
-	if path != "" {
-		entry["path"] = path
-		entry["source"] = "file"
-		if info, err := os.Stat(path); err == nil {
-			entry["size"] = info.Size()
-			entry["modtime"] = info.ModTime()
-		} else if os.IsNotExist(err) {
-			// Hide credentials removed from disk but still lingering in memory.
-			if !runtimeOnly && (auth.Disabled || auth.Status == coreauth.StatusDisabled || strings.EqualFold(strings.TrimSpace(auth.StatusMessage), "removed via management api")) {
-				return nil
-			}
-			entry["source"] = "memory"
-		} else {
+	entry := managementauthfiles.BuildEntry(auth, managementauthfiles.EntryOptions{
+		OnStatError: func(path string, err error) {
 			log.WithError(err).Warnf("failed to stat auth file %s", path)
-		}
+		},
+	})
+	if entry == nil {
+		return nil
 	}
-	if claims := managementauthfiles.CodexIDTokenClaims(auth); claims != nil {
-		entry["id_token"] = claims
-	}
-	return entry
+	return gin.H(entry)
 }
 
 // Download single auth file by name
