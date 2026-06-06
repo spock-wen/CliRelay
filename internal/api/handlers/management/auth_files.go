@@ -14,7 +14,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/bodyutil"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/antigravity"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	managementauthfiles "github.com/router-for-me/CLIProxyAPI/v6/internal/management/authfiles"
@@ -694,110 +693,40 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 func (h *Handler) RequestCodexToken(c *gin.Context) {
 	ctx := detachedAuthContext(c)
 
-	fmt.Println("Initializing Codex authentication...")
-
-	// Generate PKCE codes
-	pkceCodes, err := codex.GeneratePKCECodes()
+	result, err := codexprovider.StartOAuthLogin(ctx, codexprovider.OAuthLoginOptions{
+		Config:              h.cfg,
+		WebUI:               isWebUIRequest(c),
+		CallbackPort:        codexCallbackPort,
+		CallbackTarget:      h.managementCallbackURL,
+		WaitCallback:        WaitOAuthCallbackFile,
+		CallbackWaitTimeout: oauthCallbackWaitTimeout,
+		SaveRecord:          h.saveTokenRecord,
+		Sessions: codexprovider.SessionCallbacks{
+			Register:         RegisterOAuthSession,
+			SetError:         SetOAuthSessionError,
+			Complete:         CompleteOAuthSession,
+			CompleteProvider: CompleteOAuthSessionsByProvider,
+		},
+	})
 	if err != nil {
-		log.Errorf("Failed to generate PKCE codes: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE codes"})
+		switch {
+		case errors.Is(err, codexprovider.ErrPKCEGeneration):
+			log.Errorf("Failed to generate PKCE codes: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate PKCE codes"})
+		case errors.Is(err, codexprovider.ErrStateGeneration):
+			log.Errorf("Failed to generate state parameter: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
+		case errors.Is(err, codexprovider.ErrAuthURL):
+			log.Errorf("Failed to generate authorization URL: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
+		default:
+			log.WithError(err).Error("failed to start codex oauth flow")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
+		}
 		return
 	}
 
-	// Generate random state parameter
-	state, err := misc.GenerateRandomState()
-	if err != nil {
-		log.Errorf("Failed to generate state parameter: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
-		return
-	}
-
-	// Initialize Codex auth service
-	openaiAuth := codex.NewCodexAuth(h.cfg)
-
-	// Generate authorization URL
-	authURL, err := openaiAuth.GenerateAuthURL(state, pkceCodes)
-	if err != nil {
-		log.Errorf("Failed to generate authorization URL: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
-		return
-	}
-
-	RegisterOAuthSession(state, "codex")
-
-	isWebUI := isWebUIRequest(c)
-	var forwarder *oauthcallback.Forwarder
-	if isWebUI {
-		targetURL, errTarget := h.managementCallbackURL("/codex/callback")
-		if errTarget != nil {
-			log.WithError(errTarget).Warn("failed to compute codex callback target; continuing with manual callback submission")
-		} else {
-			var errStart error
-			if forwarder, errStart = oauthcallback.Start(codexCallbackPort, "codex", targetURL); errStart != nil {
-				log.WithError(errStart).Warn("failed to start codex callback forwarder; continuing with manual callback submission")
-			}
-		}
-	}
-
-	go func() {
-		if forwarder != nil {
-			defer oauthcallback.StopInstance(ctx, codexCallbackPort, forwarder)
-		}
-
-		// Wait for callback file
-		resultMap, errWait := WaitOAuthCallbackFile(h.cfg.AuthDir, "codex", state, oauthCallbackWaitTimeout)
-		if errWait != nil {
-			if errors.Is(errWait, errOAuthSessionNotPending) {
-				return
-			}
-			authErr := codex.NewAuthenticationError(codex.ErrCallbackTimeout, errWait)
-			log.Error(codex.GetUserFriendlyMessage(authErr))
-			SetOAuthSessionError(state, "Timeout waiting for OAuth callback")
-			return
-		}
-		if errStr := resultMap["error"]; errStr != "" {
-			oauthErr := codex.NewOAuthError(errStr, "", http.StatusBadRequest)
-			log.Error(codex.GetUserFriendlyMessage(oauthErr))
-			SetOAuthSessionError(state, "Bad Request")
-			return
-		}
-		if resultMap["state"] != state {
-			authErr := codex.NewAuthenticationError(codex.ErrInvalidState, fmt.Errorf("expected %s, got %s", state, resultMap["state"]))
-			SetOAuthSessionError(state, "State code error")
-			log.Error(codex.GetUserFriendlyMessage(authErr))
-			return
-		}
-		code := resultMap["code"]
-
-		log.Debug("Authorization code received, exchanging for tokens...")
-		// Exchange code for tokens using internal auth service
-		bundle, errExchange := openaiAuth.ExchangeCodeForTokens(ctx, code, pkceCodes)
-		if errExchange != nil {
-			authErr := codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, errExchange)
-			SetOAuthSessionError(state, "Failed to exchange authorization code for tokens")
-			log.Errorf("Failed to exchange authorization code for tokens: %v", authErr)
-			return
-		}
-
-		// Create token storage and persist
-		tokenStorage := openaiAuth.CreateTokenStorage(bundle)
-		record := codexprovider.RecordFromTokenStorage(tokenStorage)
-		savedPath, errSave := h.saveTokenRecord(ctx, record)
-		if errSave != nil {
-			SetOAuthSessionError(state, "Failed to save authentication tokens")
-			log.Errorf("Failed to save authentication tokens: %v", errSave)
-			return
-		}
-		fmt.Printf("Authentication successful! Token saved to %s\n", savedPath)
-		if bundle.APIKey != "" {
-			fmt.Println("API key obtained and saved")
-		}
-		fmt.Println("You can now use Codex services through this CLI")
-		CompleteOAuthSession(state)
-		CompleteOAuthSessionsByProvider("codex")
-	}()
-
-	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+	c.JSON(200, gin.H{"status": "ok", "url": result.AuthURL, "state": result.State})
 }
 
 func (h *Handler) RequestAntigravityToken(c *gin.Context) {
