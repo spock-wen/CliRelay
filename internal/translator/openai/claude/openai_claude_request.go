@@ -81,8 +81,9 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				out, _ = sjson.Set(out, "reasoning_effort", string(thinking.LevelHigh))
 			case "disabled":
 				// Omit reasoning_effort for disabled thinking.
-				// "none" is rejected by some providers (e.g. DeepSeek). When absent, ApplyThinking
-				// passes through unchanged; the downstream model uses its default thinking behavior.
+				// "none" is rejected by some providers (e.g. DeepSeek). ApplyThinking reads
+				// the Claude thinking block (not reasoning_effort) when toFormat is Claude;
+				// when toFormat is OpenAI, extractOpenAIConfig finds nothing and passes through.
 			}
 		}
 	}
