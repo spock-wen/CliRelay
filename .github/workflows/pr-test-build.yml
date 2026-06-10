@@ -1,13 +1,15 @@
-name: pr-test-build
+name: test-build
 
 on:
+  push:
+    branches: [main, dev]
   pull_request:
+  schedule:
+    - cron: '0 4 * * 1'  # 每周一凌晨4点 UTC
 
 permissions:
   contents: read
 
-# Run on both ubuntu and windows for cross-platform coverage.
-# The ubuntu job runs all steps; the windows job runs the Go-specific checks.
 jobs:
   build-ubuntu:
     runs-on: ubuntu-latest
