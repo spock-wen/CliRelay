@@ -6,8 +6,10 @@ on:
 permissions:
   contents: read
 
+# Run on both ubuntu and windows for cross-platform coverage.
+# The ubuntu job runs all steps; the windows job runs the Go-specific checks.
 jobs:
-  build:
+  build-ubuntu:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -40,7 +42,7 @@ jobs:
           
           # Heuristic only: we allow obvious placeholders (contains 'X' or '*') and
           # fail on real-looking OpenAI-style keys accidentally checked in.
-          key_re = re.compile(r"\\bsk-[A-Za-z0-9]{16,}\\b")
+          key_re = re.compile(r"\bsk-[A-Za-z0-9]{16,}\b")
           
           skip_dirs = {".git", ".gocache", ".tmp-go", ".agentflow"}
           skip_ext = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".pdf", ".zip"}
@@ -60,7 +62,7 @@ jobs:
                 continue
           
               # Skip large/binary files quickly.
-              if b"\\x00" in data:
+              if b"\x00" in data:
                 continue
               try:
                 text = data.decode("utf-8", errors="ignore")
@@ -80,11 +82,9 @@ jobs:
             sys.exit(1)
           PY
       - name: Vet
-        run: |
-          go vet ./...
+        run: go vet ./...
       - name: Test
-        run: |
-          go test ./...
+        run: go test ./...
       - name: Golangci-lint
         run: |
           go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.5
@@ -93,3 +93,25 @@ jobs:
         run: |
           go build -o test-output ./cmd/server
           rm -f test-output
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.1'
+          cache: true
+      - name: Vet
+        run: go vet ./...
+        shell: bash
+      - name: Test
+        run: go test ./...
+        shell: bash
+      - name: Build
+        run: |
+          go build -o test-output.exe ./cmd/server
+          rm -f test-output.exe
+        shell: bash
