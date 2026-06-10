@@ -32,6 +32,7 @@ var opencodeGoKnownNativeVisionModels = map[string]struct{}{
 	"qwen3.5-plus":  {},
 	"qwen3.6-plus":  {},
 	"mimo-v2-omni":  {},
+	"mimo-v2-pro":   {},
 	"mimo-v2.5":     {},
 	"mimo-v2.5-pro": {},
 }
