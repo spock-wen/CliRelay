@@ -115,6 +115,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   timestamp        DATETIME NOT NULL,
   api_key          TEXT NOT NULL DEFAULT '',
+  api_key_id       TEXT NOT NULL DEFAULT '',
   model            TEXT NOT NULL DEFAULT '',
   source           TEXT NOT NULL DEFAULT '',
   channel_name     TEXT NOT NULL DEFAULT '',
@@ -213,6 +214,18 @@ func migrateApiKeyNameColumn(db *sql.DB) {
 	}
 }
 
+func migrateAPIKeyIDColumn(db *sql.DB) {
+	_, err := db.Exec("ALTER TABLE request_logs ADD COLUMN api_key_id TEXT NOT NULL DEFAULT ''")
+	if err != nil {
+		if !strings.Contains(err.Error(), "duplicate") {
+			log.Warnf("usage: migrate column api_key_id: %v", err)
+		}
+	}
+	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_logs_api_key_id ON request_logs(api_key_id)"); err != nil {
+		log.Warnf("usage: create idx_logs_api_key_id: %v", err)
+	}
+}
+
 // migrateFirstTokenColumn adds first_token_ms column to an existing request_logs table.
 func migrateFirstTokenColumn(db *sql.DB) {
 	_, err := db.Exec("ALTER TABLE request_logs ADD COLUMN first_token_ms INTEGER NOT NULL DEFAULT 0")
@@ -297,6 +310,8 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 	migrateCostColumn(db)
 	log.Debugf("usage: running api_key_name column migration")
 	migrateApiKeyNameColumn(db)
+	log.Debugf("usage: running api_key_id column migration")
+	migrateAPIKeyIDColumn(db)
 	log.Debugf("usage: running first_token_ms column migration")
 	migrateFirstTokenColumn(db)
 	log.Debugf("usage: running request log detail column migration")
@@ -307,6 +322,8 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 	initModelConfigTables(db)
 	log.Debugf("usage: initializing api_keys table")
 	initAPIKeysTable(db)
+	log.Debugf("usage: backfilling request log api_key_id values")
+	backfillRequestLogAPIKeyIDs(db)
 	log.Debugf("usage: initializing api_key_permission_profiles table")
 	initAPIKeyPermissionProfilesTable(db)
 	log.Debugf("usage: initializing ccswitch_import_configs table")
@@ -366,6 +383,14 @@ func insertLog(apiKey, apiKeyName, model, source, channelName, authIndex string,
 	// Calculate cost based on model pricing using semantic cache read/write
 	cost := CalculateCostV2(model, tokens)
 
+	apiKeyID := ""
+	if identity := ResolveAPIKeyIdentity(apiKey); identity != nil {
+		apiKeyID = identity.ID
+		if apiKeyName == "" {
+			apiKeyName = identity.Name
+		}
+	}
+
 	// 插入 request log 的事务由 usage 存储层统一拥有，不从外部 HTTP 请求透传 context，
 	// 以避免请求取消把已经选定要持久化的审计记录中断在半途。
 	tx, err := db.BeginTx(context.Background(), nil)
@@ -376,11 +401,11 @@ func insertLog(apiKey, apiKeyName, model, source, channelName, authIndex string,
 
 	result, err := tx.Exec(
 		`INSERT INTO request_logs
-			(timestamp, api_key, api_key_name, model, source, channel_name, auth_index,
+			(timestamp, api_key, api_key_id, api_key_name, model, source, channel_name, auth_index,
 			 failed, latency_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		timestamp.UTC().Format(time.RFC3339Nano),
-		apiKey, apiKeyName, model, source, channelName, authIndex,
+		apiKey, apiKeyID, apiKeyName, model, source, channelName, authIndex,
 		failedInt, latencyMs, firstTokenMs,
 		tokens.InputTokens, tokens.OutputTokens, tokens.ReasoningTokens,
 		tokens.CachedTokens, tokens.TotalTokens, cost,

@@ -370,6 +370,66 @@ func TestGetUsageLogs_EmptyDB_DoesNotReturnNullSlices(t *testing.T) {
 	}
 }
 
+func TestGetUsageLogsCollapsesRenamedAPIKeysByStableIdentity(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "usage.db")
+	if err := usage.InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(func() {
+		usage.CloseDB()
+		_ = os.Remove(dbPath)
+		_ = os.Remove(dbPath + "-wal")
+		_ = os.Remove(dbPath + "-shm")
+	})
+
+	stableID := "api-key-stable-1"
+	if err := usage.UpsertAPIKey(usage.APIKeyRow{ID: stableID, Key: "sk-old", Name: "袁蔚"}); err != nil {
+		t.Fatalf("UpsertAPIKey(sk-old): %v", err)
+	}
+	now := time.Now().UTC()
+	usage.InsertLog("sk-old", "袁蔚", "gpt-5.4", "codex", "Codex", "auth-1", false, now, 100, 10, usage.TokenStats{
+		InputTokens: 1, OutputTokens: 1, TotalTokens: 2,
+	}, "", "")
+
+	if err := usage.UpdateAPIKeyByID(usage.APIKeyRow{ID: stableID, Key: "sk-new", Name: "袁蔚"}); err != nil {
+		t.Fatalf("UpdateAPIKeyByID(sk-new): %v", err)
+	}
+	usage.InsertLog("sk-new", "袁蔚", "gpt-5.4", "codex", "Codex", "auth-1", false, now.Add(time.Second), 120, 12, usage.TokenStats{
+		InputTokens: 2, OutputTokens: 2, TotalTokens: 4,
+	}, "", "")
+
+	h := &Handler{cfg: &config.Config{}}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/usage/logs?days=7&page=1&size=50", nil)
+
+	h.UsageLogs().GetUsageLogs(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d, body=%s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Filters struct {
+			APIKeys     []string          `json:"api_keys"`
+			APIKeyNames map[string]string `json:"api_key_names"`
+		} `json:"filters"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+
+	if len(payload.Filters.APIKeys) != 1 || payload.Filters.APIKeys[0] != "sk-new" {
+		t.Fatalf("filters.api_keys = %#v, want [sk-new]", payload.Filters.APIKeys)
+	}
+	if payload.Filters.APIKeyNames["sk-new"] != "袁蔚" {
+		t.Fatalf("filters.api_key_names[sk-new] = %q, want 袁蔚", payload.Filters.APIKeyNames["sk-new"])
+	}
+}
+
 func TestGetLogContent_ReturnsRequestDetailsPart(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

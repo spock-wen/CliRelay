@@ -1077,6 +1077,37 @@ func TestDeleteLogsByAPIKeyRemovesLogsAndContent(t *testing.T) {
 	}
 }
 
+func TestBackfillRequestLogAPIKeyIDsUsesUniqueAPIKeyName(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+
+	if err := UpsertAPIKey(APIKeyRow{ID: "stable-key-1", Key: "sk-current", Name: "袁蔚"}); err != nil {
+		t.Fatalf("UpsertAPIKey(sk-current): %v", err)
+	}
+
+	db := getDB()
+	timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.Exec(
+		`INSERT INTO request_logs
+			(timestamp, api_key, api_key_name, model, source, channel_name, auth_index,
+			 failed, latency_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		timestamp, "sk-legacy", "袁蔚", "gpt-test", "source", "channel", "auth-1",
+		0, 123, 45, 10, 20, 0, 0, 30, 0,
+	); err != nil {
+		t.Fatalf("insert legacy request_log: %v", err)
+	}
+
+	backfillRequestLogAPIKeyIDs(db)
+
+	var apiKeyID string
+	if err := db.QueryRow("SELECT api_key_id FROM request_logs WHERE api_key = ?", "sk-legacy").Scan(&apiKeyID); err != nil {
+		t.Fatalf("query api_key_id: %v", err)
+	}
+	if apiKeyID != "stable-key-1" {
+		t.Fatalf("api_key_id = %q, want stable-key-1", apiKeyID)
+	}
+}
+
 func TestClearAllRequestLogsRemovesRequestLogTablesOnly(t *testing.T) {
 	initTestUsageDB(t, config.RequestLogStorageConfig{
 		StoreContent:           true,

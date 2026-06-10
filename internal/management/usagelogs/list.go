@@ -109,7 +109,9 @@ func (s *Service) ManagementLogs(input ManagementLogQueryInput) (map[string]any,
 		}
 	}
 
-	filters.APIKeyNames = make(map[string]string, len(filters.APIKeys))
+	if filters.APIKeyNames == nil {
+		filters.APIKeyNames = make(map[string]string, len(filters.APIKeys))
+	}
 	for _, key := range filters.APIKeys {
 		if name, ok := keyNameMap[key]; ok {
 			filters.APIKeyNames[key] = name
