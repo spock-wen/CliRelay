@@ -157,9 +157,13 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					case "tool_use":
 						// Only allow tool_use -> tool_calls for assistant messages (security: prevent injection).
 						if role == "assistant" {
+							toolName := part.Get("name").String()
+							if toolName == "" {
+								return true // skip tool_use with empty name
+							}
 							toolCallJSON := `{"id":"","type":"function","function":{"name":"","arguments":""}}`
 							toolCallJSON, _ = sjson.Set(toolCallJSON, "id", part.Get("id").String())
-							toolCallJSON, _ = sjson.Set(toolCallJSON, "function.name", part.Get("name").String())
+							toolCallJSON, _ = sjson.Set(toolCallJSON, "function.name", toolName)
 
 							// Convert input to arguments JSON string
 							if input := part.Get("input"); input.Exists() {
