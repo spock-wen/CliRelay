@@ -2813,6 +2813,24 @@ func getTestModels() []*registry.ModelInfo {
 			DisplayName: "MiniMax Test Model",
 			Thinking:    &registry.ThinkingSupport{Levels: []string{"none", "auto", "minimal", "low", "medium", "high", "xhigh"}},
 		},
+		{
+			ID:          "mimo-test-low-med-high",
+			Object:      "model",
+			Created:     1770393600,
+			OwnedBy:     "test",
+			Type:        "opencode-go",
+			DisplayName: "Mimo Test (low/medium/high only)",
+			Thinking:    &registry.ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		},
+		{
+			ID:          "mimo-test-no-thinking",
+			Object:      "model",
+			Created:     1770393600,
+			OwnedBy:     "test",
+			Type:        "opencode-go",
+			DisplayName: "Mimo Test (no thinking)",
+			Thinking:    nil,
+		},
 	}
 }
 
@@ -2925,4 +2943,106 @@ func runThinkingTests(t *testing.T, cases []thinkingTestCase) {
 			}
 		})
 	}
+}
+
+// TestThinking_MimoV2 verifies Mimo v2 model thinking behavior:
+// - Adaptive Claude thinking maps to reasoning_effort: high
+// - xhigh is clamped down to high (Mimo only supports low/medium/high)
+// - Disabled thinking omits reasoning_effort
+// - No-thinking requests pass through without reasoning_effort
+func TestThinking_MimoV2(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	uid := fmt.Sprintf("mimo-v2-%d", time.Now().UnixNano())
+	reg.RegisterClient(uid, "test", getTestModels())
+	defer reg.UnregisterClient(uid)
+
+	cases := []thinkingTestCase{
+		// Adaptive Claude thinking -> reasoning_effort: high for Mimo
+		{
+			name: "adaptive_claude_to_openai_mimo",
+			from: "claude", to: "openai", model: "mimo-test-low-med-high",
+			inputJSON: claudeInputJSONWithThinking("adaptive"),
+			expectField: "reasoning_effort", expectValue: "high",
+		},
+		// Enabled + budget 32768 (xhigh) -> clamped to high for Mimo
+		{
+			name: "budget_32768_xhigh_clamped_to_high",
+			from: "claude", to: "openai", model: "mimo-test-low-med-high",
+			inputJSON: claudeInputJSONWithThinkingBudget(32768),
+			expectField: "reasoning_effort", expectValue: "high",
+		},
+		// Enabled + budget 8192 -> medium
+		{
+			name: "budget_8192_medium",
+			from: "claude", to: "openai", model: "mimo-test-low-med-high",
+			inputJSON: claudeInputJSONWithThinkingBudget(8192),
+			expectField: "reasoning_effort", expectValue: "medium",
+		},
+		// Disabled thinking -> no reasoning_effort
+		{
+			name: "disabled_omits_reasoning_effort",
+			from: "claude", to: "openai", model: "mimo-test-low-med-high",
+			inputJSON: claudeInputJSONWithThinking("disabled"),
+			expectField: "", expectValue: "",
+		},
+		// No thinking in request -> no reasoning_effort
+		{
+			name: "no_thinking_passthrough",
+			from: "claude", to: "openai", model: "mimo-test-no-thinking",
+			inputJSON: claudeInputJSONNoThinking(),
+			expectField: "", expectValue: "",
+		},
+	}
+
+	runThinkingTests(t, cases)
+}
+
+// TestThinking_MimoV2_OpenAIReasoningEffort verifies OpenAI-format reasoning_effort
+// validation against Mimo supported levels.
+func TestThinking_MimoV2_OpenAIReasoningEffort(t *testing.T) {
+	reg := registry.GetGlobalRegistry()
+	uid := fmt.Sprintf("mimo-oe-%d", time.Now().UnixNano())
+	reg.RegisterClient(uid, "test", getTestModels())
+	defer reg.UnregisterClient(uid)
+
+	cases := []thinkingTestCase{
+		{name: "high_accepted", from: "openai", to: "openai", model: "mimo-test-low-med-high", inputJSON: openaiInputWithReasoningEffort("high"), expectField: "reasoning_effort", expectValue: "high"},
+		{name: "medium_accepted", from: "openai", to: "openai", model: "mimo-test-low-med-high", inputJSON: openaiInputWithReasoningEffort("medium"), expectField: "reasoning_effort", expectValue: "medium"},
+		{name: "low_accepted", from: "openai", to: "openai", model: "mimo-test-low-med-high", inputJSON: openaiInputWithReasoningEffort("low"), expectField: "reasoning_effort", expectValue: "low"},
+		{name: "xhigh_clamped_to_high", from: "claude", to: "openai", model: "mimo-test-low-med-high", inputJSON: claudeInputJSONWithThinkingBudget(32768), expectField: "reasoning_effort", expectValue: "high"},
+	}
+
+	runThinkingTests(t, cases)
+}
+
+// Helper functions for building test input JSON
+
+func claudeInputJSONWithThinking(thinkingType string) string {
+	return fmt.Sprintf(`{
+		"model": "claude-sonnet-4-5",
+		"max_tokens": 4096,
+		"thinking": {"type": "%s"},
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+	}`, thinkingType)
+}
+
+func claudeInputJSONWithThinkingBudget(budget int) string {
+	return fmt.Sprintf(`{
+		"model": "claude-sonnet-4-5",
+		"max_tokens": 4096,
+		"thinking": {"type": "enabled", "budget_tokens": %d},
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+	}`, budget)
+}
+
+func claudeInputJSONNoThinking() string {
+	return `{
+		"model": "claude-sonnet-4-5",
+		"max_tokens": 4096,
+		"messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+	}`
+}
+
+func openaiInputWithReasoningEffort(effort string) string {
+	return fmt.Sprintf(`{"model":"mimo-test-low-med-high","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"%s"}`, effort)
 }
