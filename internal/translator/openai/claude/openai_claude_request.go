@@ -77,12 +77,12 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 				}
 			case "adaptive":
 				// Use "high" for widest compatibility.
-				// Models that support xhigh will get it via ApplyThinking normalization.
+				// clampLevel handles models that do not support it (downgrades only; no upgrade to xhigh).
 				out, _ = sjson.Set(out, "reasoning_effort", string(thinking.LevelHigh))
 			case "disabled":
 				// Omit reasoning_effort for disabled thinking.
-				// Setting "none" is not universally supported (e.g. DeepSeek rejects it).
-				// Let ApplyThinking strip or set per-model compatible value.
+				// "none" is rejected by some providers (e.g. DeepSeek). When absent, ApplyThinking
+				// passes through unchanged; the downstream model uses its default thinking behavior.
 			}
 		}
 	}
