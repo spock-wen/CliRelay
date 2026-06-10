@@ -197,6 +197,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if err != nil {
 		return nil, err
 	}
+	// Request usage in the final SSE chunk — required by providers that
+	// don't return usage by default (e.g. Volcengine/火山引擎).
+	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 	if shouldNormalizeKimiCompatPayload(execCtx.BaseModel) {
 		translated, err = normalizeKimiToolMessageLinks(translated)
 		if err != nil {
