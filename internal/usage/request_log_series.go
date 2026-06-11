@@ -318,6 +318,60 @@ func QueryEntityStats(apiKey string, days int, groupColumn string, entityNames [
 	return result, rows.Err()
 }
 
+// UsageExportSummaryRow holds one row of the usage export summary grouped by API key.
+type UsageExportSummaryRow struct {
+	PersonName   string  `json:"person_name"`
+	APIKey       string  `json:"api_key"`
+	RequestCount int64   `json:"request_count"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	TotalTokens  int64   `json:"total_tokens"`
+	TotalCostUSD float64 `json:"total_cost_usd"`
+}
+
+// QueryUsageExportSummary returns aggregated usage data grouped by api_key and api_key_name.
+func QueryUsageExportSummary(days int, apiKey string) ([]UsageExportSummaryRow, error) {
+	db := getDB()
+	if db == nil {
+		return make([]UsageExportSummaryRow, 0), nil
+	}
+	if days < 1 {
+		days = 7
+	}
+
+	params := LogQueryParams{APIKey: apiKey, Days: days}
+	where, args := buildWhereClause(params)
+	where += " AND api_key != ''"
+
+	q := `SELECT
+  COALESCE(NULLIF(TRIM(api_key_name), ''), '') AS person_name,
+  api_key,
+  COUNT(*) AS request_count,
+  COALESCE(SUM(input_tokens), 0) AS input_tokens,
+  COALESCE(SUM(output_tokens), 0) AS output_tokens,
+  COALESCE(SUM(total_tokens), 0) AS total_tokens,
+  ROUND(COALESCE(SUM(cost), 0), 6) AS total_cost_usd
+FROM request_logs` + where + `
+GROUP BY api_key, api_key_name
+ORDER BY total_tokens DESC`
+
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("usage: export summary query: %w", err)
+	}
+	defer rows.Close()
+
+	result := make([]UsageExportSummaryRow, 0)
+	for rows.Next() {
+		var r UsageExportSummaryRow
+		if err := rows.Scan(&r.PersonName, &r.APIKey, &r.RequestCount, &r.InputTokens, &r.OutputTokens, &r.TotalTokens, &r.TotalCostUSD); err != nil {
+			return nil, fmt.Errorf("usage: export summary scan: %w", err)
+		}
+		result = append(result, r)
+	}
+	return result, rows.Err()
+}
+
 func normalizeEntityStatFilters(values []string) []string {
 	if len(values) == 0 {
 		return nil
