@@ -22,7 +22,7 @@ func TestRegisterManagementRouteTable(t *testing.T) {
 		routes[key] = route
 	}
 
-	if got, want := len(routes), 206; got != want {
+	if got, want := len(routes), 207; got != want {
 		t.Fatalf("route count = %d, want %d", got, want)
 	}
 
