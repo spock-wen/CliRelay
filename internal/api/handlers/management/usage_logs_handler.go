@@ -200,6 +200,19 @@ func (h *UsageLogsHandler) GetUsageChartData(c *gin.Context) {
 	c.JSON(http.StatusOK, payload)
 }
 
+// GetUsageExportSummary returns aggregated usage data grouped by API key.
+func (h *UsageLogsHandler) GetUsageExportSummary(c *gin.Context) {
+	payload, err := h.service().UsageExportSummary(
+		strings.TrimSpace(c.Query("api_key")),
+		intQueryDefault(c, "days", 1),
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, payload)
+}
+
 // GetEntityUsageStats returns aggregated statistics grouped by source or auth_index
 func (h *UsageLogsHandler) GetEntityUsageStats(c *gin.Context) {
 	payload, err := h.service().EntityUsageStats(

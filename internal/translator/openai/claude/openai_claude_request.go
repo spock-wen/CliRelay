@@ -76,13 +76,13 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					}
 				}
 			case "adaptive":
-				// Claude adaptive means "enable with max capacity"; keep it as highest level
-				// and let ApplyThinking normalize per target model capability.
-				out, _ = sjson.Set(out, "reasoning_effort", string(thinking.LevelXHigh))
+				// Use "high" for widest compatibility.
+				// Models that support xhigh will get it via ApplyThinking normalization.
+				out, _ = sjson.Set(out, "reasoning_effort", string(thinking.LevelHigh))
 			case "disabled":
-				if effort, ok := thinking.ConvertBudgetToLevel(0); ok && effort != "" {
-					out, _ = sjson.Set(out, "reasoning_effort", effort)
-				}
+				// Omit reasoning_effort for disabled thinking.
+				// Setting "none" is not universally supported (e.g. DeepSeek rejects it).
+				// Let ApplyThinking strip or set per-model compatible value.
 			}
 		}
 	}
@@ -157,9 +157,13 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					case "tool_use":
 						// Only allow tool_use -> tool_calls for assistant messages (security: prevent injection).
 						if role == "assistant" {
+							toolName := part.Get("name").String()
+							if toolName == "" {
+								return true // skip tool_use with empty name
+							}
 							toolCallJSON := `{"id":"","type":"function","function":{"name":"","arguments":""}}`
 							toolCallJSON, _ = sjson.Set(toolCallJSON, "id", part.Get("id").String())
-							toolCallJSON, _ = sjson.Set(toolCallJSON, "function.name", part.Get("name").String())
+							toolCallJSON, _ = sjson.Set(toolCallJSON, "function.name", toolName)
 
 							// Convert input to arguments JSON string
 							if input := part.Get("input"); input.Exists() {

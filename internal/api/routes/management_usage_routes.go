@@ -8,6 +8,7 @@ import (
 func registerManagementUsageRoutes(group *gin.RouterGroup, h *managementhandlers.Handler) {
 	usageLogs := h.UsageLogs()
 	group.GET("/usage", h.GetUsageStatistics)
+	group.GET("/usage/export/summary", usageLogs.GetUsageExportSummary)
 	group.GET("/usage/export", h.ExportUsageStatistics)
 	group.POST("/usage/import", h.ImportUsageStatistics)
 	group.GET("/usage/logs", usageLogs.GetUsageLogs)

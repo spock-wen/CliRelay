@@ -214,7 +214,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 
 				// Handle function name
 				if function := toolCall.Get("function"); function.Exists() {
-					if name := function.Get("name"); name.Exists() {
+					if name := function.Get("name"); name.Exists() && name.String() != "" {
 						accumulator.Name = name.String()
 
 						stopThinkingContentBlock(param, &results)
@@ -390,9 +390,13 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) []string {
 		// Handle tool calls
 		if toolCalls := choice.Get("message.tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 			toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
+				toolName := toolCall.Get("function.name").String()
+				if toolName == "" {
+					return true // skip tool_call with empty function name
+				}
 				toolUseBlock := `{"type":"tool_use","id":"","name":"","input":{}}`
 				toolUseBlock, _ = sjson.Set(toolUseBlock, "id", toolCall.Get("id").String())
-				toolUseBlock, _ = sjson.Set(toolUseBlock, "name", toolCall.Get("function.name").String())
+				toolUseBlock, _ = sjson.Set(toolUseBlock, "name", toolName)
 
 				argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
 				if argsStr != "" && gjson.Valid(argsStr) {
@@ -587,10 +591,14 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 							toolCalls := item.Get("tool_calls")
 							if toolCalls.IsArray() {
 								toolCalls.ForEach(func(_, tc gjson.Result) bool {
+									toolName := tc.Get("function.name").String()
+									if toolName == "" {
+										return true // skip tool_call with empty function name
+									}
 									hasToolCall = true
 									toolUse := `{"type":"tool_use","id":"","name":"","input":{}}`
 									toolUse, _ = sjson.Set(toolUse, "id", tc.Get("id").String())
-									toolUse, _ = sjson.Set(toolUse, "name", tc.Get("function.name").String())
+									toolUse, _ = sjson.Set(toolUse, "name", toolName)
 
 									argsStr := util.FixJSON(tc.Get("function.arguments").String())
 									if argsStr != "" && gjson.Valid(argsStr) {
@@ -644,10 +652,14 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 
 			if toolCalls := message.Get("tool_calls"); toolCalls.Exists() && toolCalls.IsArray() {
 				toolCalls.ForEach(func(_, toolCall gjson.Result) bool {
+					toolName := toolCall.Get("function.name").String()
+					if toolName == "" {
+						return true // skip tool_call with empty function name
+					}
 					hasToolCall = true
 					toolUseBlock := `{"type":"tool_use","id":"","name":"","input":{}}`
 					toolUseBlock, _ = sjson.Set(toolUseBlock, "id", toolCall.Get("id").String())
-					toolUseBlock, _ = sjson.Set(toolUseBlock, "name", toolCall.Get("function.name").String())
+					toolUseBlock, _ = sjson.Set(toolUseBlock, "name", toolName)
 
 					argsStr := util.FixJSON(toolCall.Get("function.arguments").String())
 					if argsStr != "" && gjson.Valid(argsStr) {

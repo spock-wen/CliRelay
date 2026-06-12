@@ -87,6 +87,17 @@ func (s *Service) UsageChartData(apiKey string, days int) (map[string]any, error
 	}, nil
 }
 
+func (s *Service) UsageExportSummary(apiKey string, days int) ([]usage.UsageExportSummaryRow, error) {
+	rows, err := usage.QueryUsageExportSummary(days, apiKey)
+	if err != nil {
+		return nil, err
+	}
+	if rows == nil {
+		rows = make([]usage.UsageExportSummaryRow, 0)
+	}
+	return rows, nil
+}
+
 func (s *Service) EntityUsageStats(apiKey string, days int, authIndexes, sources []string) (map[string]any, error) {
 	sourceStats, err := usage.QueryEntityStats(apiKey, days, "source", sources)
 	if err != nil {
