@@ -202,8 +202,8 @@ func TestBuildUpdateCheckGracefullyHandlesGitHubFailures(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.AutoUpdate.Enabled = true
 	cfg.AutoUpdate.Channel = "dev"
-	cfg.AutoUpdate.Repository = "https://github.com/kittors/CliRelay"
-	cfg.RemoteManagement.PanelGitHubRepository = "https://github.com/kittors/codeProxy"
+	cfg.AutoUpdate.Repository = "https://github.com/spock-wen/CliRelay"
+	cfg.RemoteManagement.PanelGitHubRepository = "https://github.com/spock-wen/codeProxy"
 
 	handler := &Handler{cfg: cfg}
 	resp, err := handler.buildUpdateCheck(context.Background())
@@ -475,7 +475,7 @@ func TestBuildUpdateCheckUsesConfiguredPanelRepository(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.AutoUpdate.Enabled = true
 	cfg.AutoUpdate.Channel = "main"
-	cfg.AutoUpdate.Repository = "https://github.com/kittors/CliRelay"
+	cfg.AutoUpdate.Repository = "https://github.com/spock-wen/CliRelay"
 	cfg.RemoteManagement.PanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 
 	handler := &Handler{cfg: cfg}
@@ -550,7 +550,7 @@ func TestBuildUpdateCheckUsesRuntimePanelMetadata(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.AutoUpdate.Enabled = true
 	cfg.AutoUpdate.Channel = "dev"
-	cfg.AutoUpdate.Repository = "https://github.com/kittors/CliRelay"
+	cfg.AutoUpdate.Repository = "https://github.com/spock-wen/CliRelay"
 	cfg.RemoteManagement.PanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 
 	handler := &Handler{cfg: cfg}
@@ -607,7 +607,7 @@ func TestBuildCurrentUpdateStateDoesNotQueryGitHub(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.AutoUpdate.Enabled = true
 	cfg.AutoUpdate.Channel = "dev"
-	cfg.AutoUpdate.DockerImage = "ghcr.io/kittors/clirelay"
+	cfg.AutoUpdate.DockerImage = "registry.cn-hangzhou.aliyuncs.com/hihope_clirelay/clirelay"
 	handler := &Handler{cfg: cfg}
 
 	resp := handler.buildCurrentUpdateState(context.Background())

@@ -73,7 +73,7 @@ remote-management:
   disable-control-panel: false
 
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
-  panel-github-repository: "https://github.com/kittors/codeProxy"
+  panel-github-repository: "https://github.com/spock-wen/codeProxy"
 
 # Docker-first automatic update checks. The updater sidecar is installed by the
 # Docker Compose deployment path; non-Docker deployments can disable this.
@@ -81,8 +81,8 @@ auto-update:
   enabled: true
   # main is the default stable update channel; use dev to follow dev images.
   channel: main
-  repository: https://github.com/kittors/CliRelay
-  docker-image: ghcr.io/kittors/clirelay
+  repository: https://github.com/spock-wen/CliRelay
+  docker-image: registry.cn-hangzhou.aliyuncs.com/hihope_clirelay/clirelay
   updater-url: http://clirelay-updater:8320
 
 # Authentication directory (supports ~ for home directory).

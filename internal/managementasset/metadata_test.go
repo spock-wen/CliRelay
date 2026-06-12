@@ -43,7 +43,7 @@ func TestCurrentPanelMetadataReadsResolvedPanelDir(t *testing.T) {
 		Version:    "panel-dev-e559f2c",
 		Ref:        "dev",
 		Commit:     "e559f2c444927cd0225b65b1d71a0ed23f5098dc",
-		Repository: "https://github.com/kittors/codeProxy",
+		Repository: "https://github.com/spock-wen/codeProxy",
 		BuildDate:  "2026-06-06T11:15:01Z",
 	}
 	data, err := json.Marshal(want)

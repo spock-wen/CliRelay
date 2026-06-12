@@ -32,7 +32,7 @@ jobs:
           REF_NAME="${GITHUB_REF_NAME:-main}"
           BACKEND_SHORT="$(git rev-parse --short HEAD)"
           FRONTEND_REF="${REF_NAME}"
-          FRONTEND_COMMIT="$(git ls-remote https://github.com/kittors/codeProxy.git "refs/heads/${FRONTEND_REF}" | awk '{print $1}')"
+          FRONTEND_COMMIT="$(git ls-remote https://github.com/spock-wen/codeProxy.git "refs/heads/${FRONTEND_REF}" | awk '{print $1}')"
           if [ -z "${FRONTEND_COMMIT}" ]; then
             echo "Unable to resolve frontend ref: ${FRONTEND_REF}" >&2
             exit 1

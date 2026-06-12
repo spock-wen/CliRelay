@@ -45,7 +45,7 @@ func TestUpdaterDefaultPathsDoNotPointAtWorkspace(t *testing.T) {
 
 func TestUpdaterPersistsRequestedImageBeforeComposeUpdate(t *testing.T) {
 	envFile := filepath.Join(t.TempDir(), ".env")
-	if err := os.WriteFile(envFile, []byte("CLI_PROXY_IMAGE=ghcr.io/kittors/clirelay:dev\nOTHER=value\n"), 0o600); err != nil {
+	if err := os.WriteFile(envFile, []byte("CLI_PROXY_IMAGE=registry.cn-hangzhou.aliyuncs.com/hihope_clirelay/clirelay:dev\nOTHER=value\n"), 0o600); err != nil {
 		t.Fatalf("write env file: %v", err)
 	}
 
@@ -58,7 +58,7 @@ func TestUpdaterPersistsRequestedImageBeforeComposeUpdate(t *testing.T) {
 				t.Errorf("read env file: %v", err)
 			}
 			content := string(data)
-			if !strings.Contains(content, "CLI_PROXY_IMAGE=ghcr.io/kittors/clirelay:latest\n") {
+			if !strings.Contains(content, "CLI_PROXY_IMAGE=registry.cn-hangzhou.aliyuncs.com/hihope_clirelay/clirelay:latest\n") {
 				t.Errorf("env file content = %q, want requested latest image persisted", content)
 			}
 			if !strings.Contains(content, "OTHER=value\n") {
@@ -74,7 +74,7 @@ func TestUpdaterPersistsRequestedImageBeforeComposeUpdate(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/update",
-		strings.NewReader(`{"service":"cli-proxy-api","image":"ghcr.io/kittors/clirelay","tag":"latest"}`),
+		strings.NewReader(`{"service":"cli-proxy-api","image":"registry.cn-hangzhou.aliyuncs.com/hihope_clirelay/clirelay","tag":"latest"}`),
 	)
 	rec := httptest.NewRecorder()
 
@@ -111,7 +111,7 @@ func TestUpdaterRejectsRequestWhenEnvFileCannotBeUpdated(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/update",
-		strings.NewReader(`{"service":"cli-proxy-api","image":"ghcr.io/kittors/clirelay","tag":"dev"}`),
+		strings.NewReader(`{"service":"cli-proxy-api","image":"registry.cn-hangzhou.aliyuncs.com/hihope_clirelay/clirelay","tag":"dev"}`),
 	)
 	rec := httptest.NewRecorder()
 
@@ -187,7 +187,7 @@ func TestUpdaterStatusExposesTargetStageAndLogs(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/update",
-		strings.NewReader(`{"service":"clirelay","image":"ghcr.io/kittors/clirelay","tag":"dev","version":"dev-abcdef1","commit":"abcdef123456","channel":"dev"}`),
+		strings.NewReader(`{"service":"clirelay","image":"registry.cn-hangzhou.aliyuncs.com/hihope_clirelay/clirelay","tag":"dev","version":"dev-abcdef1","commit":"abcdef123456","channel":"dev"}`),
 	)
 	rec := httptest.NewRecorder()
 	server.handleUpdate(rec, req)
@@ -248,7 +248,7 @@ func TestUpdaterFailsWhenComposePullSkipsTargetService(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/v1/update",
-		strings.NewReader(`{"service":"cli-proxy-api","image":"ghcr.io/kittors/clirelay","tag":"dev","version":"dev-6704f60","commit":"6704f60ee834bce20e22fc65e67868801f483e32","channel":"dev"}`),
+		strings.NewReader(`{"service":"cli-proxy-api","image":"registry.cn-hangzhou.aliyuncs.com/hihope_clirelay/clirelay","tag":"dev","version":"dev-6704f60","commit":"6704f60ee834bce20e22fc65e67868801f483e32","channel":"dev"}`),
 	)
 	rec := httptest.NewRecorder()
 	server.handleUpdate(rec, req)

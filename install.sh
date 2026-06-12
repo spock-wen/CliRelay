@@ -14,7 +14,7 @@ C_BG_BLUE='\033[44m'; C_BG_GREEN='\033[42m'; C_BG_RED='\033[41m'
 
 SYM_OK="✓"; SYM_FAIL="✗"; SYM_ARROW="→"; SYM_DOT="·"; SYM_STAR="★"
 
-DOCKER_IMAGE_DEFAULT="ghcr.io/kittors/clirelay:latest"
+DOCKER_IMAGE_DEFAULT="registry.cn-hangzhou.aliyuncs.com/hihope_clirelay/clirelay:latest"
 CONTAINER_NAME="clirelay"
 DEFAULT_PORT=8317
 TOTAL_STEPS=6
@@ -468,8 +468,8 @@ remote-management:
 auto-update:
   enabled: true
   channel: main
-  repository: https://github.com/kittors/CliRelay
-  docker-image: ghcr.io/kittors/clirelay
+  repository: https://github.com/spock-wen/CliRelay
+  docker-image: registry.cn-hangzhou.aliyuncs.com/hihope_clirelay/clirelay
   updater-url: http://clirelay-updater:8320
 
 auth-dir: "/root/.cli-proxy-api"

@@ -17,9 +17,9 @@
 
 <p align="center">
   <a href="https://help.router-for.me/">📖 Docs</a> ·
-  <a href="https://github.com/kittors/codeProxy">🖥️ Management Panel</a> ·
-  <a href="https://github.com/kittors/CliRelay/issues">🐛 Report Bug</a> ·
-  <a href="https://github.com/kittors/CliRelay/pulls">✨ Request Feature</a>
+  <a href="https://github.com/spock-wen/codeProxy">🖥️ Management Panel</a> ·
+  <a href="https://github.com/spock-wen/CliRelay/issues">🐛 Report Bug</a> ·
+  <a href="https://github.com/spock-wen/CliRelay/pulls">✨ Request Feature</a>
 </p>
 
 ---
@@ -191,7 +191,7 @@ The gallery below uses the latest supplied screenshots, covering the current end
 | :----------------- |
 | <img src="docs/images/readme-showcase/system-info.png" width="100%" alt="System information page" /> |
 
-> 🔗 The runtime panel source is configurable via `remote-management.panel-github-repository`. The default repository is [kittors/codeProxy](https://github.com/kittors/codeProxy).
+> 🔗 The runtime panel source is configurable via `remote-management.panel-github-repository`. The default repository is [spock-wen/codeProxy](https://github.com/spock-wen/codeProxy).
 
 ## 🏗️ Supported Providers
 
@@ -212,10 +212,10 @@ The gallery below uses the latest supplied screenshots, covering the current end
 
 ### 🐳 Install With Docker Compose
 
-Docker Compose is the recommended installation path for CliRelay. The included `docker-compose.yml` uses the published `ghcr.io/kittors/clirelay:latest` image by default and starts both the API service and updater sidecar.
+Docker Compose is the recommended installation path for CliRelay. The included `docker-compose.yml` uses the published `registry.cn-hangzhou.aliyuncs.com/hihope_clirelay/clirelay:latest` image by default and starts both the API service and updater sidecar.
 
 ```bash
-git clone https://github.com/kittors/CliRelay.git
+git clone https://github.com/spock-wen/CliRelay.git
 cd CliRelay
 cp config.example.yaml config.yaml
 docker compose up -d
@@ -336,7 +336,7 @@ Contributions are welcome! Here's how to get started:
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/kittors/CliRelay.git
+git clone https://github.com/spock-wen/CliRelay.git
 cd CliRelay
 
 # 2. Create a feature branch from the latest dev baseline

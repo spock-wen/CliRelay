@@ -29,7 +29,7 @@ jobs:
           VERSION="$(git describe --tags --always --dirty)"
           COMMIT="$(git rev-parse --short HEAD)"
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          FRONTEND_COMMIT="$(git ls-remote https://github.com/kittors/codeProxy.git refs/heads/main | awk '{print $1}')"
+          FRONTEND_COMMIT="$(git ls-remote https://github.com/spock-wen/codeProxy.git refs/heads/main | awk '{print $1}')"
           if [ -z "${FRONTEND_COMMIT}" ]; then
             echo "Unable to resolve frontend ref: main" >&2
             exit 1
@@ -76,7 +76,7 @@ jobs:
           VERSION="$(git describe --tags --always --dirty)"
           COMMIT="$(git rev-parse --short HEAD)"
           BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          FRONTEND_COMMIT="$(git ls-remote https://github.com/kittors/codeProxy.git refs/heads/main | awk '{print $1}')"
+          FRONTEND_COMMIT="$(git ls-remote https://github.com/spock-wen/codeProxy.git refs/heads/main | awk '{print $1}')"
           if [ -z "${FRONTEND_COMMIT}" ]; then
             echo "Unable to resolve frontend ref: main" >&2
             exit 1

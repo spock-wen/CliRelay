@@ -1,6 +1,6 @@
 services:
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-ghcr.io/kittors/clirelay:latest}
+    image: ${CLI_PROXY_IMAGE:-registry.cn-hangzhou.aliyuncs.com/hihope_clirelay/clirelay:latest}
     pull_policy: ${CLI_PROXY_PULL_POLICY:-always}
     build:
       context: .
@@ -10,7 +10,7 @@ services:
         COMMIT: ${COMMIT:-none}
         BUILD_DATE: ${BUILD_DATE:-unknown}
         UI_VERSION: ${UI_VERSION:-dev}
-        FRONTEND_REPOSITORY: ${FRONTEND_REPOSITORY:-https://github.com/kittors/codeProxy.git}
+        FRONTEND_REPOSITORY: ${FRONTEND_REPOSITORY:-https://github.com/spock-wen/codeProxy.git}
         FRONTEND_REF: ${FRONTEND_REF:-main}
         FRONTEND_COMMIT: ${FRONTEND_COMMIT:-}
     container_name: cli-proxy-api
@@ -42,7 +42,7 @@ services:
     restart: unless-stopped
 
   clirelay-updater:
-    image: ${CLI_PROXY_IMAGE:-ghcr.io/kittors/clirelay:latest}
+    image: ${CLI_PROXY_IMAGE:-registry.cn-hangzhou.aliyuncs.com/hihope_clirelay/clirelay:latest}
     pull_policy: ${CLI_PROXY_PULL_POLICY:-always}
     command: ["./clirelay-updater"]
     environment:
