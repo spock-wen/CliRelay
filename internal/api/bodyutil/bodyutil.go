@@ -8,12 +8,14 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
 )
 
 const (
 	DefaultRequestBodyLimit   int64 = 16 << 20
+	DefaultModelBodyLimit     int64 = 128 << 20
 	ManagementBodyLimit       int64 = 2 << 20
 	ConfigYAMLBodyLimit       int64 = 2 << 20
 	AuthFileBodyLimit         int64 = 2 << 20
@@ -22,11 +24,58 @@ const (
 
 var ErrBodyTooLarge = errors.New("request body too large")
 
+const requestBodyCacheKey = "cliproxy.request_body_cache"
+
+var modelRequestBodyLimit atomic.Int64
+
+func init() {
+	modelRequestBodyLimit.Store(DefaultModelBodyLimit)
+}
+
+// SetModelRequestBodyLimit configures the request-body limit used by model API endpoints.
+func SetModelRequestBodyLimit(limit int64) {
+	if limit <= 0 {
+		limit = DefaultModelBodyLimit
+	}
+	modelRequestBodyLimit.Store(limit)
+}
+
+// ModelRequestBodyLimit returns the active request-body limit for model API endpoints.
+func ModelRequestBodyLimit() int64 {
+	limit := modelRequestBodyLimit.Load()
+	if limit <= 0 {
+		return DefaultModelBodyLimit
+	}
+	return limit
+}
+
 func normalizeLimit(limit int64) int64 {
 	if limit <= 0 {
 		return DefaultRequestBodyLimit
 	}
 	return limit
+}
+
+func cachedRequestBody(c *gin.Context) ([]byte, bool) {
+	if c == nil {
+		return nil, false
+	}
+	bodyVal, ok := c.Get(requestBodyCacheKey)
+	if !ok || bodyVal == nil {
+		return nil, false
+	}
+	body, ok := bodyVal.([]byte)
+	return body, ok
+}
+
+// SetRequestBody caches and restores a request body for downstream consumers.
+func SetRequestBody(c *gin.Context, body []byte) {
+	if c == nil || c.Request == nil {
+		return
+	}
+	c.Set(requestBodyCacheKey, body)
+	c.Request.Body = io.NopCloser(bytes.NewReader(body))
+	c.Request.ContentLength = int64(len(body))
 }
 
 // ReadRequestBody reads and restores an incoming HTTP request body with a strict size limit.
@@ -36,12 +85,21 @@ func ReadRequestBody(c *gin.Context, limit int64) ([]byte, error) {
 	}
 
 	limit = normalizeLimit(limit)
+	if cached, ok := cachedRequestBody(c); ok {
+		if int64(len(cached)) > limit {
+			return nil, ErrBodyTooLarge
+		}
+		c.Request.Body = io.NopCloser(bytes.NewReader(cached))
+		c.Request.ContentLength = int64(len(cached))
+		return cached, nil
+	}
+
 	if c.Writer == nil {
 		body, err := ReadAll(c.Request.Body, limit)
 		if err != nil {
 			return nil, err
 		}
-		c.Request.Body = io.NopCloser(bytes.NewReader(body))
+		SetRequestBody(c, body)
 		return body, nil
 	}
 
@@ -50,7 +108,7 @@ func ReadRequestBody(c *gin.Context, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.Request.Body = io.NopCloser(bytes.NewReader(body))
+	SetRequestBody(c, body)
 	return body, nil
 }
 

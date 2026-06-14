@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/bodyutil"
 	internalserviceapp "github.com/router-for-me/CLIProxyAPI/v6/internal/app/service"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
@@ -47,6 +48,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	s.applyProcessLoggingConfig(oldCfg, cfg)
 	s.applyUsageStatisticsConfig(oldCfg, cfg)
 	s.applyAuthRuntimeConfig(oldCfg, cfg)
+	s.applyRequestBodyConfig(oldCfg, cfg)
 	s.applyRuntimeLogLevel(oldCfg, cfg)
 	s.applyProxyWarmupConfig(cfg)
 	s.updateManagementRouteAvailability(oldCfg, cfg)
@@ -57,6 +59,15 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	s.refreshAmpModule(oldCfg, cfg)
 	s.syncTokenStoreBaseDir(cfg)
 	s.logClientUpdateSummary(cfg)
+}
+
+func (s *Server) applyRequestBodyConfig(oldCfg, cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	if oldCfg == nil || oldCfg.ModelRequestBodyLimitBytes() != cfg.ModelRequestBodyLimitBytes() {
+		bodyutil.SetModelRequestBodyLimit(cfg.ModelRequestBodyLimitBytes())
+	}
 }
 
 func (s *Server) oldConfigSnapshot() *config.Config {

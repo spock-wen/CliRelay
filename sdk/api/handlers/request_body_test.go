@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/bodyutil"
 )
 
 type timeoutReadCloser struct{}
@@ -29,12 +30,16 @@ func (timeoutReadError) Timeout() bool   { return true }
 func (timeoutReadError) Temporary() bool { return true }
 
 func TestReadJSONRequestBodyReturnsTooLargeError(t *testing.T) {
-	t.Parallel()
-
 	gin.SetMode(gin.TestMode)
+	previousLimit := bodyutil.ModelRequestBodyLimit()
+	t.Cleanup(func() {
+		bodyutil.SetModelRequestBodyLimit(previousLimit)
+	})
+	bodyutil.SetModelRequestBodyLimit(8)
+
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
-	oversized := bytes.Repeat([]byte("a"), (16<<20)+1)
+	oversized := bytes.Repeat([]byte("a"), 9)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(oversized))
 	req.Header.Set("Content-Type", "application/json")
 	c.Request = req
@@ -60,8 +65,6 @@ func TestReadJSONRequestBodyReturnsTooLargeError(t *testing.T) {
 }
 
 func TestReadJSONRequestBodyReturnsTimeoutError(t *testing.T) {
-	t.Parallel()
-
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -97,8 +100,6 @@ func TestReadJSONRequestBodyReturnsTimeoutError(t *testing.T) {
 }
 
 func TestReadJSONRequestBodyRestoresRequestBody(t *testing.T) {
-	t.Parallel()
-
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)

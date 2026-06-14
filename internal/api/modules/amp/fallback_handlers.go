@@ -117,7 +117,7 @@ func (fh *FallbackHandler) WrapHandler(handler gin.HandlerFunc) gin.HandlerFunc 
 		requestPath := c.Request.URL.Path
 
 		// Read the request body to extract the model name
-		bodyBytes, err := bodyutil.ReadRequestBody(c, bodyutil.DefaultRequestBodyLimit)
+		bodyBytes, err := bodyutil.ReadRequestBody(c, bodyutil.ModelRequestBodyLimit())
 		if err != nil {
 			if bodyutil.IsTooLarge(err) {
 				c.AbortWithStatusJSON(413, gin.H{"error": "request body too large"})
