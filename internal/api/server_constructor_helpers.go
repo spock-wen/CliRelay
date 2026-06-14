@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/bodyutil"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v6/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules"
@@ -40,6 +41,7 @@ func configureServerMode(cfg *config.Config) {
 
 func newServerEngine(cfg *config.Config, optionState *serverOptionConfig) *gin.Engine {
 	engine := gin.New()
+	bodyutil.SetModelRequestBodyLimit(configModelRequestBodyLimitBytes(cfg))
 	if cfg != nil {
 		configureTrustedProxies(engine, cfg.TrustedProxies)
 	}
@@ -49,6 +51,7 @@ func newServerEngine(cfg *config.Config, optionState *serverOptionConfig) *gin.E
 
 	engine.Use(logging.GinLogrusLogger())
 	engine.Use(logging.GinLogrusRecovery())
+	engine.Use(middleware.DecompressRequestMiddleware())
 	if optionState != nil {
 		for _, mw := range optionState.extraMiddleware {
 			engine.Use(mw)
@@ -134,6 +137,7 @@ func (s *Server) applyInitialRuntimeConfig(cfg *config.Config, authManager *auth
 	if s == nil || cfg == nil {
 		return
 	}
+	bodyutil.SetModelRequestBodyLimit(configModelRequestBodyLimitBytes(cfg))
 	if s.handlers != nil {
 		s.handlers.AuthManager = authManager
 	}
@@ -146,6 +150,13 @@ func (s *Server) applyInitialRuntimeConfig(cfg *config.Config, authManager *auth
 	managementasset.SetCurrentConfig(cfg)
 	auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 	s.applyProxyWarmupConfig(cfg)
+}
+
+func configModelRequestBodyLimitBytes(cfg *config.Config) int64 {
+	if cfg == nil {
+		return int64(config.DefaultModelRequestBodyMB) << 20
+	}
+	return cfg.ModelRequestBodyLimitBytes()
 }
 
 func (s *Server) configureManagementHandler(

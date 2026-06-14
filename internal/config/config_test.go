@@ -53,6 +53,45 @@ func TestLoadConfigReadsMainAPIReadTimeoutOverride(t *testing.T) {
 	}
 }
 
+func TestLoadConfigReadsRequestBodyModelLimit(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("request-body:\n  model-max-mb: 64\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+
+	if cfg.RequestBody.ModelMaxMB != 64 {
+		t.Fatalf("RequestBody.ModelMaxMB = %d, want 64", cfg.RequestBody.ModelMaxMB)
+	}
+	if cfg.ModelRequestBodyLimitBytes() != 64<<20 {
+		t.Fatalf("ModelRequestBodyLimitBytes = %d, want %d", cfg.ModelRequestBodyLimitBytes(), int64(64<<20))
+	}
+}
+
+func TestLoadConfigDefaultsRequestBodyModelLimit(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+
+	if cfg.RequestBody.ModelMaxMB != DefaultModelRequestBodyMB {
+		t.Fatalf("RequestBody.ModelMaxMB = %d, want %d", cfg.RequestBody.ModelMaxMB, DefaultModelRequestBodyMB)
+	}
+}
+
 func TestLoadConfigSanitizesProxyWarmupDefaults(t *testing.T) {
 	t.Parallel()
 

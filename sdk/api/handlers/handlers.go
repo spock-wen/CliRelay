@@ -67,7 +67,7 @@ func ReadJSONRequestBody(c *gin.Context) ([]byte, bool) {
 		return nil, false
 	}
 
-	body, err := bodyutil.ReadRequestBody(c, bodyutil.DefaultRequestBodyLimit)
+	body, err := bodyutil.ReadRequestBody(c, bodyutil.ModelRequestBodyLimit())
 	if err == nil {
 		return body, true
 	}
@@ -434,7 +434,7 @@ func requestNeedsWriteTimeoutBypass(c *gin.Context) bool {
 	default:
 		return false
 	}
-	body, err := bodyutil.ReadRequestBody(c, bodyutil.DefaultRequestBodyLimit)
+	body, err := bodyutil.ReadRequestBody(c, bodyutil.ModelRequestBodyLimit())
 	if err != nil || len(body) == 0 {
 		return false
 	}
