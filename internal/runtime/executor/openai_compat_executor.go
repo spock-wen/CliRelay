@@ -107,9 +107,13 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		}
 	}
 
-	// OpenCode-Go: the translator drops reasoning_content when converting
-	// from Responses API. Inject it here into translated payload so it survives.
-	if e.provider == openCodeGoProvider && opencodeGoNeedsReasoningInjection(execCtx.BaseModel) {
+	// DeepSeek thinking mode requires reasoning_content on every assistant
+	// turn in multi-turn history, but the Claude→OpenAI translator only emits
+	// it for turns carrying a thinking block — tool_use-only turns ship bare
+	// and get rejected with 400. Backfill the field for any deepseek model,
+	// regardless of provider, so DeepSeek官方 / 火山引擎 (generic compat
+	// providers) are covered alongside opencode-go.
+	if opencodeGoNeedsReasoningInjection(execCtx.BaseModel) {
 		sessionID := opencodeGoSessionID(opts, auth)
 		if sessionID != "" {
 			translated = opencodeGoInjectMessagesArray(translated, req.Model, sessionID)
@@ -207,8 +211,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		}
 	}
 
-	// Inject reasoning_content for OpenCode-Go after Responses API translation.
-	if e.provider == openCodeGoProvider && opencodeGoNeedsReasoningInjection(execCtx.BaseModel) {
+	// Inject reasoning_content for DeepSeek thinking mode after translation.
+	// Applies to any deepseek model across all compat providers (not just
+	// opencode-go); see Execute() for the rationale.
+	if opencodeGoNeedsReasoningInjection(execCtx.BaseModel) {
 		sessionID := opencodeGoSessionID(opts, auth)
 		if sessionID != "" {
 			translated = opencodeGoInjectMessagesArray(translated, req.Model, sessionID)
