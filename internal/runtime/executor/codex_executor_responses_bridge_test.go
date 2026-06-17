@@ -44,7 +44,7 @@ func TestCodexExecutorExecutePreservesResponsesImageBridgeModel(t *testing.T) {
 
 	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "gpt-image-2",
-		Payload: []byte(`{"model":"gpt-image-2","input":"draw a fox","size":"1024x1024"}`),
+		Payload: []byte(`{"model":"gpt-image-2","input":"draw a fox","size":"4096x2304"}`),
 		Format:  sdktranslator.FromString("openai-response"),
 	}, cliproxyexecutor.Options{
 		SourceFormat: sdktranslator.FromString("openai-response"),
@@ -61,6 +61,12 @@ func TestCodexExecutorExecutePreservesResponsesImageBridgeModel(t *testing.T) {
 	}
 	if got := gjson.Get(lastBody, "tools.0.model").String(); got != "gpt-image-2" {
 		t.Fatalf("tools.0.model = %q, want %q; body=%s", got, "gpt-image-2", lastBody)
+	}
+	if gjson.Get(lastBody, "tools.0.size").Exists() {
+		t.Fatalf("tools.0.size should be stripped before Codex upstream call; body=%s", lastBody)
+	}
+	if got := gjson.Get(lastBody, "input.0.content.0.text").String(); got != "draw a fox\n\nPreferred image size: 4096x2304." {
+		t.Fatalf("input text = %q, want prompt with size hint; body=%s", got, lastBody)
 	}
 }
 

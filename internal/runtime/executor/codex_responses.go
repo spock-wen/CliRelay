@@ -2,11 +2,14 @@ package executor
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+const codexResponsesImageSizeHintPrefix = "Preferred image size: "
 
 func ensureTranslatedCodexModel(body []byte, fallback string) []byte {
 	if strings.TrimSpace(gjson.GetBytes(body, "model").String()) != "" {
@@ -24,7 +27,112 @@ func sanitizeCodexResponsesRequest(body []byte) []byte {
 	} {
 		body, _ = sjson.DeleteBytes(body, field)
 	}
+	body = stripCodexResponsesImageGenerationSize(body)
 	return body
+}
+
+func stripCodexResponsesImageGenerationSize(body []byte) []byte {
+	tools := gjson.GetBytes(body, "tools")
+	if !tools.IsArray() {
+		return body
+	}
+	var sizeHint string
+	for index, tool := range tools.Array() {
+		if strings.TrimSpace(tool.Get("type").String()) != "image_generation" {
+			continue
+		}
+		sizePath := fmt.Sprintf("tools.%d.size", index)
+		size := gjson.GetBytes(body, sizePath)
+		if !size.Exists() {
+			continue
+		}
+		if trimmed := strings.TrimSpace(size.String()); trimmed != "" && sizeHint == "" {
+			sizeHint = trimmed
+		}
+		body, _ = sjson.DeleteBytes(body, sizePath)
+	}
+	return appendCodexResponsesImageSizeHint(body, sizeHint)
+}
+
+func appendCodexResponsesImageSizeHint(body []byte, size string) []byte {
+	size = strings.TrimSpace(size)
+	if size == "" {
+		return body
+	}
+	hint := codexResponsesImageSizeHintPrefix + size + "."
+	inputResult := gjson.GetBytes(body, "input")
+	if inputResult.Type == gjson.String {
+		body, _ = sjson.SetBytes(body, "input", appendCodexResponsesImageHintToText(inputResult.String(), hint))
+		return body
+	}
+	if inputResult.IsArray() {
+		items := inputResult.Array()
+		for itemIndex, item := range items {
+			if strings.TrimSpace(item.Get("role").String()) != "user" {
+				continue
+			}
+			if updated, ok := appendCodexResponsesImageHintToInputItem(body, itemIndex, item, hint); ok {
+				return updated
+			}
+		}
+		for itemIndex, item := range items {
+			if updated, ok := appendCodexResponsesImageHintToInputItem(body, itemIndex, item, hint); ok {
+				return updated
+			}
+		}
+		body, _ = sjson.SetRawBytes(body, "input.-1", codexResponsesUserTextMessage(hint))
+		return body
+	}
+	body, _ = sjson.SetRawBytes(body, "input", []byte(`[]`))
+	body, _ = sjson.SetRawBytes(body, "input.-1", codexResponsesUserTextMessage(hint))
+	return body
+}
+
+func appendCodexResponsesImageHintToInputItem(body []byte, itemIndex int, item gjson.Result, hint string) ([]byte, bool) {
+	content := item.Get("content")
+	if content.Type == gjson.String {
+		path := fmt.Sprintf("input.%d.content", itemIndex)
+		body, _ = sjson.SetBytes(body, path, appendCodexResponsesImageHintToText(content.String(), hint))
+		return body, true
+	}
+	if !content.IsArray() {
+		return body, false
+	}
+	for contentIndex, part := range content.Array() {
+		text := part.Get("text")
+		if text.Type != gjson.String {
+			continue
+		}
+		path := fmt.Sprintf("input.%d.content.%d.text", itemIndex, contentIndex)
+		body, _ = sjson.SetBytes(body, path, appendCodexResponsesImageHintToText(text.String(), hint))
+		return body, true
+	}
+	path := fmt.Sprintf("input.%d.content.-1", itemIndex)
+	body, _ = sjson.SetRawBytes(body, path, codexResponsesInputTextMessagePart(hint))
+	return body, true
+}
+
+func appendCodexResponsesImageHintToText(text string, hint string) string {
+	if strings.Contains(text, hint) || strings.Contains(text, codexResponsesImageSizeHintPrefix) {
+		return text
+	}
+	text = strings.TrimRight(text, " \t\r\n")
+	if text == "" {
+		return hint
+	}
+	return text + "\n\n" + hint
+}
+
+func codexResponsesUserTextMessage(text string) []byte {
+	message := []byte(`{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}`)
+	message, _ = sjson.SetBytes(message, "content.0.text", text)
+	return message
+}
+
+func codexResponsesInputTextMessagePart(text string) []byte {
+	part := []byte(`{"type":"input_text","text":""}`)
+	part, _ = sjson.SetBytes(part, "text", text)
+	return part
 }
 
 func extractCodexResponsesOutputItemDone(payload []byte) ([]byte, string, bool) {

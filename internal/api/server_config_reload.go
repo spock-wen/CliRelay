@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/bodyutil"
 	internalserviceapp "github.com/router-for-me/CLIProxyAPI/v6/internal/app/service"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
@@ -47,6 +48,7 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	s.applyProcessLoggingConfig(oldCfg, cfg)
 	s.applyUsageStatisticsConfig(oldCfg, cfg)
 	s.applyAuthRuntimeConfig(oldCfg, cfg)
+	s.applyRequestBodyConfig(oldCfg, cfg)
 	s.applyRuntimeLogLevel(oldCfg, cfg)
 	s.applyProxyWarmupConfig(cfg)
 	s.updateManagementRouteAvailability(oldCfg, cfg)
@@ -57,6 +59,28 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 	s.refreshAmpModule(oldCfg, cfg)
 	s.syncTokenStoreBaseDir(cfg)
 	s.logClientUpdateSummary(cfg)
+}
+
+func (s *Server) applyRequestBodyConfig(oldCfg, cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	if oldCfg == nil || oldCfg.ModelRequestBodyLimitBytes() != cfg.ModelRequestBodyLimitBytes() {
+		bodyutil.SetModelRequestBodyLimit(cfg.ModelRequestBodyLimitBytes())
+	}
+	if oldCfg == nil || oldCfg.RequestBodyDiskThresholdBytes() != cfg.RequestBodyDiskThresholdBytes() {
+		bodyutil.SetRequestBodyDiskThreshold(cfg.RequestBodyDiskThresholdBytes())
+	}
+	if oldCfg == nil || oldCfg.RequestBodyCacheDir() != cfg.RequestBodyCacheDir() {
+		if cfg.RequestBodyCacheDir() == "" {
+			bodyutil.ResetRequestBodyCacheDir()
+		} else {
+			bodyutil.SetRequestBodyCacheDir(cfg.RequestBodyCacheDir())
+		}
+		if err := bodyutil.CleanupOldRequestBodyCacheFiles(5 * time.Minute); err != nil {
+			log.Warnf("failed to cleanup request body cache files: %v", err)
+		}
+	}
 }
 
 func (s *Server) oldConfigSnapshot() *config.Config {

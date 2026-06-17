@@ -25,6 +25,9 @@ type Config struct {
 	// When unset or <= 0, DefaultMainAPIReadTimeout is used.
 	MainAPIReadTimeoutSeconds int `yaml:"main-api-read-timeout-seconds,omitempty" json:"main-api-read-timeout-seconds,omitempty"`
 
+	// RequestBody controls request-body limits for public model API endpoints.
+	RequestBody RequestBodyConfig `yaml:"request-body,omitempty" json:"request-body,omitempty"`
+
 	// Timezone configures the project's timezone (IANA name, e.g. "Asia/Shanghai").
 	// It affects "today" boundaries and day-based aggregation in monitoring/usage pages.
 	// When empty, the process local timezone (time.Local) is used.
@@ -168,6 +171,45 @@ func (cfg *Config) MainAPIReadTimeout() time.Duration {
 		return DefaultMainAPIReadTimeout
 	}
 	return time.Duration(cfg.MainAPIReadTimeoutSeconds) * time.Second
+}
+
+// RequestBodyConfig controls public model API request-body handling.
+type RequestBodyConfig struct {
+	// ModelMaxMB is the maximum decoded request body size for model endpoints.
+	// Management and upload endpoints keep their narrower endpoint-specific limits.
+	ModelMaxMB int `yaml:"model-max-mb,omitempty" json:"model-max-mb,omitempty"`
+	// DiskThresholdMB is the decoded body size above which reusable request
+	// bodies spill to a temporary file instead of staying cached in memory.
+	DiskThresholdMB int `yaml:"disk-threshold-mb,omitempty" json:"disk-threshold-mb,omitempty"`
+	// CacheDir optionally overrides the dedicated request-body temp file directory.
+	// When empty, the runtime uses the OS temp directory under a CliRelay-specific subdirectory.
+	CacheDir string `yaml:"cache-dir,omitempty" json:"cache-dir,omitempty"`
+}
+
+// ModelRequestBodyLimitBytes returns the decoded body limit for model endpoints.
+func (cfg *Config) ModelRequestBodyLimitBytes() int64 {
+	maxMB := DefaultModelRequestBodyMB
+	if cfg != nil && cfg.RequestBody.ModelMaxMB > 0 {
+		maxMB = cfg.RequestBody.ModelMaxMB
+	}
+	return int64(maxMB) << 20
+}
+
+// RequestBodyDiskThresholdBytes returns the memory threshold for reusable body storage.
+func (cfg *Config) RequestBodyDiskThresholdBytes() int64 {
+	thresholdMB := DefaultRequestBodyDiskThresholdMB
+	if cfg != nil && cfg.RequestBody.DiskThresholdMB > 0 {
+		thresholdMB = cfg.RequestBody.DiskThresholdMB
+	}
+	return int64(thresholdMB) << 20
+}
+
+// RequestBodyCacheDir returns the optional request-body temp cache directory.
+func (cfg *Config) RequestBodyCacheDir() string {
+	if cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.RequestBody.CacheDir)
 }
 
 // ClaudeHeaderDefaults configures default header values injected into Claude API requests

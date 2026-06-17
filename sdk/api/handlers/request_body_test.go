@@ -7,9 +7,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/bodyutil"
 )
 
 type timeoutReadCloser struct{}
@@ -29,12 +31,16 @@ func (timeoutReadError) Timeout() bool   { return true }
 func (timeoutReadError) Temporary() bool { return true }
 
 func TestReadJSONRequestBodyReturnsTooLargeError(t *testing.T) {
-	t.Parallel()
-
 	gin.SetMode(gin.TestMode)
+	previousLimit := bodyutil.ModelRequestBodyLimit()
+	t.Cleanup(func() {
+		bodyutil.SetModelRequestBodyLimit(previousLimit)
+	})
+	bodyutil.SetModelRequestBodyLimit(8)
+
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
-	oversized := bytes.Repeat([]byte("a"), (16<<20)+1)
+	oversized := bytes.Repeat([]byte("a"), 9)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(oversized))
 	req.Header.Set("Content-Type", "application/json")
 	c.Request = req
@@ -60,8 +66,6 @@ func TestReadJSONRequestBodyReturnsTooLargeError(t *testing.T) {
 }
 
 func TestReadJSONRequestBodyReturnsTimeoutError(t *testing.T) {
-	t.Parallel()
-
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -97,8 +101,6 @@ func TestReadJSONRequestBodyReturnsTimeoutError(t *testing.T) {
 }
 
 func TestReadJSONRequestBodyRestoresRequestBody(t *testing.T) {
-	t.Parallel()
-
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
@@ -120,6 +122,35 @@ func TestReadJSONRequestBodyRestoresRequestBody(t *testing.T) {
 	}
 	if string(bodyAgain) != string(body) {
 		t.Fatalf("expected restored body %q, got %q", string(body), string(bodyAgain))
+	}
+}
+
+func TestRequestNeedsWriteTimeoutBypassDecodesDiskBackedStreamFlag(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousThreshold := bodyutil.RequestBodyDiskThreshold()
+	t.Cleanup(func() {
+		bodyutil.SetRequestBodyDiskThreshold(previousThreshold)
+		bodyutil.ResetRequestBodyCacheDir()
+	})
+	bodyutil.SetRequestBodyDiskThreshold(8)
+	bodyutil.SetRequestBodyCacheDir(t.TempDir())
+
+	payload := `{"model":"gpt-5.5","input":"` + strings.Repeat("x", 64) + `","stream":true}`
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	c.Request = req
+
+	if !requestNeedsWriteTimeoutBypass(c) {
+		t.Fatal("expected stream:true request to bypass write timeout")
+	}
+	restored, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		t.Fatalf("read restored body: %v", err)
+	}
+	if string(restored) != payload {
+		t.Fatalf("restored body = %s", restored)
 	}
 }
 

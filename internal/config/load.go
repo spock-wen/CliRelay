@@ -62,6 +62,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LoggingToFile = false
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
+	cfg.RequestBody.ModelMaxMB = DefaultModelRequestBodyMB
+	cfg.RequestBody.DiskThresholdMB = DefaultRequestBodyDiskThresholdMB
 	cfg.UsageStatisticsEnabled = false
 	cfg.RequestLogStorage.StoreContent = true
 	cfg.RequestLogStorage.ContentRetentionDays = 30
@@ -144,6 +146,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 	if cfg.Port == 0 {
 		cfg.Port = 8315
+	}
+	if cfg.RequestBody.ModelMaxMB <= 0 {
+		cfg.RequestBody.ModelMaxMB = DefaultModelRequestBodyMB
+	}
+	if cfg.RequestBody.DiskThresholdMB <= 0 {
+		cfg.RequestBody.DiskThresholdMB = DefaultRequestBodyDiskThresholdMB
 	}
 	if cfg.RequestLogStorage.ContentRetentionDays < 0 {
 		cfg.RequestLogStorage.ContentRetentionDays = 0

@@ -16,7 +16,6 @@ import (
 )
 
 func TestGetProxyPoolIncludesMaskedURL(t *testing.T) {
-	t.Parallel()
 	gin.SetMode(gin.TestMode)
 
 	h := NewHandler(&config.Config{
@@ -55,7 +54,6 @@ func TestGetProxyPoolIncludesMaskedURL(t *testing.T) {
 }
 
 func TestPutProxyPoolNormalizesAndPersists(t *testing.T) {
-	t.Parallel()
 	gin.SetMode(gin.TestMode)
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
@@ -89,7 +87,6 @@ func TestPutProxyPoolNormalizesAndPersists(t *testing.T) {
 }
 
 func TestPatchProxyPoolEntryUpdatesConfigWithoutAppending(t *testing.T) {
-	t.Parallel()
 	gin.SetMode(gin.TestMode)
 
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
@@ -136,7 +133,6 @@ func TestPatchProxyPoolEntryUpdatesConfigWithoutAppending(t *testing.T) {
 }
 
 func TestPostProxyPoolCheckUsesConfiguredProxy(t *testing.T) {
-	t.Parallel()
 	gin.SetMode(gin.TestMode)
 
 	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
