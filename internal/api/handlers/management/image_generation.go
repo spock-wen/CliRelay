@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	imagegeneration "github.com/router-for-me/CLIProxyAPI/v6/internal/management/imagegeneration"
+	settingsstore "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/store"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -23,12 +24,172 @@ import (
 )
 
 const (
-	imageGenerationModel        = "gpt-image-2"
-	imageGenerationAlt          = "images/generations"
-	imageEditsAlt               = "images/edits"
-	imageMaxUploads             = 5
-	imageGenerationSystemAPIKey = "POST /image-generation/test"
+	imageGenerationModel         = "gpt-image-2"
+	imageGenerationAlt           = "images/generations"
+	imageEditsAlt                = "images/edits"
+	imageMaxUploads              = 5
+	imageGenerationSystemAPIKey  = "POST /image-generation/test"
+	imageGenerationMaxSizeEdge   = 8192
+	imageGenerationMaxSizePixels = imageGenerationMaxSizeEdge * imageGenerationMaxSizeEdge
 )
+
+var defaultImageGenerationSizePresets = []string{
+	"1024x1024",
+	"1792x1024",
+	"1024x1792",
+	"2560x1440",
+	"2160x3840",
+}
+
+func (h *Handler) GetImageGenerationSizePresets(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"sizes": imageGenerationSizePresets()})
+}
+
+func (h *Handler) PutImageGenerationSizePresets(c *gin.Context) {
+	var body settingsstore.ImageSizePresetsSetting
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	sizes, err := normalizeImageGenerationSizePresets(body.Sizes)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	customSizes := customImageGenerationSizePresets(sizes)
+	if err := settingsstore.StoreImageSizePresetsSetting(customSizes); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save size presets: %v", err)})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"sizes": mergeImageGenerationSizePresets(defaultImageGenerationSizePresets, customSizes)})
+}
+
+func imageGenerationSizePresets() []string {
+	customSizes := loadImageGenerationCustomSizePresets()
+	return mergeImageGenerationSizePresets(defaultImageGenerationSizePresets, customSizes)
+}
+
+func loadImageGenerationCustomSizePresets() []string {
+	return filterValidImageGenerationSizePresets(settingsstore.LoadImageSizePresetsSetting())
+}
+
+func filterValidImageGenerationSizePresets(values []string) []string {
+	sizes := make([]string, 0, len(values))
+	seen := make(map[string]struct{})
+	for _, value := range values {
+		size, ok := normalizeImageGenerationSizePreset(value)
+		if !ok {
+			continue
+		}
+		if _, exists := seen[size]; exists {
+			continue
+		}
+		seen[size] = struct{}{}
+		sizes = append(sizes, size)
+	}
+	return sizes
+}
+
+func normalizeImageGenerationSizePresets(values []string) ([]string, error) {
+	sizes := make([]string, 0, len(values))
+	seen := make(map[string]struct{})
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		size, err := parseImageGenerationSizePreset(value)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := seen[size]; exists {
+			continue
+		}
+		seen[size] = struct{}{}
+		sizes = append(sizes, size)
+	}
+	return sizes, nil
+}
+
+func customImageGenerationSizePresets(values []string) []string {
+	defaults := make(map[string]struct{}, len(defaultImageGenerationSizePresets))
+	for _, value := range defaultImageGenerationSizePresets {
+		defaults[value] = struct{}{}
+	}
+	custom := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := defaults[value]; ok {
+			continue
+		}
+		custom = append(custom, value)
+	}
+	return custom
+}
+
+func mergeImageGenerationSizePresets(lists ...[]string) []string {
+	merged := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, list := range lists {
+		for _, value := range list {
+			size, ok := normalizeImageGenerationSizePreset(value)
+			if !ok {
+				continue
+			}
+			if _, exists := seen[size]; exists {
+				continue
+			}
+			seen[size] = struct{}{}
+			merged = append(merged, size)
+		}
+	}
+	return merged
+}
+
+func normalizeImageGenerationSizePreset(value string) (string, bool) {
+	size, err := parseImageGenerationSizePreset(value)
+	return size, err == nil
+}
+
+func parseImageGenerationSizePreset(value string) (string, error) {
+	normalized := strings.NewReplacer("X", "x", "×", "x", "*", "x").Replace(strings.TrimSpace(value))
+	parts := strings.Split(normalized, "x")
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid size %q", value)
+	}
+	width, ok := parseImageGenerationSizeDimension(strings.TrimSpace(parts[0]))
+	if !ok {
+		return "", fmt.Errorf("invalid size %q", value)
+	}
+	height, ok := parseImageGenerationSizeDimension(strings.TrimSpace(parts[1]))
+	if !ok {
+		return "", fmt.Errorf("invalid size %q", value)
+	}
+	if width > imageGenerationMaxSizeEdge || height > imageGenerationMaxSizeEdge || width*height > imageGenerationMaxSizePixels {
+		return "", fmt.Errorf(
+			"size %q exceeds maximum %dx%d pixels and %d on either edge",
+			value,
+			imageGenerationMaxSizeEdge,
+			imageGenerationMaxSizeEdge,
+			imageGenerationMaxSizeEdge,
+		)
+	}
+	return strconv.Itoa(width) + "x" + strconv.Itoa(height), nil
+}
+
+func parseImageGenerationSizeDimension(value string) (int, bool) {
+	if value == "" || value[0] == '0' {
+		return 0, false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return 0, false
+		}
+	}
+	dimension, err := strconv.Atoi(value)
+	if err != nil || dimension <= 0 {
+		return 0, false
+	}
+	return dimension, true
+}
 
 func (h *Handler) PostImageGenerationTest(c *gin.Context) {
 	payload, alt, err := parseImageGenerationTestPayload(c)

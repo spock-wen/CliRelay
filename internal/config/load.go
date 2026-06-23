@@ -62,6 +62,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.LoggingToFile = false
 	cfg.LogsMaxTotalSizeMB = 0
 	cfg.ErrorLogsMaxFiles = 10
+	cfg.RequestBody.ModelMaxMB = DefaultModelRequestBodyMB
+	cfg.RequestBody.DiskThresholdMB = DefaultRequestBodyDiskThresholdMB
 	cfg.UsageStatisticsEnabled = false
 	cfg.RequestLogStorage.StoreContent = true
 	cfg.RequestLogStorage.ContentRetentionDays = 30
@@ -81,6 +83,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.AutoUpdate.Repository = DefaultAutoUpdateRepository
 	cfg.AutoUpdate.DockerImage = DefaultAutoUpdateDockerImage
 	cfg.AutoUpdate.UpdaterURL = DefaultAutoUpdateUpdaterURL
+	cfg.ProxyWarmup = defaultProxyWarmConfig()
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
@@ -113,6 +116,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.SanitizeClaudeKeys()
 	cfg.SanitizeOpenCodeGoKeys()
 	cfg.SanitizeGeminiKeys()
+	cfg.SanitizeProxyWarmup()
 
 	// Normalize secret-key: if provided and not bcrypt-hashed, hash it on load for runtime use.
 	if cfg.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
@@ -142,6 +146,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 	if cfg.Port == 0 {
 		cfg.Port = 8315
+	}
+	if cfg.RequestBody.ModelMaxMB <= 0 {
+		cfg.RequestBody.ModelMaxMB = DefaultModelRequestBodyMB
+	}
+	if cfg.RequestBody.DiskThresholdMB <= 0 {
+		cfg.RequestBody.DiskThresholdMB = DefaultRequestBodyDiskThresholdMB
 	}
 	if cfg.RequestLogStorage.ContentRetentionDays < 0 {
 		cfg.RequestLogStorage.ContentRetentionDays = 0

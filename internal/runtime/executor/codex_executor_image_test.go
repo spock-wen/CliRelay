@@ -18,6 +18,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	cliproxyusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	"github.com/tidwall/gjson"
 )
 
 type usageCapturePlugin struct {
@@ -514,7 +515,7 @@ func TestCodexExecutorExecuteImageGenerationViaResponsesToolChoice(t *testing.T)
 
 	resp, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "gpt-image-2",
-		Payload: []byte(`{"model":"gpt-image-2","prompt":"给我绘制一个 springboot 的系统架构图","size":"1024x1024","quality":"high"}`),
+		Payload: []byte(`{"model":"gpt-image-2","prompt":"给我绘制一个 springboot 的系统架构图","size":"4096x2304","quality":"high"}`),
 		Format:  sdktranslator.FromString("openai"),
 	}, cliproxyexecutor.Options{
 		Alt:          "images/generations",
@@ -532,6 +533,12 @@ func TestCodexExecutorExecuteImageGenerationViaResponsesToolChoice(t *testing.T)
 	}
 	if !strings.Contains(lastBody, `"model":"gpt-image-2"`) {
 		t.Fatalf("request body = %s, want gpt-image-2 tool model", lastBody)
+	}
+	if gjson.Get(lastBody, "tools.0.size").Exists() {
+		t.Fatalf("request body = %s, want size stripped from image_generation tool", lastBody)
+	}
+	if got := gjson.Get(lastBody, "input.0.content.0.text").String(); !strings.Contains(got, "Preferred image size: 4096x2304.") {
+		t.Fatalf("input text = %q, want oversized size hint; request body=%s", got, lastBody)
 	}
 
 	var payload struct {
