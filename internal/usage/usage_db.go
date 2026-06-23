@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ type LogRow struct {
 	ChannelName     string    `json:"channel_name"`
 	AuthIndex       string    `json:"auth_index"`
 	Failed          bool      `json:"failed"`
+	Streaming       bool      `json:"streaming"`
 	LatencyMs       int64     `json:"latency_ms"`
 	FirstTokenMs    int64     `json:"first_token_ms"`
 	InputTokens     int64     `json:"input_tokens"`
@@ -109,6 +111,7 @@ const systemRequestLogFilterValue = "__system__"
 
 var (
 	usageDB     *sql.DB
+	usageReadDB *sql.DB
 	usageDBMu   sync.Mutex
 	usageDBPath string
 	usageLoc    *time.Location
@@ -126,6 +129,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
   channel_name     TEXT NOT NULL DEFAULT '',
   auth_index       TEXT NOT NULL DEFAULT '',
   failed           INTEGER NOT NULL DEFAULT 0,
+  streaming        INTEGER NOT NULL DEFAULT 0,
   latency_ms       INTEGER NOT NULL DEFAULT 0,
   first_token_ms   INTEGER NOT NULL DEFAULT 0,
   input_tokens     INTEGER NOT NULL DEFAULT 0,
@@ -302,6 +306,15 @@ func migrateFirstTokenColumn(db *sql.DB) {
 	}
 }
 
+func migrateStreamingColumn(db *sql.DB) {
+	_, err := db.Exec("ALTER TABLE request_logs ADD COLUMN streaming INTEGER NOT NULL DEFAULT 0")
+	if err != nil {
+		if !strings.Contains(err.Error(), "duplicate") {
+			log.Warnf("usage: migrate column streaming: %v", err)
+		}
+	}
+}
+
 func migrateRequestLogDetailColumn(db *sql.DB) {
 	_, err := db.Exec("ALTER TABLE request_log_content ADD COLUMN detail_content BLOB NOT NULL DEFAULT X''")
 	if err != nil {
@@ -370,6 +383,32 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 	} else {
 		log.Debugf("usage: journal_mode set (result: %v)", res)
 	}
+	// synchronous=NORMAL under WAL is safe (no corruption on power loss for
+	// committed txns) and reduces fsync contention between the writer and readers.
+	if _, err := db.Exec("PRAGMA synchronous = NORMAL"); err != nil {
+		log.Warnf("usage: failed to set synchronous=NORMAL: %v", err)
+	}
+
+	// Open a separate read-only connection pool so management reads (QueryLogs,
+	// QueryStats, QueryFilters, content queries) do not serialize behind the
+	// single writer or maintenance ops (wal_checkpoint/VACUUM). WAL mode allows
+	// concurrent readers alongside a writer, so reads stay responsive while inserts
+	// or maintenance hold the write connection. WAL is persisted on the DB file by
+	// the writer above, so the read-only handle opens in WAL mode automatically.
+	readDB, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(5000)")
+	if err != nil {
+		_ = db.Close()
+		return fmt.Errorf("usage: open sqlite read-only handle: %w", err)
+	}
+	// Readers can run concurrently with each other and with the writer under WAL.
+	readDB.SetMaxOpenConns(4)
+	readDB.SetMaxIdleConns(2)
+	readDB.SetConnMaxLifetime(30 * time.Minute)
+	if err := readDB.PingContext(pingCtx); err != nil {
+		_ = db.Close()
+		_ = readDB.Close()
+		return fmt.Errorf("usage: ping sqlite read-only handle: %w", err)
+	}
 
 	log.Debugf("usage: creating tables")
 	if _, err := db.Exec(createTableSQL); err != nil {
@@ -378,6 +417,7 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 	}
 
 	usageDB = db
+	usageReadDB = readDB
 	usageDBPath = dbPath
 	requestLogStorage = normalizeRequestLogStorageConfig(storageCfg)
 	log.Debugf("usage: running content column migration")
@@ -392,6 +432,8 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 	migrateAuthSubjectIDColumns(db)
 	log.Debugf("usage: running first_token_ms column migration")
 	migrateFirstTokenColumn(db)
+	log.Debugf("usage: running streaming column migration")
+	migrateStreamingColumn(db)
 	log.Debugf("usage: running request log detail column migration")
 	migrateRequestLogDetailColumn(db)
 	log.Debugf("usage: ensuring request log detail indexes")
@@ -428,9 +470,13 @@ func CloseDB() {
 	if usageDB != nil {
 		_ = usageDB.Close()
 		usageDB = nil
-		usageLoc = nil
-		log.Info("usage: SQLite database closed")
 	}
+	if usageReadDB != nil {
+		_ = usageReadDB.Close()
+		usageReadDB = nil
+	}
+	usageLoc = nil
+	log.Info("usage: SQLite database closed")
 }
 
 // InsertLog writes a single request log entry into the SQLite database.
@@ -471,6 +517,10 @@ func insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, sourc
 	if failed {
 		failedInt = 1
 	}
+	streamingInt := 0
+	if isStreamingRequestContent(inputContent) {
+		streamingInt = 1
+	}
 
 	// Calculate cost based on model pricing using semantic cache read/write
 	cost := CalculateCostV2(model, tokens)
@@ -498,11 +548,11 @@ func insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, sourc
 	result, err := tx.Exec(
 		`INSERT INTO request_logs
 			(timestamp, api_key, api_key_id, auth_subject_id, api_key_name, model, source, channel_name, auth_index,
-			 failed, latency_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 failed, streaming, latency_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		timestamp.UTC().Format(time.RFC3339Nano),
 		apiKey, apiKeyID, authSubjectID, apiKeyName, model, source, channelName, authIndex,
-		failedInt, latencyMs, firstTokenMs,
+		failedInt, streamingInt, latencyMs, firstTokenMs,
 		tokens.InputTokens, tokens.OutputTokens, tokens.ReasoningTokens,
 		tokens.CachedTokens, tokens.TotalTokens, cost,
 	)
@@ -535,6 +585,16 @@ func insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, sourc
 	if tokenUsageCallback != nil && tokens.TotalTokens > 0 {
 		tokenUsageCallback(apiKey, tokens.TotalTokens)
 	}
+}
+
+func isStreamingRequestContent(content string) bool {
+	var payload struct {
+		Stream bool `json:"stream"`
+	}
+	if err := json.Unmarshal([]byte(content), &payload); err != nil {
+		return false
+	}
+	return payload.Stream
 }
 
 // tokenUsageCallback is set by SetTokenUsageCallback to notify external
@@ -575,6 +635,19 @@ func parseStoredTime(value string) (time.Time, bool) {
 func getDB() *sql.DB {
 	usageDBMu.Lock()
 	defer usageDBMu.Unlock()
+	return usageDB
+}
+
+// getReadDB returns the dedicated read-only connection pool used by management
+// read paths (QueryLogs/QueryStats/QueryFilters/content queries) so they do not
+// block on the single writer or maintenance ops. It falls back to the write
+// handle when no read pool is available, preserving correctness.
+func getReadDB() *sql.DB {
+	usageDBMu.Lock()
+	defer usageDBMu.Unlock()
+	if usageReadDB != nil {
+		return usageReadDB
+	}
 	return usageDB
 }
 

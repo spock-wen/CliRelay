@@ -554,7 +554,7 @@ func TestQueryLogContentPartReturnsStoredRequestDetails(t *testing.T) {
 	}
 }
 
-func TestInitDBMigratesFirstTokenColumn(t *testing.T) {
+func TestInitDBMigratesFirstTokenAndStreamingColumns(t *testing.T) {
 	CloseDB()
 	dbPath := filepath.Join(t.TempDir(), "usage.db")
 
@@ -597,7 +597,7 @@ func TestInitDBMigratesFirstTokenColumn(t *testing.T) {
 	t.Cleanup(CloseDB)
 
 	db := getDB()
-	var found bool
+	found := map[string]bool{}
 	rows, err := db.Query("PRAGMA table_info(request_logs)")
 	if err != nil {
 		t.Fatalf("PRAGMA table_info(request_logs): %v", err)
@@ -612,13 +612,15 @@ func TestInitDBMigratesFirstTokenColumn(t *testing.T) {
 		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
 			t.Fatalf("scan table info: %v", err)
 		}
-		if name == "first_token_ms" {
-			found = true
-			break
+		if name == "first_token_ms" || name == "streaming" {
+			found[name] = true
 		}
 	}
-	if !found {
+	if !found["first_token_ms"] {
 		t.Fatalf("expected first_token_ms column to exist after InitDB migration")
+	}
+	if !found["streaming"] {
+		t.Fatalf("expected streaming column to exist after InitDB migration")
 	}
 }
 
@@ -750,6 +752,9 @@ func TestInsertLogStoresCompressedContentOutsideMainTable(t *testing.T) {
 	if result.Items[0].FirstTokenMs != 45 {
 		t.Fatalf("FirstTokenMs = %d, want %d", result.Items[0].FirstTokenMs, 45)
 	}
+	if result.Items[0].Streaming {
+		t.Fatalf("Streaming = true, want false for non-stream request")
+	}
 	if !result.Items[0].HasContent {
 		t.Fatalf("expected HasContent to be true")
 	}
@@ -786,6 +791,86 @@ func TestInsertLogStoresCompressedContentOutsideMainTable(t *testing.T) {
 	}
 	if len(compressedInput) == 0 || len(compressedOutput) == 0 {
 		t.Fatalf("expected compressed content blobs to be present")
+	}
+}
+
+func TestQueryLogsMarksStreamingRequests(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+
+	timestamp := time.Now().UTC()
+	InsertLog("sk-test", "", "gpt-test", "source", "channel", "auth-1", false, timestamp, 123, 45, TokenStats{
+		InputTokens:  10,
+		OutputTokens: 20,
+		TotalTokens:  30,
+	}, `{"model":"gpt-test","stream":true}`, "")
+
+	result, err := QueryLogs(LogQueryParams{Page: 1, Size: 10, Days: 1})
+	if err != nil {
+		t.Fatalf("QueryLogs() error = %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 log row, got %d", len(result.Items))
+	}
+	if !result.Items[0].Streaming {
+		t.Fatalf("Streaming = false, want true")
+	}
+}
+
+func TestQueryLogsHydratesLegacyStreamingFlagFromContent(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+
+	timestamp := time.Now().UTC()
+	InsertLog("sk-test", "", "gpt-test", "source", "channel", "auth-1", false, timestamp, 123, 45, TokenStats{
+		InputTokens:  10,
+		OutputTokens: 20,
+		TotalTokens:  30,
+	}, `{"model":"gpt-test","stream":true}`, "")
+
+	db := getDB()
+	if _, err := db.Exec("UPDATE request_logs SET streaming = 0"); err != nil {
+		t.Fatalf("reset streaming flag: %v", err)
+	}
+
+	result, err := QueryLogs(LogQueryParams{Page: 1, Size: 10, Days: 1})
+	if err != nil {
+		t.Fatalf("QueryLogs() error = %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 log row, got %d", len(result.Items))
+	}
+	if !result.Items[0].Streaming {
+		t.Fatalf("Streaming = false, want true from stored content")
+	}
+}
+
+func TestQueryLogsHydratesLegacyStreamingFlagFromInlineContent(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+
+	db := getDB()
+	timestamp := time.Now().UTC()
+	_, err := db.Exec(
+		`INSERT INTO request_logs
+			(timestamp, api_key, model, source, channel_name, auth_index,
+			 failed, latency_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens,
+			 cost, input_content)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		timestamp.Format(time.RFC3339Nano),
+		"sk-legacy", "gpt-test", "source", "channel", "auth-legacy",
+		0, 123, 10, 20, 0, 0, 30, 0, `{"model":"gpt-test","stream":true}`,
+	)
+	if err != nil {
+		t.Fatalf("insert legacy inline row: %v", err)
+	}
+
+	result, err := QueryLogs(LogQueryParams{Page: 1, Size: 10, Days: 1})
+	if err != nil {
+		t.Fatalf("QueryLogs() error = %v", err)
+	}
+	if len(result.Items) != 1 {
+		t.Fatalf("expected 1 log row, got %d", len(result.Items))
+	}
+	if !result.Items[0].Streaming {
+		t.Fatalf("Streaming = false, want true from inline content")
 	}
 }
 
@@ -1547,6 +1632,70 @@ func TestRequestStatisticsPersistsAPIKeyIdentitySnapshotAcrossRename(t *testing.
 	}
 	if dist[0].Name != "袁蔚" {
 		t.Fatalf("distribution name = %q, want 袁蔚", dist[0].Name)
+	}
+}
+
+func TestRequestStatisticsPersistsRequestLogWhenStatisticsDisabled(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+	wasEnabled := StatisticsEnabled()
+	SetStatisticsEnabled(false)
+	t.Cleanup(func() { SetStatisticsEnabled(wasEnabled) })
+
+	stats := NewRequestStatistics()
+	stats.Record(context.Background(), coreusage.Record{
+		APIKey:      "sk-disabled-stats",
+		APIKeyName:  "Disabled Stats",
+		Model:       "glm-5.2",
+		Source:      "source",
+		ChannelName: "channel",
+		AuthIndex:   "auth-1",
+		RequestedAt: time.Now().UTC(),
+		Detail: coreusage.Detail{
+			InputTokens:  10,
+			OutputTokens: 5,
+			TotalTokens:  15,
+		},
+	})
+
+	snapshot := stats.Snapshot()
+	if snapshot.TotalRequests != 0 {
+		t.Fatalf("snapshot.TotalRequests = %d, want 0 when statistics disabled", snapshot.TotalRequests)
+	}
+
+	var count int
+	if err := getDB().QueryRow("SELECT COUNT(*) FROM request_logs WHERE api_key = ?", "sk-disabled-stats").Scan(&count); err != nil {
+		t.Fatalf("query persisted request log: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("persisted request log count = %d, want 1", count)
+	}
+}
+
+func TestInitDBDoesNotRunProviderEchoModelBackfill(t *testing.T) {
+	CloseDB()
+	dbPath := filepath.Join(t.TempDir(), "usage.db")
+	if err := InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("initial InitDB() error = %v", err)
+	}
+	stopRequestLogMaintenance()
+
+	db := getDB()
+	id := insertProviderEchoRequestLog(t, db, "accounts/fireworks/models/glm-5p2", 100)
+	insertRequestLogContentRow(t, db, id, `{"model":"glm-5.2","messages":[]}`)
+	CloseDB()
+
+	if err := InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("second InitDB() error = %v", err)
+	}
+	stopRequestLogMaintenance()
+	t.Cleanup(CloseDB)
+
+	var model string
+	if err := getDB().QueryRow("SELECT model FROM request_logs WHERE id = ?", id).Scan(&model); err != nil {
+		t.Fatalf("query provider echo row: %v", err)
+	}
+	if model != "accounts/fireworks/models/glm-5p2" {
+		t.Fatalf("model = %q, want InitDB to leave provider-echo history unchanged", model)
 	}
 }
 

@@ -1116,136 +1116,65 @@ func GetKimiModels() []*ModelInfo {
 
 // GetOpenCodeGoModels returns the OpenCode Go plan model definitions.
 func GetOpenCodeGoModels() []*ModelInfo {
-	return []*ModelInfo{
-		{
-			ID:          "deepseek-v4-flash",
-			Object:      "model",
-			Created:     1770393600,
-			OwnedBy:     "opencode",
-			Type:        "opencode-go",
-			DisplayName: "DeepSeek V4 Flash",
-		},
-		{
-			ID:          "deepseek-v4-pro",
-			Object:      "model",
-			Created:     1770393600,
-			OwnedBy:     "opencode",
-			Type:        "opencode-go",
-			DisplayName: "DeepSeek V4 Pro",
-		},
-		{
-			ID:          "glm-5.1",
-			Object:      "model",
-			Created:     1770393600,
-			OwnedBy:     "opencode",
-			Type:        "opencode-go",
-			DisplayName: "GLM 5.1",
-		},
-		{
-			ID:          "glm-5",
-			Object:      "model",
-			Created:     1770393600,
-			OwnedBy:     "opencode",
-			Type:        "opencode-go",
-			DisplayName: "GLM 5",
-		},
-		{
-			ID:          "kimi-k2.6",
-			Object:      "model",
-			Created:     1770393600,
-			OwnedBy:     "opencode",
-			Type:        "opencode-go",
-			DisplayName: "Kimi K2.6",
-		},
-		{
-			ID:          "kimi-k2.5",
-			Object:      "model",
-			Created:     1770393600,
-			OwnedBy:     "opencode",
-			Type:        "opencode-go",
-			DisplayName: "Kimi K2.5",
-		},
-		{
-			ID:          "qwen3.6-plus",
-			Object:      "model",
-			Created:     1770393600,
-			OwnedBy:     "opencode",
-			Type:        "opencode-go",
-			DisplayName: "Qwen3.6 Plus",
-		},
-		{
-			ID:          "qwen3.5-plus",
-			Object:      "model",
-			Created:     1770393600,
-			OwnedBy:     "opencode",
-			Type:        "opencode-go",
-			DisplayName: "Qwen3.5 Plus",
-		},
-		{
-			ID:                  "mimo-v2-pro",
-			Object:              "model",
-			Created:             1770393600,
-			OwnedBy:             "opencode",
-			Type:                "opencode-go",
-			DisplayName:         "MiMo V2 Pro",
-			Description:         "Vision-language-thinking model for multimodal reasoning.",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedParameters: []string{"tools"},
-			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
-		},
-		{
-			ID:                  "mimo-v2-flash",
-			Object:              "model",
-			Created:             1770393600,
-			OwnedBy:             "opencode",
-			Type:                "opencode-go",
-			DisplayName:         "MiMo V2 Flash",
-			Description:         "Fast reasoning model (youtu-tldr) for efficient summarization.",
-			ContextLength:       128000,
-			MaxCompletionTokens: 16384,
-			SupportedParameters: []string{"tools"},
-			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
-		},
-		{
-			ID:          "mimo-v2-omni",
-			Object:      "model",
-			Created:     1770393600,
-			OwnedBy:     "opencode",
-			Type:        "opencode-go",
-			DisplayName: "MiMo V2 Omni",
-		},
-		{
-			ID:          "mimo-v2.5-pro",
-			Object:      "model",
-			Created:     1770393600,
-			OwnedBy:     "opencode",
-			Type:        "opencode-go",
-			DisplayName: "MiMo V2.5 Pro",
-		},
-		{
-			ID:          "mimo-v2.5",
-			Object:      "model",
-			Created:     1770393600,
-			OwnedBy:     "opencode",
-			Type:        "opencode-go",
-			DisplayName: "MiMo V2.5",
-		},
-		{
-			ID:          "minimax-m2.7",
-			Object:      "model",
-			Created:     1770393600,
-			OwnedBy:     "opencode",
-			Type:        "opencode-go",
-			DisplayName: "MiniMax M2.7",
-		},
-		{
-			ID:          "minimax-m2.5",
-			Object:      "model",
-			Created:     1770393600,
-			OwnedBy:     "opencode",
-			Type:        "opencode-go",
-			DisplayName: "MiniMax M2.5",
-		},
+	type modelDef struct {
+		id               string
+		displayName      string
+		description      string
+		contextLength    int
+		maxCompletion    int
+		supportedParams  []string
+		thinking         *ThinkingSupport
 	}
+	definitions := []modelDef{
+		{"minimax-m3", "MiniMax M3", "", 0, 0, nil, nil},
+		{"minimax-m2.7", "MiniMax M2.7", "", 0, 0, nil, nil},
+		{"minimax-m2.5", "MiniMax M2.5", "", 0, 0, nil, nil},
+		{"kimi-k2.7-code", "Kimi K2.7 Code", "", 0, 0, nil, nil},
+		{"kimi-k2.6", "Kimi K2.6", "", 0, 0, nil, nil},
+		{"kimi-k2.5", "Kimi K2.5", "", 0, 0, nil, nil},
+		{"glm-5.2", "GLM 5.2", "", 0, 0, nil, nil},
+		{"glm-5.1", "GLM 5.1", "", 0, 0, nil, nil},
+		{"glm-5", "GLM 5", "", 0, 0, nil, nil},
+		{"deepseek-v4-pro", "DeepSeek V4 Pro", "", 0, 0, nil, nil},
+		{"deepseek-v4-flash", "DeepSeek V4 Flash", "", 0, 0, nil, nil},
+		{"qwen3.7-max", "Qwen3.7 Max", "", 0, 0, nil, nil},
+		{"qwen3.7-plus", "Qwen3.7 Plus", "", 0, 0, nil, nil},
+		{"qwen3.6-plus", "Qwen3.6 Plus", "", 0, 0, nil, nil},
+		{"qwen3.5-plus", "Qwen3.5 Plus", "", 0, 0, nil, nil},
+		{"mimo-v2-pro", "MiMo V2 Pro", "Vision-language-thinking model for multimodal reasoning.", 200000, 32768, []string{"tools"}, &ThinkingSupport{Levels: []string{"low", "medium", "high"}}},
+		{"mimo-v2-flash", "MiMo V2 Flash", "Fast reasoning model (youtu-tldr) for efficient summarization.", 128000, 16384, []string{"tools"}, &ThinkingSupport{Levels: []string{"low", "medium", "high"}}},
+		{"mimo-v2-omni", "MiMo V2 Omni", "", 0, 0, nil, nil},
+		{"mimo-v2.5-pro", "MiMo V2.5 Pro", "", 0, 0, nil, nil},
+		{"mimo-v2.5", "MiMo V2.5", "", 0, 0, nil, nil},
+		{"hy3-preview", "HY3 Preview", "", 0, 0, nil, nil},
+	}
+
+	models := make([]*ModelInfo, 0, len(definitions))
+	for _, d := range definitions {
+		m := &ModelInfo{
+			ID:          d.id,
+			Object:      "model",
+			Created:     1781751220,
+			OwnedBy:     "opencode",
+			Type:        "opencode-go",
+			DisplayName: d.displayName,
+		}
+		if d.description != "" {
+			m.Description = d.description
+		}
+		if d.contextLength > 0 {
+			m.ContextLength = d.contextLength
+		}
+		if d.maxCompletion > 0 {
+			m.MaxCompletionTokens = d.maxCompletion
+		}
+		if d.supportedParams != nil {
+			m.SupportedParameters = d.supportedParams
+		}
+		if d.thinking != nil {
+			m.Thinking = d.thinking
+		}
+		models = append(models, m)
+	}
+	return models
 }

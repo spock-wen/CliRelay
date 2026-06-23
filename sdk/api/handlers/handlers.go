@@ -242,6 +242,7 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	allowedChannelGroups := ""
 	routeGroup := ""
 	routeFallback := ""
+	sessionStickyKey := ""
 	if route := internalrouting.PathRouteContextFromContext(ctx); route != nil {
 		routeGroup = strings.TrimSpace(route.Group)
 		routeFallback = strings.TrimSpace(route.Fallback)
@@ -249,6 +250,7 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if ctx != nil {
 		if ginCtx, ok := ctx.Value(util.ContextKeyGin).(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
+			sessionStickyKey = requestSessionStickyHeaderKey(ginCtx)
 			if metadataVal, exists := ginCtx.Get("accessMetadata"); exists {
 				if metadata, okMeta := metadataVal.(map[string]string); okMeta {
 					allowedChannels = strings.TrimSpace(metadata["allowed-channels"])
@@ -298,6 +300,9 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	}
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
+	}
+	if sessionStickyKey != "" {
+		meta[coreexecutor.SessionStickyMetadataKey] = sessionStickyKey
 	}
 	return meta
 }
