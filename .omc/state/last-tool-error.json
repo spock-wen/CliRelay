@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"git merge origin/main --no-edit\",\"description\":\"Merge origin/main into local main\"}",
+  "error": "Exit code 1\nAuto-merging internal/api/handlers/management/usage_logs_handler.go\nAuto-merging internal/api/routes/management_test.go\nCONFLICT (content): Merge conflict in internal/api/routes/management_test.go\nAuto-merging internal/runtime/executor/openai_compat_executor.go\nAuto-merging internal/translator/openai/claude/openai_claude_request.go\nCONFLICT (content): Merge conflict in internal/translator/openai/claude/openai_claude_request.go\nAuto-merging internal/translator/openai/claude/openai_cla...",
+  "timestamp": "2026-06-23T09:04:39.648Z",
+  "retry_count": 1
+}
