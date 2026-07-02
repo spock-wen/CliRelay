@@ -106,6 +106,7 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 
 	translated = preserveReasoningContentInMessages(translated)
+	translated = normalizeGLMStopToArray(translated)
 	translated = execCtx.ApplyPayloadConfig(translated, originalTranslated)
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
@@ -205,6 +206,7 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	translated = preserveReasoningContentInMessages(translated)
+	translated = normalizeGLMStopToArray(translated)
 	// Ensure tools array exists to avoid provider quirks similar to Qwen's behaviour.
 	toolsResult := gjson.GetBytes(translated, "tools")
 	if toolsResult.Exists() && toolsResult.IsArray() && len(toolsResult.Array()) == 0 {
@@ -525,6 +527,31 @@ func ensureToolsArray(body []byte) []byte {
 		return body
 	}
 	return updated
+}
+
+// normalizeGLMStopToArray converts the "stop" field from a JSON string to a
+// JSON array of strings when it is present as a bare string value. GLM (Zhipu)
+// upstreams expect stop to always be string[], and will reject a bare string
+// with a Jackson deserialization error.
+//
+// Only operates on models whose name starts with "glm-".
+func normalizeGLMStopToArray(body []byte) []byte {
+	model := strings.ToLower(gjson.GetBytes(body, "model").String())
+	if !strings.HasPrefix(model, "glm-") {
+		return body
+	}
+	stop := gjson.GetBytes(body, "stop")
+	if !stop.Exists() {
+		return body
+	}
+	if !stop.IsArray() && stop.Type == gjson.String {
+		updated, err := sjson.SetBytes(body, "stop", []string{stop.String()})
+		if err != nil {
+			return body
+		}
+		return updated
+	}
+	return body
 }
 
 // preserveReasoningContentInMessages checks if reasoning_content from assistant messages
