@@ -90,6 +90,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 
 	translated, originalTranslated := execCtx.TranslateRequestPair(req.Payload)
 	translated = execCtx.ApplyPayloadConfig(translated, originalTranslated)
+	translated = normalizeGLMStopToArray(translated)
 	if opts.Alt == "responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
@@ -202,6 +203,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	translated, originalTranslated := execCtx.TranslateRequestPair(req.Payload)
 	translated = execCtx.ApplyPayloadConfig(translated, originalTranslated)
+	translated = normalizeGLMStopToArray(translated)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, execCtx.SourceFormat.String(), to.String(), e.Identifier())
 	if err != nil {
