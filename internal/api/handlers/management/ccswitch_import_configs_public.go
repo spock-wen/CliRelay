@@ -140,12 +140,14 @@ func (h *Handler) GetPublicCcSwitchImportConfigs(c *gin.Context) {
 	}
 
 	row := apikeysettings.NewService(nil).GetRow(apiKey)
+	maskedAPIKey := maskKey(apiKey)
 	if row == nil {
 		items := []usage.CcSwitchImportConfigRow{}
 		c.JSON(http.StatusOK, gin.H{
 			"ccswitch-import-configs": items,
 			"items":                   items,
-			"api_key":                 apiKey,
+			"api_key":                 maskedAPIKey,
+			"api_key_masked":          maskedAPIKey,
 			"found":                   false,
 		})
 		return
@@ -158,7 +160,8 @@ func (h *Handler) GetPublicCcSwitchImportConfigs(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"ccswitch-import-configs": items,
 			"items":                   items,
-			"api_key":                 apiKey,
+			"api_key":                 maskedAPIKey,
+			"api_key_masked":          maskedAPIKey,
 			"found":                   false,
 		})
 		return
@@ -172,14 +175,15 @@ func (h *Handler) GetPublicCcSwitchImportConfigs(c *gin.Context) {
 	filtered := make([]usage.CcSwitchImportConfigRow, 0, len(configs))
 	for _, cfg := range configs {
 		if ccSwitchImportConfigMatchesAPIKeyPermissions(cfg, &effective) {
-			filtered = append(filtered, cfg)
+			filtered = append(filtered, usage.AttachCcSwitchCodexModelCatalog(cfg))
 		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"ccswitch-import-configs": filtered,
 		"items":                   filtered,
-		"api_key":                 apiKey,
+		"api_key":                 maskedAPIKey,
+		"api_key_masked":          maskedAPIKey,
 		"found":                   true,
 	})
 }

@@ -3,6 +3,7 @@ package usage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -24,6 +25,7 @@ type LogRow struct {
 	ChannelName     string    `json:"channel_name"`
 	AuthIndex       string    `json:"auth_index"`
 	Failed          bool      `json:"failed"`
+	Streaming       bool      `json:"streaming"`
 	LatencyMs       int64     `json:"latency_ms"`
 	FirstTokenMs    int64     `json:"first_token_ms"`
 	InputTokens     int64     `json:"input_tokens"`
@@ -37,17 +39,21 @@ type LogRow struct {
 
 // LogQueryParams holds filter/pagination parameters for QueryLogs.
 type LogQueryParams struct {
-	Page         int      // 1-based
-	Size         int      // rows per page
-	Days         int      // time range in days
-	APIKey       string   // exact match filter (deprecated, use APIKeys)
-	Model        string   // exact match filter (deprecated, use Models)
-	Status       string   // "success", "failed", or "" (all) (deprecated, use Statuses)
-	APIKeys      []string // multi-value API key filter
-	Models       []string // multi-value model filter
-	Statuses     []string // multi-value status filter
-	AuthIndexes  []string // optional auth_index IN (...) filter
-	ChannelNames []string // optional channel_name IN (...) filter
+	Page            int      // 1-based
+	Size            int      // rows per page
+	Days            int      // time range in days
+	APIKey          string   // exact match filter (deprecated, use APIKeys)
+	Model           string   // exact match filter (deprecated, use Models)
+	Status          string   // "success", "failed", or "" (all) (deprecated, use Statuses)
+	APIKeys         []string // multi-value API key filter
+	Models          []string // multi-value model filter
+	Statuses        []string // multi-value status filter
+	MatchNoAPIKeys  bool     // explicit empty API key filter
+	MatchNoModels   bool     // explicit empty model filter
+	MatchNoStatuses bool     // explicit empty status filter
+	MatchNoChannels bool     // explicit empty channel filter
+	AuthIndexes     []string // optional auth_index IN (...) filter
+	ChannelNames    []string // optional channel_name IN (...) filter
 	// Optional precise legacy matches for renamed auth channels whose stored
 	// channel_name was a shared provider/source value.
 	AuthIndexChannelNames map[string][]string
@@ -105,6 +111,7 @@ const systemRequestLogFilterValue = "__system__"
 
 var (
 	usageDB     *sql.DB
+	usageReadDB *sql.DB
 	usageDBMu   sync.Mutex
 	usageDBPath string
 	usageLoc    *time.Location
@@ -115,11 +122,14 @@ CREATE TABLE IF NOT EXISTS request_logs (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   timestamp        DATETIME NOT NULL,
   api_key          TEXT NOT NULL DEFAULT '',
+  api_key_id       TEXT NOT NULL DEFAULT '',
+  auth_subject_id  TEXT NOT NULL DEFAULT '',
   model            TEXT NOT NULL DEFAULT '',
   source           TEXT NOT NULL DEFAULT '',
   channel_name     TEXT NOT NULL DEFAULT '',
   auth_index       TEXT NOT NULL DEFAULT '',
   failed           INTEGER NOT NULL DEFAULT 0,
+  streaming        INTEGER NOT NULL DEFAULT 0,
   latency_ms       INTEGER NOT NULL DEFAULT 0,
   first_token_ms   INTEGER NOT NULL DEFAULT 0,
   input_tokens     INTEGER NOT NULL DEFAULT 0,
@@ -151,6 +161,7 @@ CREATE INDEX IF NOT EXISTS idx_log_content_timestamp ON request_log_content(time
 CREATE TABLE IF NOT EXISTS auth_file_quota_snapshots (
   date_key      TEXT NOT NULL,
   auth_index    TEXT NOT NULL,
+  auth_subject_id TEXT NOT NULL DEFAULT '',
   provider      TEXT NOT NULL DEFAULT '',
   quota_key     TEXT NOT NULL,
   percent       REAL,
@@ -165,6 +176,7 @@ CREATE TABLE IF NOT EXISTS auth_file_quota_snapshot_points (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   recorded_at    DATETIME NOT NULL,
   auth_index     TEXT NOT NULL,
+  auth_subject_id TEXT NOT NULL DEFAULT '',
   provider       TEXT NOT NULL DEFAULT '',
   quota_key      TEXT NOT NULL,
   quota_label    TEXT NOT NULL DEFAULT '',
@@ -175,6 +187,21 @@ CREATE TABLE IF NOT EXISTS auth_file_quota_snapshot_points (
 
 CREATE INDEX IF NOT EXISTS idx_quota_snapshot_points_auth_time ON auth_file_quota_snapshot_points(auth_index, recorded_at);
 CREATE INDEX IF NOT EXISTS idx_quota_snapshot_points_auth_key_time ON auth_file_quota_snapshot_points(auth_index, quota_key, recorded_at);
+
+CREATE TABLE IF NOT EXISTS auth_subject_quota_cycles (
+  subject_id       TEXT NOT NULL,
+  auth_index       TEXT NOT NULL DEFAULT '',
+  provider         TEXT NOT NULL DEFAULT '',
+  quota_key        TEXT NOT NULL,
+  cycle_start_at   DATETIME NOT NULL,
+  reset_at         DATETIME NOT NULL,
+  window_seconds   INTEGER NOT NULL DEFAULT 0,
+  last_verified_at DATETIME NOT NULL,
+  PRIMARY KEY (subject_id, quota_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_subject_quota_cycles_subject_window
+  ON auth_subject_quota_cycles(subject_id, window_seconds, last_verified_at);
 `
 
 // migrateContentColumns adds input_content/output_content columns to an
@@ -213,6 +240,62 @@ func migrateApiKeyNameColumn(db *sql.DB) {
 	}
 }
 
+func migrateAPIKeyIDColumn(db *sql.DB) {
+	_, err := db.Exec("ALTER TABLE request_logs ADD COLUMN api_key_id TEXT NOT NULL DEFAULT ''")
+	if err != nil {
+		if !strings.Contains(err.Error(), "duplicate") {
+			log.Warnf("usage: migrate column api_key_id: %v", err)
+		}
+	}
+	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_logs_api_key_id ON request_logs(api_key_id)"); err != nil {
+		log.Warnf("usage: create idx_logs_api_key_id: %v", err)
+	}
+}
+
+func migrateAuthSubjectIDColumns(db *sql.DB) {
+	for _, stmt := range []string{
+		"ALTER TABLE request_logs ADD COLUMN auth_subject_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE auth_file_quota_snapshots ADD COLUMN auth_subject_id TEXT NOT NULL DEFAULT ''",
+		"ALTER TABLE auth_file_quota_snapshot_points ADD COLUMN auth_subject_id TEXT NOT NULL DEFAULT ''",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			if !strings.Contains(err.Error(), "duplicate") {
+				log.Warnf("usage: migrate auth subject column: %v", err)
+			}
+		}
+	}
+	for _, stmt := range []string{
+		"CREATE INDEX IF NOT EXISTS idx_logs_auth_subject_id ON request_logs(auth_subject_id)",
+		"CREATE INDEX IF NOT EXISTS idx_quota_snapshots_subject ON auth_file_quota_snapshots(auth_subject_id)",
+		"CREATE INDEX IF NOT EXISTS idx_quota_snapshot_points_subject_time ON auth_file_quota_snapshot_points(auth_subject_id, recorded_at)",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			log.Warnf("usage: create auth subject index: %v", err)
+		}
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS auth_subject_quota_cycles (
+		  subject_id       TEXT NOT NULL,
+		  auth_index       TEXT NOT NULL DEFAULT '',
+		  provider         TEXT NOT NULL DEFAULT '',
+		  quota_key        TEXT NOT NULL,
+		  cycle_start_at   DATETIME NOT NULL,
+		  reset_at         DATETIME NOT NULL,
+		  window_seconds   INTEGER NOT NULL DEFAULT 0,
+		  last_verified_at DATETIME NOT NULL,
+		  PRIMARY KEY (subject_id, quota_key)
+		)
+	`); err != nil {
+		log.Warnf("usage: create auth_subject_quota_cycles table: %v", err)
+	}
+	if _, err := db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_auth_subject_quota_cycles_subject_window
+		ON auth_subject_quota_cycles(subject_id, window_seconds, last_verified_at)
+	`); err != nil {
+		log.Warnf("usage: create idx_auth_subject_quota_cycles_subject_window: %v", err)
+	}
+}
+
 // migrateFirstTokenColumn adds first_token_ms column to an existing request_logs table.
 func migrateFirstTokenColumn(db *sql.DB) {
 	_, err := db.Exec("ALTER TABLE request_logs ADD COLUMN first_token_ms INTEGER NOT NULL DEFAULT 0")
@@ -223,12 +306,31 @@ func migrateFirstTokenColumn(db *sql.DB) {
 	}
 }
 
+func migrateStreamingColumn(db *sql.DB) {
+	_, err := db.Exec("ALTER TABLE request_logs ADD COLUMN streaming INTEGER NOT NULL DEFAULT 0")
+	if err != nil {
+		if !strings.Contains(err.Error(), "duplicate") {
+			log.Warnf("usage: migrate column streaming: %v", err)
+		}
+	}
+}
+
 func migrateRequestLogDetailColumn(db *sql.DB) {
 	_, err := db.Exec("ALTER TABLE request_log_content ADD COLUMN detail_content BLOB NOT NULL DEFAULT X''")
 	if err != nil {
 		if !strings.Contains(err.Error(), "duplicate") {
 			log.Warnf("usage: migrate column detail_content: %v", err)
 		}
+	}
+}
+
+func ensureRequestLogDetailIndexes(db *sql.DB) {
+	if _, err := db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_log_content_detail_timestamp
+		ON request_log_content(timestamp DESC)
+		WHERE length(detail_content) > 0
+	`); err != nil {
+		log.Warnf("usage: create idx_log_content_detail_timestamp: %v", err)
 	}
 }
 
@@ -281,6 +383,32 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 	} else {
 		log.Debugf("usage: journal_mode set (result: %v)", res)
 	}
+	// synchronous=NORMAL under WAL is safe (no corruption on power loss for
+	// committed txns) and reduces fsync contention between the writer and readers.
+	if _, err := db.Exec("PRAGMA synchronous = NORMAL"); err != nil {
+		log.Warnf("usage: failed to set synchronous=NORMAL: %v", err)
+	}
+
+	// Open a separate read-only connection pool so management reads (QueryLogs,
+	// QueryStats, QueryFilters, content queries) do not serialize behind the
+	// single writer or maintenance ops (wal_checkpoint/VACUUM). WAL mode allows
+	// concurrent readers alongside a writer, so reads stay responsive while inserts
+	// or maintenance hold the write connection. WAL is persisted on the DB file by
+	// the writer above, so the read-only handle opens in WAL mode automatically.
+	readDB, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(5000)")
+	if err != nil {
+		_ = db.Close()
+		return fmt.Errorf("usage: open sqlite read-only handle: %w", err)
+	}
+	// Readers can run concurrently with each other and with the writer under WAL.
+	readDB.SetMaxOpenConns(4)
+	readDB.SetMaxIdleConns(2)
+	readDB.SetConnMaxLifetime(30 * time.Minute)
+	if err := readDB.PingContext(pingCtx); err != nil {
+		_ = db.Close()
+		_ = readDB.Close()
+		return fmt.Errorf("usage: ping sqlite read-only handle: %w", err)
+	}
 
 	log.Debugf("usage: creating tables")
 	if _, err := db.Exec(createTableSQL); err != nil {
@@ -289,6 +417,7 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 	}
 
 	usageDB = db
+	usageReadDB = readDB
 	usageDBPath = dbPath
 	requestLogStorage = normalizeRequestLogStorageConfig(storageCfg)
 	log.Debugf("usage: running content column migration")
@@ -297,16 +426,26 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 	migrateCostColumn(db)
 	log.Debugf("usage: running api_key_name column migration")
 	migrateApiKeyNameColumn(db)
+	log.Debugf("usage: running api_key_id column migration")
+	migrateAPIKeyIDColumn(db)
+	log.Debugf("usage: running auth_subject_id column migration")
+	migrateAuthSubjectIDColumns(db)
 	log.Debugf("usage: running first_token_ms column migration")
 	migrateFirstTokenColumn(db)
+	log.Debugf("usage: running streaming column migration")
+	migrateStreamingColumn(db)
 	log.Debugf("usage: running request log detail column migration")
 	migrateRequestLogDetailColumn(db)
+	log.Debugf("usage: ensuring request log detail indexes")
+	ensureRequestLogDetailIndexes(db)
 	log.Debugf("usage: initializing pricing table")
 	initPricingTable(db)
 	log.Debugf("usage: initializing model config tables")
 	initModelConfigTables(db)
 	log.Debugf("usage: initializing api_keys table")
 	initAPIKeysTable(db)
+	log.Debugf("usage: backfilling request log api_key_id values")
+	backfillRequestLogAPIKeyIDs(db)
 	log.Debugf("usage: initializing api_key_permission_profiles table")
 	initAPIKeyPermissionProfilesTable(db)
 	log.Debugf("usage: initializing ccswitch_import_configs table")
@@ -331,9 +470,13 @@ func CloseDB() {
 	if usageDB != nil {
 		_ = usageDB.Close()
 		usageDB = nil
-		usageLoc = nil
-		log.Info("usage: SQLite database closed")
 	}
+	if usageReadDB != nil {
+		_ = usageReadDB.Close()
+		usageReadDB = nil
+	}
+	usageLoc = nil
+	log.Info("usage: SQLite database closed")
 }
 
 // InsertLog writes a single request log entry into the SQLite database.
@@ -341,16 +484,28 @@ func CloseDB() {
 func InsertLog(apiKey, apiKeyName, model, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent string) {
-	insertLog(apiKey, apiKeyName, model, source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, "")
+	insertLogIdentity(apiKey, "", "", apiKeyName, model, source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, "")
 }
 
 func InsertLogWithDetails(apiKey, apiKeyName, model, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent, detailContent string) {
-	insertLog(apiKey, apiKeyName, model, source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
+	insertLogIdentity(apiKey, "", "", apiKeyName, model, source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
 }
 
-func insertLog(apiKey, apiKeyName, model, source, channelName, authIndex string,
+func InsertLogWithDetailsIdentity(apiKey, apiKeyID, apiKeyName, model, source, channelName, authIndex string,
+	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
+	inputContent, outputContent, detailContent string) {
+	insertLogIdentity(apiKey, apiKeyID, "", apiKeyName, model, source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
+}
+
+func InsertLogWithDetailsIdentitySubject(apiKey, apiKeyID, authSubjectID, apiKeyName, model, source, channelName, authIndex string,
+	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
+	inputContent, outputContent, detailContent string) {
+	insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
+}
+
+func insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent, detailContent string) {
 	db := getDB()
@@ -362,9 +517,25 @@ func insertLog(apiKey, apiKeyName, model, source, channelName, authIndex string,
 	if failed {
 		failedInt = 1
 	}
+	streamingInt := 0
+	if isStreamingRequestContent(inputContent) {
+		streamingInt = 1
+	}
 
 	// Calculate cost based on model pricing using semantic cache read/write
 	cost := CalculateCostV2(model, tokens)
+
+	apiKeyID = strings.TrimSpace(apiKeyID)
+	authSubjectID = strings.TrimSpace(authSubjectID)
+	apiKeyName = strings.TrimSpace(apiKeyName)
+	if identity := ResolveAPIKeyIdentity(apiKey); identity != nil {
+		if apiKeyID == "" {
+			apiKeyID = identity.ID
+		}
+		if apiKeyName == "" {
+			apiKeyName = identity.Name
+		}
+	}
 
 	// 插入 request log 的事务由 usage 存储层统一拥有，不从外部 HTTP 请求透传 context，
 	// 以避免请求取消把已经选定要持久化的审计记录中断在半途。
@@ -376,12 +547,12 @@ func insertLog(apiKey, apiKeyName, model, source, channelName, authIndex string,
 
 	result, err := tx.Exec(
 		`INSERT INTO request_logs
-			(timestamp, api_key, api_key_name, model, source, channel_name, auth_index,
-			 failed, latency_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(timestamp, api_key, api_key_id, auth_subject_id, api_key_name, model, source, channel_name, auth_index,
+			 failed, streaming, latency_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		timestamp.UTC().Format(time.RFC3339Nano),
-		apiKey, apiKeyName, model, source, channelName, authIndex,
-		failedInt, latencyMs, firstTokenMs,
+		apiKey, apiKeyID, authSubjectID, apiKeyName, model, source, channelName, authIndex,
+		failedInt, streamingInt, latencyMs, firstTokenMs,
 		tokens.InputTokens, tokens.OutputTokens, tokens.ReasoningTokens,
 		tokens.CachedTokens, tokens.TotalTokens, cost,
 	)
@@ -414,6 +585,16 @@ func insertLog(apiKey, apiKeyName, model, source, channelName, authIndex string,
 	if tokenUsageCallback != nil && tokens.TotalTokens > 0 {
 		tokenUsageCallback(apiKey, tokens.TotalTokens)
 	}
+}
+
+func isStreamingRequestContent(content string) bool {
+	var payload struct {
+		Stream bool `json:"stream"`
+	}
+	if err := json.Unmarshal([]byte(content), &payload); err != nil {
+		return false
+	}
+	return payload.Stream
 }
 
 // tokenUsageCallback is set by SetTokenUsageCallback to notify external
@@ -454,6 +635,19 @@ func parseStoredTime(value string) (time.Time, bool) {
 func getDB() *sql.DB {
 	usageDBMu.Lock()
 	defer usageDBMu.Unlock()
+	return usageDB
+}
+
+// getReadDB returns the dedicated read-only connection pool used by management
+// read paths (QueryLogs/QueryStats/QueryFilters/content queries) so they do not
+// block on the single writer or maintenance ops. It falls back to the write
+// handle when no read pool is available, preserving correctness.
+func getReadDB() *sql.DB {
+	usageDBMu.Lock()
+	defer usageDBMu.Unlock()
+	if usageReadDB != nil {
+		return usageReadDB
+	}
 	return usageDB
 }
 

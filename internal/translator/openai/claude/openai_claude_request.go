@@ -89,6 +89,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 	// Process messages and system
 	var messagesJSON = "[]"
+	validToolUseIDs := make(map[string]bool)
 
 	// Handle system message first
 	systemMsgJSON := `{"role":"system","content":[]}`
@@ -157,12 +158,13 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 					case "tool_use":
 						// Only allow tool_use -> tool_calls for assistant messages (security: prevent injection).
 						if role == "assistant" {
-							toolName := part.Get("name").String()
+							toolName := strings.TrimSpace(part.Get("name").String())
 							if toolName == "" {
-								return true // skip tool_use with empty name
+								return true
 							}
 							toolCallJSON := `{"id":"","type":"function","function":{"name":"","arguments":""}}`
-							toolCallJSON, _ = sjson.Set(toolCallJSON, "id", part.Get("id").String())
+							toolUseID := part.Get("id").String()
+							toolCallJSON, _ = sjson.Set(toolCallJSON, "id", toolUseID)
 							toolCallJSON, _ = sjson.Set(toolCallJSON, "function.name", toolName)
 
 							// Convert input to arguments JSON string
@@ -173,12 +175,19 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 							}
 
 							toolCalls = append(toolCalls, gjson.Parse(toolCallJSON).Value())
+							if toolUseID != "" {
+								validToolUseIDs[toolUseID] = true
+							}
 						}
 
 					case "tool_result":
 						// Collect tool_result to emit after the main message (ensures tool results follow tool_calls)
+						toolUseID := part.Get("tool_use_id").String()
+						if toolUseID == "" || !validToolUseIDs[toolUseID] {
+							return true
+						}
 						toolResultJSON := `{"role":"tool","tool_call_id":"","content":""}`
-						toolResultJSON, _ = sjson.Set(toolResultJSON, "tool_call_id", part.Get("tool_use_id").String())
+						toolResultJSON, _ = sjson.Set(toolResultJSON, "tool_call_id", toolUseID)
 						toolResultJSON, _ = sjson.Set(toolResultJSON, "content", convertClaudeToolResultContentToString(part.Get("content")))
 						toolResults = append(toolResults, toolResultJSON)
 					}
@@ -274,8 +283,12 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 		var toolsJSON = "[]"
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
+			toolName := strings.TrimSpace(tool.Get("name").String())
+			if toolName == "" {
+				return true
+			}
 			openAIToolJSON := `{"type":"function","function":{"name":"","description":""}}`
-			openAIToolJSON, _ = sjson.Set(openAIToolJSON, "function.name", tool.Get("name").String())
+			openAIToolJSON, _ = sjson.Set(openAIToolJSON, "function.name", toolName)
 			openAIToolJSON, _ = sjson.Set(openAIToolJSON, "function.description", tool.Get("description").String())
 
 			// Convert Anthropic input_schema to OpenAI function parameters
@@ -301,7 +314,11 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			out, _ = sjson.Set(out, "tool_choice", "required")
 		case "tool":
 			// Specific tool choice
-			toolName := toolChoice.Get("name").String()
+			toolName := strings.TrimSpace(toolChoice.Get("name").String())
+			if toolName == "" {
+				out, _ = sjson.Set(out, "tool_choice", "auto")
+				break
+			}
 			toolChoiceJSON := `{"type":"function","function":{"name":""}}`
 			toolChoiceJSON, _ = sjson.Set(toolChoiceJSON, "function.name", toolName)
 			out, _ = sjson.SetRaw(out, "tool_choice", toolChoiceJSON)

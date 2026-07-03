@@ -90,6 +90,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 
 	translated, originalTranslated := execCtx.TranslateRequestPair(req.Payload)
 	translated = execCtx.ApplyPayloadConfig(translated, originalTranslated)
+	translated = normalizeGLMStopToArray(translated)
 	if opts.Alt == "responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
@@ -107,9 +108,13 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		}
 	}
 
-	// OpenCode-Go: the translator drops reasoning_content when converting
-	// from Responses API. Inject it here into translated payload so it survives.
-	if e.provider == openCodeGoProvider && opencodeGoNeedsReasoningInjection(execCtx.BaseModel) {
+	// DeepSeek thinking mode requires reasoning_content on every assistant
+	// turn in multi-turn history, but the Claude→OpenAI translator only emits
+	// it for turns carrying a thinking block — tool_use-only turns ship bare
+	// and get rejected with 400. Backfill the field for any deepseek model,
+	// regardless of provider, so DeepSeek官方 / 火山引擎 (generic compat
+	// providers) are covered alongside opencode-go.
+	if opencodeGoNeedsReasoningInjection(execCtx.BaseModel) {
 		sessionID := opencodeGoSessionID(opts, auth)
 		if sessionID != "" {
 			translated = opencodeGoInjectMessagesArray(translated, req.Model, sessionID)
@@ -165,6 +170,12 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		return resp, err
 	}
 	recorder.AppendResponseChunk(body)
+	// Preserve the clean, request-time model (ec.BaseModel) for the usage record.
+	// The upstream response's "model" field echoes a provider-internal path such as
+	// "accounts/fireworks/models/glm-5p2", which is not a valid model name for
+	// display, pricing lookup (CalculateCostV2) or filtering. All other executors
+	// (codex/claude/gemini/...) never override the reporter's model, so this keeps
+	// the OpenAI-compat path consistent with them.
 	reporter.publishWithContent(execCtx.Context, parseOpenAIUsage(body), string(req.Payload), string(body))
 	// Ensure we at least record the request even if upstream doesn't return usage
 	reporter.ensurePublished(execCtx.Context)
@@ -192,6 +203,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	translated, originalTranslated := execCtx.TranslateRequestPair(req.Payload)
 	translated = execCtx.ApplyPayloadConfig(translated, originalTranslated)
+	translated = normalizeGLMStopToArray(translated)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, execCtx.SourceFormat.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -207,8 +219,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		}
 	}
 
-	// Inject reasoning_content for OpenCode-Go after Responses API translation.
-	if e.provider == openCodeGoProvider && opencodeGoNeedsReasoningInjection(execCtx.BaseModel) {
+	// Inject reasoning_content for DeepSeek thinking mode after translation.
+	// Applies to any deepseek model across all compat providers (not just
+	// opencode-go); see Execute() for the rationale.
+	if opencodeGoNeedsReasoningInjection(execCtx.BaseModel) {
 		sessionID := opencodeGoSessionID(opts, auth)
 		if sessionID != "" {
 			translated = opencodeGoInjectMessagesArray(translated, req.Model, sessionID)
@@ -274,6 +288,10 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			line := scanner.Bytes()
 			recorder.AppendResponseChunk(line)
 			reporter.appendOutputChunk(line)
+			// Intentionally do NOT call reporter.setModel(parseOpenAIStreamModel(line)).
+			// See the non-stream branch above: the upstream "model" echo is a
+			// provider-internal path (e.g. accounts/fireworks/models/glm-5p2) that
+			// must not override the clean request-time model used for logging/cost.
 			if detail, ok := parseOpenAIStreamUsage(line); ok {
 				reporter.publish(execCtx.Context, detail)
 			}

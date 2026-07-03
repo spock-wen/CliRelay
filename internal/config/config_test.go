@@ -53,16 +53,94 @@ func TestLoadConfigReadsMainAPIReadTimeoutOverride(t *testing.T) {
 	}
 }
 
+func TestLoadConfigReadsRequestBodyModelLimit(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("request-body:\n  model-max-mb: 64\n  disk-threshold-mb: 4\n  cache-dir: /tmp/clirelay-body-cache\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+
+	if cfg.RequestBody.ModelMaxMB != 64 {
+		t.Fatalf("RequestBody.ModelMaxMB = %d, want 64", cfg.RequestBody.ModelMaxMB)
+	}
+	if cfg.ModelRequestBodyLimitBytes() != 64<<20 {
+		t.Fatalf("ModelRequestBodyLimitBytes = %d, want %d", cfg.ModelRequestBodyLimitBytes(), int64(64<<20))
+	}
+	if cfg.RequestBody.DiskThresholdMB != 4 {
+		t.Fatalf("RequestBody.DiskThresholdMB = %d, want 4", cfg.RequestBody.DiskThresholdMB)
+	}
+	if cfg.RequestBodyDiskThresholdBytes() != 4<<20 {
+		t.Fatalf("RequestBodyDiskThresholdBytes = %d, want %d", cfg.RequestBodyDiskThresholdBytes(), int64(4<<20))
+	}
+	if cfg.RequestBodyCacheDir() != "/tmp/clirelay-body-cache" {
+		t.Fatalf("RequestBodyCacheDir = %q, want /tmp/clirelay-body-cache", cfg.RequestBodyCacheDir())
+	}
+}
+
+func TestLoadConfigDefaultsRequestBodyModelLimit(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+
+	if cfg.RequestBody.ModelMaxMB != DefaultModelRequestBodyMB {
+		t.Fatalf("RequestBody.ModelMaxMB = %d, want %d", cfg.RequestBody.ModelMaxMB, DefaultModelRequestBodyMB)
+	}
+	if cfg.RequestBody.DiskThresholdMB != DefaultRequestBodyDiskThresholdMB {
+		t.Fatalf("RequestBody.DiskThresholdMB = %d, want %d", cfg.RequestBody.DiskThresholdMB, DefaultRequestBodyDiskThresholdMB)
+	}
+}
+
+func TestLoadConfigSanitizesProxyWarmupDefaults(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("proxy-warmup:\n  enabled: true\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+
+	if !cfg.ProxyWarmup.Enabled {
+		t.Fatal("ProxyWarmup.Enabled = false, want true")
+	}
+	if cfg.ProxyWarmup.IntervalSeconds <= 0 {
+		t.Fatalf("ProxyWarmup.IntervalSeconds = %d, want default > 0", cfg.ProxyWarmup.IntervalSeconds)
+	}
+	if len(cfg.ProxyWarmup.Targets) == 0 {
+		t.Fatal("ProxyWarmup.Targets is empty, want default warm targets")
+	}
+	if cfg.ProxyWarmup.Targets[0].Method == "" {
+		t.Fatal("ProxyWarmup target method is empty, want sanitized default")
+	}
+}
+
 func TestSanitizeRoutingPreservesChannelGroupSettings(t *testing.T) {
 	t.Parallel()
 
 	cfg := &Config{
 		Routing: RoutingConfig{
-			Strategy: "fill-first",
+			Strategy: "sticky",
 			ChannelGroups: []RoutingChannelGroup{
 				{
 					Name:               " Team ",
-					Strategy:           "round-robin",
+					Strategy:           "sessionsticky",
 					ExcludeFromDefault: true,
 					Match: ChannelGroupMatch{
 						Channels: []string{"Team Channel"},
@@ -82,8 +160,11 @@ func TestSanitizeRoutingPreservesChannelGroupSettings(t *testing.T) {
 
 	cfg.SanitizeRouting()
 
-	if got := cfg.Routing.ChannelGroups[0].Strategy; got != "round-robin" {
-		t.Fatalf("group strategy = %q, want round-robin", got)
+	if got := cfg.Routing.Strategy; got != "session-sticky" {
+		t.Fatalf("global strategy = %q, want session-sticky", got)
+	}
+	if got := cfg.Routing.ChannelGroups[0].Strategy; got != "session-sticky" {
+		t.Fatalf("group strategy = %q, want session-sticky", got)
 	}
 	if got := cfg.Routing.ChannelGroups[1].Strategy; got != "fill-first" {
 		t.Fatalf("group strategy alias = %q, want fill-first", got)

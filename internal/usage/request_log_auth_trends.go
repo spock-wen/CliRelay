@@ -12,6 +12,12 @@ type DailyCountPoint struct {
 	Requests int64  `json:"requests"`
 }
 
+type DailyUsagePoint struct {
+	Date     string  `json:"date"`
+	Requests int64   `json:"requests"`
+	Cost     float64 `json:"cost"`
+}
+
 type DailyQuotaPoint struct {
 	Date    string   `json:"date"`
 	Percent *float64 `json:"percent"`
@@ -23,8 +29,14 @@ type HourlyCountPoint struct {
 	Requests int64  `json:"requests"`
 }
 
+type HourlyUsagePoint struct {
+	Hour     string  `json:"hour"`
+	Requests int64   `json:"requests"`
+	Cost     float64 `json:"cost"`
+}
+
 func QueryDailyCallsByAuthIndexes(authIndexes []string, days int) ([]DailyCountPoint, error) {
-	db := getDB()
+	db := getReadDB()
 	if db == nil {
 		return []DailyCountPoint{}, nil
 	}
@@ -100,7 +112,7 @@ func QueryDailyCallsByAuthIndexes(authIndexes []string, days int) ([]DailyCountP
 }
 
 func QueryHourlyCallsByAuthIndex(authIndex string, hours int) ([]HourlyCountPoint, error) {
-	db := getDB()
+	db := getReadDB()
 	if db == nil {
 		return []HourlyCountPoint{}, nil
 	}
@@ -154,7 +166,7 @@ func QueryHourlyCallsByAuthIndex(authIndex string, hours int) ([]HourlyCountPoin
 }
 
 func QueryRequestCountByAuthIndexSince(authIndex string, since time.Time) (int64, error) {
-	db := getDB()
+	db := getReadDB()
 	if db == nil {
 		return 0, nil
 	}

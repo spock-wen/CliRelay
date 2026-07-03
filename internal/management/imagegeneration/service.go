@@ -80,10 +80,11 @@ func (s *Service) Start(payload []byte, alt string) Snapshot {
 		s.tasks = make(map[string]*task)
 	}
 	s.tasks[item.ID] = item
+	snapshot := s.snapshot(item)
 	s.mu.Unlock()
 
 	go s.run(item.ID, payload, alt)
-	return s.snapshot(item)
+	return snapshot
 }
 
 func (s *Service) Get(taskID string) (Snapshot, bool) {

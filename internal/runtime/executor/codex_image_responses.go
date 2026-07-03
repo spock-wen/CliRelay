@@ -124,7 +124,7 @@ func buildCodexImageResponsesRequest(parsed *codexImageRequest, toolModel string
 	req, _ = sjson.SetBytes(req, "model", codexImageResponsesMainModel)
 
 	input := []byte(`[{"type":"message","role":"user","content":[{"type":"input_text","text":""}]}]`)
-	input, _ = sjson.SetBytes(input, "0.content.0.text", prompt)
+	input, _ = sjson.SetBytes(input, "0.content.0.text", buildCodexImageResponsesInputText(parsed, prompt))
 	for index, imageURL := range inputImages {
 		part := []byte(`{"type":"input_image","image_url":""}`)
 		part, _ = sjson.SetBytes(part, "image_url", imageURL)
@@ -143,7 +143,6 @@ func buildCodexImageResponsesRequest(parsed *codexImageRequest, toolModel string
 		path  string
 		value string
 	}{
-		{path: "size", value: parsed.Size},
 		{path: "quality", value: parsed.Quality},
 		{path: "background", value: parsed.Background},
 		{path: "output_format", value: parsed.OutputFormat},
@@ -174,6 +173,25 @@ func buildCodexImageResponsesRequest(parsed *codexImageRequest, toolModel string
 	req, _ = sjson.SetRawBytes(req, "tools", []byte(`[]`))
 	req, _ = sjson.SetRawBytes(req, "tools.-1", tool)
 	return req, nil
+}
+
+func buildCodexImageResponsesInputText(parsed *codexImageRequest, prompt string) string {
+	if parsed == nil {
+		return prompt
+	}
+	size := strings.TrimSpace(parsed.Size)
+	if size == "" {
+		return prompt
+	}
+	hint := "Preferred image size: " + size + "."
+	if strings.Contains(prompt, hint) || strings.Contains(prompt, "Preferred image size: ") {
+		return prompt
+	}
+	prompt = strings.TrimRight(prompt, " \t\r\n")
+	if prompt == "" {
+		return hint
+	}
+	return prompt + "\n\n" + hint
 }
 
 func collectCodexImagesFromResponsesBody(body []byte) ([]codexResponsesImageResult, int64, error) {

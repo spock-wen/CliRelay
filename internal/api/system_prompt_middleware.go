@@ -1,9 +1,7 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
 	"net/http"
 	"strings"
 
@@ -37,7 +35,7 @@ func SystemPromptMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		bodyBytes, err := bodyutil.ReadRequestBody(c, bodyutil.DefaultRequestBodyLimit)
+		bodyBytes, err := bodyutil.ReadRequestBody(c, bodyutil.ModelRequestBodyLimit())
 		if err != nil {
 			if bodyutil.IsTooLarge(err) {
 				c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large"})
@@ -55,7 +53,7 @@ func SystemPromptMiddleware() gin.HandlerFunc {
 			}
 			var body map[string]interface{}
 			if err := json.Unmarshal(bodyBytes, &body); err != nil {
-				c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				bodyutil.SetRequestBody(c, bodyBytes)
 				c.Next()
 				return
 			}
@@ -66,7 +64,7 @@ func SystemPromptMiddleware() gin.HandlerFunc {
 			body["messages"] = newMessages
 			newBody, err = json.Marshal(body)
 			if err != nil {
-				c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				bodyutil.SetRequestBody(c, bodyBytes)
 				c.Next()
 				return
 			}
@@ -79,19 +77,18 @@ func SystemPromptMiddleware() gin.HandlerFunc {
 			}
 			newBody, _ = sjson.SetBytes(bodyBytes, "instructions", combined)
 			if newBody == nil {
-				c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				bodyutil.SetRequestBody(c, bodyBytes)
 				c.Next()
 				return
 			}
 			log.Debugf("[SystemPrompt] injected into instructions (Responses API)")
 		} else {
-			c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+			bodyutil.SetRequestBody(c, bodyBytes)
 			c.Next()
 			return
 		}
 
-		c.Request.Body = io.NopCloser(bytes.NewReader(newBody))
-		c.Request.ContentLength = int64(len(newBody))
+		bodyutil.SetRequestBody(c, newBody)
 		c.Next()
 	}
 }

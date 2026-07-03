@@ -219,6 +219,442 @@ func TestModelConfigHandlersScopeFiltering(t *testing.T) {
 	}
 }
 
+func TestScopedModelsIncludeOwnerMappedConfiguredModels(t *testing.T) {
+	initManagementModelsTestDB(t)
+	cfg := &config.Config{
+		Routing: config.RoutingConfig{
+			ChannelGroups: []config.RoutingChannelGroup{
+				{
+					Name: "kimi+deepseek v4 flash",
+					Match: config.ChannelGroupMatch{
+						Channels: []string{"kimi-B", "opencode go"},
+					},
+				},
+			},
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "kimi-b",
+		Provider: "kimi",
+		Label:    "kimi-B",
+	}); err != nil {
+		t.Fatalf("Register kimi auth: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "opencode-go",
+		Provider: "opencode-go",
+		Label:    "opencode go",
+	}); err != nil {
+		t.Fatalf("Register opencode auth: %v", err)
+	}
+	if err := usage.UpsertAuthGroupOwnerMapping(usage.AuthGroupOwnerMappingRow{
+		AuthGroup: "kimi",
+		Owner:     "kimi-code",
+	}); err != nil {
+		t.Fatalf("UpsertAuthGroupOwnerMapping: %v", err)
+	}
+	for _, row := range []usage.ModelConfigRow{
+		{ModelID: "kimi-k2.7", OwnedBy: "kimi-code", Description: "Kimi K2.7", Enabled: true, Source: "seed"},
+		{ModelID: "kimi-k2.7-code", OwnedBy: "kimi-code", Description: "Kimi K2.7 Code", Enabled: true, Source: "seed"},
+		{ModelID: "qwen3.5-plus", OwnedBy: "opencode", Description: "Qwen 3.5 Plus", Enabled: true, Source: "opencode-go"},
+		{ModelID: "kimi-disabled", OwnedBy: "kimi-code", Description: "Disabled Kimi", Enabled: false, Source: "seed"},
+		{ModelID: "other-owner", OwnedBy: "other", Description: "Other owner", Enabled: true, Source: "seed"},
+	} {
+		if err := usage.UpsertModelConfig(row); err != nil {
+			t.Fatalf("UpsertModelConfig(%s): %v", row.ModelID, err)
+		}
+	}
+	h := NewHandler(cfg, "", manager)
+
+	decodeIDs := func(rec *httptest.ResponseRecorder) map[string]struct{} {
+		t.Helper()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+		}
+		var payload struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("unmarshal response: %v", err)
+		}
+		ids := make(map[string]struct{}, len(payload.Data))
+		for _, item := range payload.Data {
+			ids[item.ID] = struct{}{}
+		}
+		return ids
+	}
+
+	models := decodeIDs(performModelsRequest(
+		http.MethodGet,
+		"/models?allowed_channel_groups=kimi%2Bdeepseek+v4+flash",
+		nil,
+		h.Models().GetModels,
+	))
+	for _, id := range []string{"kimi-k2.7", "kimi-k2.7-code", "qwen3.5-plus"} {
+		if _, ok := models[id]; !ok {
+			t.Fatalf("/models missing owner-mapped configured model %q; ids=%v", id, models)
+		}
+	}
+	for _, id := range []string{"kimi-disabled", "other-owner"} {
+		if _, ok := models[id]; ok {
+			t.Fatalf("/models unexpectedly included %q; ids=%v", id, models)
+		}
+	}
+
+	availability := decodeIDs(performModelsRequest(
+		http.MethodGet,
+		"/models/configured-availability?allowed_channel_groups=kimi%2Bdeepseek+v4+flash",
+		nil,
+		h.Models().GetConfiguredModelAvailability,
+	))
+	for _, id := range []string{"kimi-k2.7", "kimi-k2.7-code", "qwen3.5-plus"} {
+		if _, ok := availability[id]; !ok {
+			t.Fatalf("/models/configured-availability missing owner-mapped configured model %q; ids=%v", id, availability)
+		}
+	}
+
+	channelScopedModels := decodeIDs(performModelsRequest(
+		http.MethodGet,
+		"/models?allowed_channels=kimi-B,opencode+go",
+		nil,
+		h.Models().GetModels,
+	))
+	for _, id := range []string{"kimi-k2.7", "kimi-k2.7-code", "qwen3.5-plus"} {
+		if _, ok := channelScopedModels[id]; !ok {
+			t.Fatalf("/models allowed_channels missing configured model %q; ids=%v", id, channelScopedModels)
+		}
+	}
+}
+
+func TestScopedModelsExpandTagMatchedChannelGroupsForConfiguredRows(t *testing.T) {
+	initManagementModelsTestDB(t)
+	cfg := &config.Config{
+		Routing: config.RoutingConfig{
+			ChannelGroups: []config.RoutingChannelGroup{
+				{
+					Name: "plus-codex-opencode",
+					Match: config.ChannelGroupMatch{
+						Tags: []string{"plus", "opencode-go"},
+					},
+				},
+			},
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex-plus",
+		Provider: "codex",
+		Label:    "Codex Plus",
+		Metadata: map[string]any{"plan_type": "plus"},
+	}); err != nil {
+		t.Fatalf("Register codex auth: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "opencode-go",
+		Provider: "opencode-go",
+		Label:    "OpenCode Go",
+	}); err != nil {
+		t.Fatalf("Register opencode auth: %v", err)
+	}
+	if err := usage.UpsertAuthGroupOwnerMapping(usage.AuthGroupOwnerMappingRow{
+		AuthGroup: "codex",
+		Owner:     "codex",
+	}); err != nil {
+		t.Fatalf("UpsertAuthGroupOwnerMapping: %v", err)
+	}
+	for _, row := range []usage.ModelConfigRow{
+		{ModelID: "gpt-5.5", OwnedBy: "codex", Description: "GPT 5.5", Enabled: true, Source: "seed"},
+		{ModelID: "glm-5.2", OwnedBy: "opencode", Description: "GLM 5.2", Enabled: true, Source: "opencode-go"},
+		{ModelID: "unrelated-openai", OwnedBy: "openai", Description: "OpenAI", Enabled: true, Source: "seed"},
+	} {
+		if err := usage.UpsertModelConfig(row); err != nil {
+			t.Fatalf("UpsertModelConfig(%s): %v", row.ModelID, err)
+		}
+	}
+	h := NewHandler(cfg, "", manager)
+	decodeIDs := func(rec *httptest.ResponseRecorder) map[string]struct{} {
+		t.Helper()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+		}
+		var payload struct {
+			Data []struct {
+				ID string `json:"id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("unmarshal response: %v", err)
+		}
+		ids := make(map[string]struct{}, len(payload.Data))
+		for _, item := range payload.Data {
+			ids[item.ID] = struct{}{}
+		}
+		return ids
+	}
+
+	ids := decodeIDs(performModelsRequest(
+		http.MethodGet,
+		"/models/configured-availability?allowed_channel_groups=plus-codex-opencode",
+		nil,
+		h.Models().GetConfiguredModelAvailability,
+	))
+	for _, id := range []string{"gpt-5.5", "glm-5.2"} {
+		if _, ok := ids[id]; !ok {
+			t.Fatalf("tag-matched group missing configured model %q; ids=%v", id, ids)
+		}
+	}
+	if _, ok := ids["unrelated-openai"]; ok {
+		t.Fatalf("tag-matched group unexpectedly included unrelated model; ids=%v", ids)
+	}
+}
+
+func TestDefaultConfiguredAvailabilityUsesMappedOwnerModels(t *testing.T) {
+	initManagementModelsTestDB(t)
+
+	const (
+		authID             = "codex-default-mapped-owner-auth"
+		codexConfigAuthID  = "codex-default-mapped-owner-config-auth"
+		codexStaticAuthID  = "codex-default-mapped-owner-static-config-auth"
+		openCodeAuthID     = "opencode-default-mapped-owner-auth"
+		registryID         = "codex-default-mapped-owner-registry"
+		openCodeRegistryID = "opencode-default-mapped-owner-registry"
+		mappedModel        = "mapped-codex-owner-model"
+		oldModel           = "old-codex-registry-model"
+		codexConfigModel   = "gpt-5.2"
+		codexStaticModel   = "codex-config-static-model"
+		openCodeModel      = "opencode-provider-model"
+	)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(registryID, "codex", []*registry.ModelInfo{
+		{ID: oldModel, Object: "model", OwnedBy: "openai", Type: "openai"},
+	})
+	reg.RegisterClient(authID, "codex", []*registry.ModelInfo{
+		{ID: codexConfigModel, Object: "model", OwnedBy: "openai", Type: "openai"},
+		{ID: mappedModel, Object: "model", OwnedBy: "openai", Type: "openai"},
+	})
+	reg.RegisterClient(codexConfigAuthID, "codex", []*registry.ModelInfo{
+		{ID: codexConfigModel, Object: "model", OwnedBy: "openai", Type: "openai", UserDefined: true},
+	})
+	reg.RegisterClient(codexStaticAuthID, "codex", []*registry.ModelInfo{
+		{ID: codexStaticModel, Object: "model", OwnedBy: "openai", Type: "openai"},
+	})
+	reg.RegisterClient(openCodeRegistryID, "opencode-go", []*registry.ModelInfo{
+		{ID: openCodeModel, Object: "model", OwnedBy: "opencode", Type: "opencode-go"},
+	})
+	t.Cleanup(func() {
+		reg.UnregisterClient(registryID)
+		reg.UnregisterClient(authID)
+		reg.UnregisterClient(codexConfigAuthID)
+		reg.UnregisterClient(codexStaticAuthID)
+		reg.UnregisterClient(openCodeRegistryID)
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       authID,
+		Provider: "codex",
+		Label:    "Codex Plus",
+		Status:   coreauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("Register codex auth: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       codexConfigAuthID,
+		Provider: "codex",
+		Label:    "tabcode-pro",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind":   "apikey",
+			"source":      "config:codex[test]",
+			"models_hash": "explicit",
+		},
+	}); err != nil {
+		t.Fatalf("Register codex config auth: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       codexStaticAuthID,
+		Provider: "codex",
+		Label:    "Codex Static Config",
+		Status:   coreauth.StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "apikey",
+			"source":    "config:codex[static]",
+		},
+	}); err != nil {
+		t.Fatalf("Register codex static config auth: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       openCodeAuthID,
+		Provider: "opencode-go",
+		Label:    "OpenCode Go",
+		Status:   coreauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("Register opencode auth: %v", err)
+	}
+	if err := usage.UpsertAuthGroupOwnerMapping(usage.AuthGroupOwnerMappingRow{
+		AuthGroup: "codex",
+		Owner:     "codex",
+	}); err != nil {
+		t.Fatalf("UpsertAuthGroupOwnerMapping: %v", err)
+	}
+	for _, row := range []usage.ModelConfigRow{
+		{ModelID: mappedModel, OwnedBy: "codex", Description: "Mapped Codex", Enabled: true, Source: "seed"},
+		{ModelID: oldModel, OwnedBy: "openai", Description: "Old Codex", Enabled: true, Source: "seed"},
+	} {
+		if err := usage.UpsertModelConfig(row); err != nil {
+			t.Fatalf("UpsertModelConfig(%s): %v", row.ModelID, err)
+		}
+	}
+
+	h := NewHandler(&config.Config{}, "", manager)
+	rec := performModelsRequest(
+		http.MethodGet,
+		"/models/configured-availability",
+		nil,
+		h.Models().GetConfiguredModelAvailability,
+	)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		UsesMappedOwners bool `json:"uses_mapped_owners"`
+		Data             []struct {
+			ID      string `json:"id"`
+			Sources []struct {
+				Label string `json:"label"`
+			} `json:"sources"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if !payload.UsesMappedOwners {
+		t.Fatalf("uses_mapped_owners = false, want true; body=%s", rec.Body.String())
+	}
+	ids := make(map[string]struct{}, len(payload.Data))
+	sourcesByID := make(map[string]map[string]bool, len(payload.Data))
+	for _, item := range payload.Data {
+		ids[item.ID] = struct{}{}
+		labels := make(map[string]bool, len(item.Sources))
+		for _, source := range item.Sources {
+			labels[source.Label] = true
+		}
+		sourcesByID[item.ID] = labels
+	}
+	if _, ok := ids[mappedModel]; !ok {
+		t.Fatalf("missing mapped owner model %q; ids=%v", mappedModel, ids)
+	}
+	if _, ok := ids[openCodeModel]; !ok {
+		t.Fatalf("missing unmapped provider model %q; ids=%v", openCodeModel, ids)
+	}
+	if _, ok := ids[codexConfigModel]; !ok {
+		t.Fatalf("missing explicit codex provider model %q; ids=%v", codexConfigModel, ids)
+	}
+	if !sourcesByID[codexConfigModel]["codex · tabcode-pro"] {
+		t.Fatalf("missing explicit codex provider source for %q; sources=%v", codexConfigModel, sourcesByID[codexConfigModel])
+	}
+	if sourcesByID[codexConfigModel]["codex · Codex Plus"] {
+		t.Fatalf("unexpected mapped owner oauth source for %q; sources=%v", codexConfigModel, sourcesByID[codexConfigModel])
+	}
+	if !sourcesByID[mappedModel]["codex · Codex Plus"] {
+		t.Fatalf("missing mapped owner auth source for %q; sources=%v", mappedModel, sourcesByID[mappedModel])
+	}
+	if _, ok := ids[oldModel]; ok {
+		t.Fatalf("unexpected registry model outside mapped owner %q; ids=%v", oldModel, ids)
+	}
+	if _, ok := ids[codexStaticModel]; ok {
+		t.Fatalf("unexpected static codex config model %q; ids=%v", codexStaticModel, ids)
+	}
+}
+
+func TestScopedModelsHonorChannelGroupAllowedModelsForConfiguredRows(t *testing.T) {
+	initManagementModelsTestDB(t)
+	cfg := &config.Config{
+		Routing: config.RoutingConfig{
+			ChannelGroups: []config.RoutingChannelGroup{
+				{
+					Name:          "kimi-limited",
+					AllowedModels: []string{"kimi-k2.7-code"},
+					Match: config.ChannelGroupMatch{
+						Channels: []string{"kimi-B"},
+					},
+				},
+			},
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "kimi-b-limited",
+		Provider: "kimi",
+		Label:    "kimi-B",
+	}); err != nil {
+		t.Fatalf("Register kimi auth: %v", err)
+	}
+	if err := usage.UpsertAuthGroupOwnerMapping(usage.AuthGroupOwnerMappingRow{
+		AuthGroup: "kimi",
+		Owner:     "kimi-code",
+	}); err != nil {
+		t.Fatalf("UpsertAuthGroupOwnerMapping: %v", err)
+	}
+	for _, row := range []usage.ModelConfigRow{
+		{ModelID: "kimi-k2.7", OwnedBy: "kimi-code", Description: "Kimi K2.7", Enabled: true, Source: "seed"},
+		{ModelID: "kimi-k2.7-code", OwnedBy: "kimi-code", Description: "Kimi K2.7 Code", Enabled: true, Source: "seed"},
+	} {
+		if err := usage.UpsertModelConfig(row); err != nil {
+			t.Fatalf("UpsertModelConfig(%s): %v", row.ModelID, err)
+		}
+	}
+	h := NewHandler(cfg, "", manager)
+	rec := performModelsRequest(
+		http.MethodGet,
+		"/models/configured-availability?allowed_channel_groups=kimi-limited",
+		nil,
+		h.Models().GetConfiguredModelAvailability,
+	)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+		ActiveMetadata []struct {
+			ID string `json:"id"`
+		} `json:"active_metadata"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	ids := make(map[string]struct{}, len(payload.Data))
+	for _, item := range payload.Data {
+		ids[item.ID] = struct{}{}
+	}
+	if _, ok := ids["kimi-k2.7-code"]; !ok {
+		t.Fatalf("expected allowed configured model in response; ids=%v", ids)
+	}
+	if _, ok := ids["kimi-k2.7"]; ok {
+		t.Fatalf("did not expect configured model outside group allowed-models; ids=%v", ids)
+	}
+	metadataIDs := make(map[string]struct{}, len(payload.ActiveMetadata))
+	for _, item := range payload.ActiveMetadata {
+		metadataIDs[item.ID] = struct{}{}
+	}
+	if _, ok := metadataIDs["kimi-k2.7-code"]; !ok {
+		t.Fatalf("expected allowed configured model metadata; ids=%v", metadataIDs)
+	}
+	if _, ok := metadataIDs["kimi-k2.7"]; ok {
+		t.Fatalf("did not expect metadata outside group allowed-models; ids=%v", metadataIDs)
+	}
+}
+
 func TestModelOwnerPresetHandlersReplacePresets(t *testing.T) {
 	initManagementModelsTestDB(t)
 	h := NewHandler(&config.Config{}, "", nil)
@@ -240,6 +676,57 @@ func TestModelOwnerPresetHandlersReplacePresets(t *testing.T) {
 	}
 	if _, ok := usage.GetModelOwnerPreset("acme-ai"); !ok {
 		t.Fatal("expected acme-ai owner preset")
+	}
+}
+
+func TestAuthGroupModelOwnerMappingHandlersPatchAndList(t *testing.T) {
+	initManagementModelsTestDB(t)
+	h := NewHandler(&config.Config{}, "", nil)
+
+	patchRec := performModelsRequest(
+		http.MethodPatch,
+		"/auth-group-model-owner-mappings",
+		[]byte(`{"auth_group":"claude","owner":"anthropic"}`),
+		h.Models().PatchAuthGroupModelOwnerMapping,
+	)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("PatchAuthGroupModelOwnerMapping status = %d body = %s", patchRec.Code, patchRec.Body.String())
+	}
+
+	listRec := performModelsRequest(
+		http.MethodGet,
+		"/auth-group-model-owner-mappings",
+		nil,
+		h.Models().GetAuthGroupModelOwnerMappings,
+	)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("GetAuthGroupModelOwnerMappings status = %d body = %s", listRec.Code, listRec.Body.String())
+	}
+
+	var listPayload struct {
+		Items []struct {
+			AuthGroup string `json:"auth_group"`
+			Owner     string `json:"owner"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listPayload); err != nil {
+		t.Fatalf("unmarshal auth group owner mapping list: %v", err)
+	}
+	if len(listPayload.Items) != 1 || listPayload.Items[0].AuthGroup != "claude" || listPayload.Items[0].Owner != "anthropic" {
+		t.Fatalf("unexpected auth group owner mapping list: %+v", listPayload.Items)
+	}
+
+	deleteRec := performModelsRequest(
+		http.MethodPatch,
+		"/auth-group-model-owner-mappings",
+		[]byte(`{"auth_group":"claude","owner":""}`),
+		h.Models().PatchAuthGroupModelOwnerMapping,
+	)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("PatchAuthGroupModelOwnerMapping delete status = %d body = %s", deleteRec.Code, deleteRec.Body.String())
+	}
+	if _, ok := usage.GetAuthGroupOwnerMapping("claude"); ok {
+		t.Fatal("expected claude auth group owner mapping to be deleted")
 	}
 }
 

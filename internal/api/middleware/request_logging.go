@@ -92,9 +92,6 @@ func isResponsesWebsocketUpgrade(req *http.Request) bool {
 }
 
 func shouldCaptureRequestBody(loggerEnabled bool, req *http.Request) bool {
-	if loggerEnabled {
-		return true
-	}
 	if req == nil || req.Body == nil {
 		return false
 	}
@@ -103,6 +100,9 @@ func shouldCaptureRequestBody(loggerEnabled bool, req *http.Request) bool {
 		return false
 	}
 	if req.ContentLength <= 0 {
+		return false
+	}
+	if loggerEnabled && req.ContentLength > maxErrorOnlyCapturedRequestBodyBytes {
 		return false
 	}
 	return req.ContentLength <= maxErrorOnlyCapturedRequestBodyBytes
