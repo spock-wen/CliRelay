@@ -63,6 +63,12 @@ func NewOpenCodeGoAnalyzer(baseURL, apiKey, model string) *OpenCodeGoAnalyzer {
 	}
 }
 
+// NewOpenAICompatAnalyzer 构造一个指向 OpenAI 兼容视觉模型的识图器。
+// 复用 OpenCodeGoAnalyzer 的 prompt 与 HTTP 逻辑，仅语义上区分调用目标。
+func NewOpenAICompatAnalyzer(baseURL, apiKey, model string) *OpenCodeGoAnalyzer {
+	return NewOpenCodeGoAnalyzer(baseURL, apiKey, model)
+}
+
 func (a *OpenCodeGoAnalyzer) Name() string { return "opencode-go" }
 
 func (a *OpenCodeGoAnalyzer) Analyze(ctx context.Context, req AnalyzeRequest) (AnalyzeResponse, error) {
