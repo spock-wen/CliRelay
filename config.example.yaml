@@ -322,6 +322,14 @@ streaming:
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
 #         alias: "kimi-k2" # The alias used in the API.
 
+# Vision recognition model for OpenAI-compatible providers.
+# When a user sends an image to a text-only model via an openai-compatibility
+# provider, the image is sent to this vision model for recognition, and the
+# resulting text summary is fed back to the original text model.
+# Format: "<provider-name>/<model-name>" where provider-name matches an
+# openai-compatibility entry below.
+# vision-recognition-model: "openrouter/gpt-4o"
+
 # Vertex API keys (Vertex-compatible endpoints, use API key + base URL)
 # vertex-api-key:
 #   - api-key: "vk-123..."                        # x-goog-api-key header
