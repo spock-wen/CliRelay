@@ -545,11 +545,22 @@ func (e *OpenAICompatExecutor) resolveRecognitionAnalyzer() *vision.OpenCodeGoAn
 
 // recognizeCurrentTurnImages 对当前轮图片做识图回填，返回处理后的 payload 与是否应用。
 func (e *OpenAICompatExecutor) recognizeCurrentTurnImages(ctx context.Context, payload []byte, model string) vision.RecognizeImagesResult {
+	// cline 已经有自己的 vision fallback（模型替换），不在此重复处理，避免双重识图。
+	if e.provider == "cline" {
+		return vision.RecognizeImagesResult{Payload: payload}
+	}
 	analyzer := e.resolveRecognitionAnalyzer()
 	if analyzer == nil {
 		return vision.RecognizeImagesResult{Payload: payload}
 	}
-	return vision.RecognizeCurrentTurnImages(ctx, analyzer, payload, model)
+	result := vision.RecognizeCurrentTurnImages(ctx, analyzer, payload, model)
+	if result.Applied {
+		// analyzer.Name() 返回固定的 "opencode-go"，但 usage 记录需要真实的识图模型名。
+		if target, ok := vision.ResolveRecognitionTarget(e.cfg, e.cfg.VisionRecognitionModel); ok && target != nil {
+			result.FallbackModel = target.Model
+		}
+	}
+	return result
 }
 
 func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (baseURL, apiKey string) {

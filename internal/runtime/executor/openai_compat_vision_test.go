@@ -106,3 +106,40 @@ func TestExecuteVisionRecognitionEndToEnd(t *testing.T) {
 		t.Error("expected non-empty response")
 	}
 }
+
+func TestRecognizeSkipsClineProvider(t *testing.T) {
+	visionCalled := false
+	visionSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		visionCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"SUMMARY: x"}}]}`))
+	}))
+	defer visionSrv.Close()
+
+	cfg := &config.Config{
+		VisionRecognitionModel: "vision-provider/gpt-4o",
+		OpenAICompatibility: []config.OpenAICompatibility{
+			{Name: "vision-provider", BaseURL: visionSrv.URL,
+				APIKeyEntries: []config.OpenAICompatibilityAPIKey{{APIKey: "sk-vision"}}},
+		},
+	}
+	e := &OpenAICompatExecutor{provider: "cline", cfg: cfg}
+
+	payload := []byte(`{
+		"model": "cline-pass/gpt-4o",
+		"messages": [
+			{"role": "user", "content": [
+				{"type": "text", "text": "看图"},
+				{"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+			]}
+		]
+	}`)
+	res := e.recognizeCurrentTurnImages(context.Background(), payload, "cline-pass/gpt-4o")
+	if res.Applied {
+		t.Errorf("recognition must NOT apply for cline provider")
+	}
+	if visionCalled {
+		t.Errorf("vision model must NOT be called for cline provider")
+	}
+}
