@@ -12,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/vision"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
@@ -80,6 +81,13 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 			ctx = contextWithVisionFallbackLog(ctx, originalRequestedModel, originalUpstreamModel, fallback.FallbackModel)
 		}
 		req = fallback.Request
+	}
+
+	// OpenAI 兼容识图回填：文本模型发图时，用配置的视觉模型识图并回填文本。
+	recog := e.recognizeCurrentTurnImages(ctx, req.Payload, req.Model)
+	if recog.Applied {
+		ctx = contextWithVisionFallbackLog(ctx, req.Model, thinking.ParseSuffix(req.Model).ModelName, recog.FallbackModel)
+		req.Payload = recog.Payload
 	}
 
 	to := sdktranslator.FromString("openai")
@@ -223,6 +231,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			ctx = contextWithVisionFallbackLog(ctx, originalRequestedModel, originalUpstreamModel, fallback.FallbackModel)
 		}
 		req = fallback.Request
+	}
+
+	// OpenAI 兼容识图回填：文本模型发图时，用配置的视觉模型识图并回填文本。
+	recog := e.recognizeCurrentTurnImages(ctx, req.Payload, req.Model)
+	if recog.Applied {
+		ctx = contextWithVisionFallbackLog(ctx, req.Model, thinking.ParseSuffix(req.Model).ModelName, recog.FallbackModel)
+		req.Payload = recog.Payload
 	}
 
 	to := sdktranslator.FromString("openai")
@@ -510,6 +525,31 @@ func (e *OpenAICompatExecutor) Refresh(ctx context.Context, auth *cliproxyauth.A
 	log.Debugf("openai compat executor: refresh called")
 	_ = ctx
 	return auth, nil
+}
+
+// resolveRecognitionAnalyzer 根据 config.VisionRecognitionModel 解析识图模型，
+// 成功则构造 analyzer，失败返回 nil。
+func (e *OpenAICompatExecutor) resolveRecognitionAnalyzer() *vision.OpenCodeGoAnalyzer {
+	if e.cfg == nil {
+		return nil
+	}
+	target, ok := vision.ResolveRecognitionTarget(e.cfg, e.cfg.VisionRecognitionModel)
+	if !ok || target == nil {
+		return nil
+	}
+	if target.BaseURL == "" || target.APIKey == "" || target.Model == "" {
+		return nil
+	}
+	return vision.NewOpenAICompatAnalyzer(target.BaseURL, target.APIKey, target.Model)
+}
+
+// recognizeCurrentTurnImages 对当前轮图片做识图回填，返回处理后的 payload 与是否应用。
+func (e *OpenAICompatExecutor) recognizeCurrentTurnImages(ctx context.Context, payload []byte, model string) vision.RecognizeImagesResult {
+	analyzer := e.resolveRecognitionAnalyzer()
+	if analyzer == nil {
+		return vision.RecognizeImagesResult{Payload: payload}
+	}
+	return vision.RecognizeCurrentTurnImages(ctx, analyzer, payload, model)
 }
 
 func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (baseURL, apiKey string) {
