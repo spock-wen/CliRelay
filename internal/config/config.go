@@ -121,6 +121,9 @@ type Config struct {
 	// OpenCodeGoKey defines OpenCode Go plan API key configurations.
 	OpenCodeGoKey []OpenCodeGoKey `yaml:"opencode-go-api-key" json:"opencode-go-api-key"`
 
+	// ClineKey defines ClinePass API key configurations.
+	ClineKey []ClineKey `yaml:"cline-api-key" json:"cline-api-key"`
+
 	// ClaudeHeaderDefaults configures default header values for Claude API requests.
 	// These are used as fallbacks when the client does not send its own headers.
 	ClaudeHeaderDefaults ClaudeHeaderDefaults `yaml:"claude-header-defaults" json:"claude-header-defaults"`
@@ -131,6 +134,9 @@ type Config struct {
 
 	// IdentityFingerprint controls provider-specific upstream identity headers.
 	IdentityFingerprint IdentityFingerprintConfig `yaml:"identity-fingerprint,omitempty" json:"identity-fingerprint,omitempty"`
+
+	// CodexOAuthAdmission controls global fixed allowed-client presets for Codex OAuth accounts.
+	CodexOAuthAdmission CodexOAuthAdmissionConfig `yaml:"codex-oauth-admission,omitempty" json:"codex-oauth-admission,omitempty"`
 
 	// ProxyPool stores reusable outbound proxies that can be referenced by providers and auth files.
 	ProxyPool []ProxyPoolEntry `yaml:"proxy-pool,omitempty" json:"proxy-pool,omitempty"`
