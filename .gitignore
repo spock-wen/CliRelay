@@ -35,6 +35,9 @@ auths/*
 docs/*
 !docs/images/
 !docs/images/*.png
+!docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/specs/
 !docs/internal-review/
 docs/internal-review/*
 !docs/internal-review/io-readall-inventory.md
