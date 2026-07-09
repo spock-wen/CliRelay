@@ -167,6 +167,10 @@ type Config struct {
 	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
+	// VisionRecognitionModel sets the model identifier used for image recognition (vision)
+	// requests routed through the openai-compatibility provider.
+	VisionRecognitionModel string `yaml:"vision-recognition-model,omitempty" json:"vision-recognition-model,omitempty"`
+
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
