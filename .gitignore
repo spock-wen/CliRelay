@@ -38,6 +38,7 @@ docs/*
 !docs/superpowers/
 docs/superpowers/*
 !docs/superpowers/specs/
+!docs/superpowers/plans/
 !docs/internal-review/
 docs/internal-review/*
 !docs/internal-review/io-readall-inventory.md
