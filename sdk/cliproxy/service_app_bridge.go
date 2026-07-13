@@ -3,6 +3,7 @@ package cliproxy
 import (
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	serviceapp "github.com/router-for-me/CLIProxyAPI/v6/sdkbridge/service"
 )
@@ -33,8 +34,12 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 	return serviceapp.NewDefaultAuthManager()
 }
 
-func buildAPIKeyClients(cfg *config.Config) (int, int, int, int, int, int, int) {
+func buildAPIKeyClients(cfg *config.Config) (int, int, int, int, int, int, int, int) {
 	return serviceapp.BuildAPIKeyClients(cfg)
+}
+
+func applyTenantRuntimeConfigs(cfg *config.Config, manager *coreauth.Manager) {
+	serviceapp.ApplyTenantRuntimeConfigs(cfg, manager)
 }
 
 type serverStarter interface {

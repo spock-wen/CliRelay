@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"math"
+	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +35,30 @@ func initTestUsageDB(t *testing.T, cfg config.RequestLogStorageConfig) {
 	}
 	stopRequestLogMaintenance()
 	t.Cleanup(CloseDB)
+}
+
+func TestSQLiteDatabaseSizeBytesIncludesWALAndSHM(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "usage.db")
+	files := map[string]string{
+		dbPath:          "database",
+		dbPath + "-wal": "wal",
+		dbPath + "-shm": "shm",
+	}
+	var want int64
+	for path, content := range files {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+		want += int64(len(content))
+	}
+
+	got, err := sqliteDatabaseSizeBytes(dbPath)
+	if err != nil {
+		t.Fatalf("sqliteDatabaseSizeBytes() error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("sqliteDatabaseSizeBytes() = %d, want %d", got, want)
+	}
 }
 
 func TestCutoffStartUTCAtUsesProjectTimezoneForDayBoundaries(t *testing.T) {
@@ -599,6 +625,105 @@ func TestQueryLogContentPartReturnsStoredRequestDetails(t *testing.T) {
 	}
 }
 
+func TestBodyStorageDisabledPreservesDetailsWithoutEmbeddedBodies(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{
+		StoreContent:           false,
+		ContentRetentionDays:   30,
+		CleanupIntervalMinutes: 1440,
+	})
+
+	details := `{"client":{"ip":"203.0.113.8"},"upstream":{"request_log":"=== API REQUEST 1 ===\nHeaders:\nX-Test: yes\nBody:\nsecret-request"},"response":{"upstream_log":"=== API RESPONSE 1 ===\nStatus: 200\nBody:\nsecret-response"}}`
+	InsertLogWithDetails("sk-test", "Primary", "gpt-test", "codex", "Codex", "auth-1", false, time.Now().UTC(), 100, 10, TokenStats{
+		InputTokens: 1, OutputTokens: 1, TotalTokens: 2,
+	}, `{"secret":"request"}`, `{"secret":"response"}`, details)
+
+	result, err := QueryLogs(LogQueryParams{Page: 1, Size: 10, Days: 1})
+	if err != nil || len(result.Items) != 1 {
+		t.Fatalf("QueryLogs() result=%+v error=%v", result, err)
+	}
+	input, err := QueryLogContentPart(result.Items[0].ID, "input")
+	if err != nil {
+		t.Fatalf("QueryLogContentPart(input) error = %v", err)
+	}
+	if input.Content != "" {
+		t.Fatalf("input content = %q, want empty", input.Content)
+	}
+	detail, err := QueryLogContentPart(result.Items[0].ID, "details")
+	if err != nil {
+		t.Fatalf("QueryLogContentPart(details) error = %v", err)
+	}
+	if !strings.Contains(detail.Content, "203.0.113.8") || !strings.Contains(detail.Content, "X-Test: yes") {
+		t.Fatalf("detail content lost diagnostic metadata: %q", detail.Content)
+	}
+	if strings.Contains(detail.Content, "secret-request") || strings.Contains(detail.Content, "secret-response") {
+		t.Fatalf("detail content retained request/response bodies: %q", detail.Content)
+	}
+}
+
+func TestBodyStorageDisabledKeepsFailedOutputErrorPayload(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{
+		StoreContent:           false,
+		ContentRetentionDays:   30,
+		CleanupIntervalMinutes: 1440,
+	})
+
+	details := `{"client":{"ip":"203.0.113.8"},"diagnostic":{"upstream":{"status":429,"provider":"xai"}},"upstream":{"request_log":"=== API REQUEST 1 ===\nBody:\nsecret-request"},"response":{"upstream_log":"=== API RESPONSE 1 ===\nStatus: 429\nBody:\nsecret-response"}}`
+	errorBody := `{"error":{"message":"rate limited by upstream","type":"upstream_error","code":"rate_limit"}}`
+	InsertLogWithDetails("sk-test", "Primary", "grok-4.5", "xai", "xAI", "auth-1", true, time.Now().UTC(), 196, 0, TokenStats{},
+		`{"model":"grok-4.5","messages":[{"role":"user","content":"secret prompt"}]}`,
+		errorBody,
+		details,
+	)
+
+	result, err := QueryLogs(LogQueryParams{Page: 1, Size: 10, Days: 1})
+	if err != nil || len(result.Items) != 1 {
+		t.Fatalf("QueryLogs() result=%+v error=%v", result, err)
+	}
+	if !result.Items[0].Failed {
+		t.Fatal("expected failed log row")
+	}
+
+	content, err := QueryLogContent(result.Items[0].ID)
+	if err != nil {
+		t.Fatalf("QueryLogContent() error = %v", err)
+	}
+	if content.InputContent != "" {
+		t.Fatalf("InputContent = %q, want empty when body storage is off", content.InputContent)
+	}
+	if content.OutputContent != errorBody {
+		t.Fatalf("OutputContent = %q, want failed error body preserved", content.OutputContent)
+	}
+
+	detail, err := QueryLogContentPart(result.Items[0].ID, "details")
+	if err != nil {
+		t.Fatalf("QueryLogContentPart(details) error = %v", err)
+	}
+	if strings.Contains(detail.Content, "secret-request") || strings.Contains(detail.Content, "secret-response") {
+		t.Fatalf("detail content retained request/response bodies: %q", detail.Content)
+	}
+	if !strings.Contains(detail.Content, `"status":429`) && !strings.Contains(detail.Content, `"status": 429`) {
+		// diagnostic may be re-marshaled with spaces; accept either encoding of status.
+		if !strings.Contains(detail.Content, "429") {
+			t.Fatalf("detail content lost diagnostic status: %q", detail.Content)
+		}
+	}
+
+	// Maintenance purge must not wipe failed error payloads.
+	if _, err = PurgeStoredRequestBodies(); err != nil {
+		t.Fatalf("PurgeStoredRequestBodies() error = %v", err)
+	}
+	contentAfter, err := QueryLogContent(result.Items[0].ID)
+	if err != nil {
+		t.Fatalf("QueryLogContent() after purge error = %v", err)
+	}
+	if contentAfter.OutputContent != errorBody {
+		t.Fatalf("OutputContent after purge = %q, want failed error body preserved", contentAfter.OutputContent)
+	}
+	if contentAfter.InputContent != "" {
+		t.Fatalf("InputContent after purge = %q, want empty", contentAfter.InputContent)
+	}
+}
+
 func TestInitDBMigratesFirstTokenAndStreamingColumns(t *testing.T) {
 	CloseDB()
 	dbPath := filepath.Join(t.TempDir(), "usage.db")
@@ -902,7 +1027,7 @@ func TestQueryLogsMarksStreamingRequests(t *testing.T) {
 }
 
 func TestQueryLogsHydratesLegacyStreamingFlagFromContent(t *testing.T) {
-	initTestUsageDB(t, config.RequestLogStorageConfig{})
+	initTestUsageDB(t, config.RequestLogStorageConfig{StoreContent: true})
 
 	timestamp := time.Now().UTC()
 	InsertLog("sk-test", "", "gpt-test", "source", "channel", "auth-1", false, timestamp, 123, 45, TokenStats{
@@ -1246,20 +1371,11 @@ func TestMigrateLegacyContentBatchPreservesInlineContentWhenStorageDisabled(t *t
 	}
 }
 
-func TestCleanupExpiredLogContentSkipsWhenStorageDisabledOrRetentionUnlimited(t *testing.T) {
+func TestCleanupExpiredLogContentSkipsWhenRetentionUnlimited(t *testing.T) {
 	testCases := []struct {
 		name string
 		cfg  config.RequestLogStorageConfig
 	}{
-		{
-			name: "storage disabled",
-			cfg: config.RequestLogStorageConfig{
-				StoreContent:           false,
-				ContentRetentionDays:   30,
-				CleanupIntervalMinutes: 1440,
-				VacuumOnCleanup:        false,
-			},
-		},
 		{
 			name: "retention unlimited",
 			cfg: config.RequestLogStorageConfig{
@@ -1740,6 +1856,82 @@ func TestQueryFiltersForLogsLinksFilterFacets(t *testing.T) {
 	}
 }
 
+func TestQueryAPIKeyDistributionMergesRawAndIDGroupsForSameKey(t *testing.T) {
+	// Production shape: some request_logs carry api_key_id, older rows for the
+	// same secret only have api_key. Distribution must merge into one point so
+	// the monitor donut does not list the same name twice.
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+
+	const (
+		stableID = "stable-dist-merge-1"
+		// Placeholder shape only; must not look like a live secret to secret-scan.
+		rawKey = "sk-test-dist-merge-legacy-raw"
+		name   = "袁蔚"
+	)
+	if err := UpsertAPIKey(APIKeyRow{ID: stableID, Key: rawKey, Name: name}); err != nil {
+		t.Fatalf("UpsertAPIKey: %v", err)
+	}
+
+	now := time.Now().UTC()
+	InsertLogWithDetailsIdentity(rawKey, stableID, name, "gpt-test", "source", "channel", "auth-1", false, now, 10, 10, TokenStats{TotalTokens: 100}, "", "", "")
+	InsertLogWithDetailsIdentity(rawKey, stableID, name, "gpt-test", "source", "channel", "auth-1", false, now.Add(time.Second), 10, 10, TokenStats{TotalTokens: 50}, "", "", "")
+
+	db := getDB()
+	// Legacy rows: same raw key, empty api_key_id (and often empty name snapshot).
+	for i := 0; i < 3; i++ {
+		ts := now.Add(time.Duration(i+2) * time.Second).Format(time.RFC3339Nano)
+		if _, err := db.Exec(
+			`INSERT INTO request_logs
+				(timestamp, api_key, api_key_id, api_key_name, model, source, channel_name, auth_index,
+				 failed, latency_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			ts, rawKey, "", "", "gpt-test", "source", "channel", "auth-1",
+			0, 10, 1, 1, 1, 0, 0, 10, 0,
+		); err != nil {
+			t.Fatalf("insert legacy request_log %d: %v", i, err)
+		}
+	}
+
+	// Unrelated key must remain a separate slice entry.
+	if err := UpsertAPIKey(APIKeyRow{ID: "other-id", Key: "sk-other", Name: "Other"}); err != nil {
+		t.Fatalf("UpsertAPIKey(other): %v", err)
+	}
+	InsertLogWithDetailsIdentity("sk-other", "other-id", "Other", "gpt-test", "source", "channel", "auth-2", false, now, 1, 1, TokenStats{TotalTokens: 5}, "", "", "")
+
+	dist, err := QueryAPIKeyDistribution(7)
+	if err != nil {
+		t.Fatalf("QueryAPIKeyDistribution() error = %v", err)
+	}
+	if len(dist) != 2 {
+		t.Fatalf("distribution len = %d, want 2 (merged primary + other): %#v", len(dist), dist)
+	}
+
+	var primary *APIKeyDistributionPoint
+	for i := range dist {
+		if dist[i].APIKey == rawKey {
+			primary = &dist[i]
+			break
+		}
+	}
+	if primary == nil {
+		t.Fatalf("missing merged point for %q in %#v", rawKey, dist)
+	}
+	if primary.Name != name {
+		t.Fatalf("merged name = %q, want %q", primary.Name, name)
+	}
+	// 2 id-backed + 3 raw-only rows
+	if primary.Requests != 5 {
+		t.Fatalf("merged requests = %d, want 5", primary.Requests)
+	}
+	// 100 + 50 + 3*10
+	if primary.Tokens != 180 {
+		t.Fatalf("merged tokens = %d, want 180", primary.Tokens)
+	}
+	if dist[0].APIKey != rawKey {
+		t.Fatalf("expected primary key first by request count, got %#v", dist)
+	}
+}
+
 func TestRequestStatisticsPersistsAPIKeyIdentitySnapshotAcrossRename(t *testing.T) {
 	initTestUsageDB(t, config.RequestLogStorageConfig{})
 
@@ -1999,7 +2191,9 @@ func TestQueryStatsAndHeatmapCountSessionsFromDetails(t *testing.T) {
 		CleanupIntervalMinutes: 1440,
 	})
 
-	today := time.Date(2026, 7, 4, 12, 0, 0, 0, time.UTC)
+	// Keep both samples inside the rolling query window instead of letting a
+	// hard-coded calendar date age out as the test suite advances.
+	today := CutoffStartUTC(1).Add(12 * time.Hour)
 	yesterday := today.AddDate(0, 0, -1)
 	InsertLogWithDetails("sk-heatmap", "Heatmap", "gpt-5.4", "codex", "Codex", "auth-1", false, today, 10, 5, TokenStats{
 		InputTokens: 10, OutputTokens: 20, TotalTokens: 30,
@@ -2081,6 +2275,41 @@ func TestQueryStatsAndHeatmapCountSessionsFromDetails(t *testing.T) {
 	}
 	if sessionCount != 0 {
 		t.Fatalf("QuerySessionCount() after detail cleanup = %d, want 0", sessionCount)
+	}
+}
+
+func TestStartRequestLogContentSessionIDBackfillDoesNotScanHistoricalContent(t *testing.T) {
+	initTestUsageDB(t, config.RequestLogStorageConfig{
+		StoreContent:           true,
+		ContentRetentionDays:   30,
+		CleanupIntervalMinutes: 1440,
+	})
+
+	compressed, err := compressLogContent(`{"session_id":"historical-session"}`)
+	if err != nil {
+		t.Fatalf("compressLogContent() error = %v", err)
+	}
+	if _, err := getDB().Exec(
+		`INSERT INTO request_log_content (log_id, timestamp, compression, input_content, output_content, detail_content, session_id)
+		 VALUES (?, ?, ?, ?, ?, ?, '')`,
+		int64(9001),
+		time.Now().UTC().Format(time.RFC3339Nano),
+		requestLogContentCompression,
+		[]byte{},
+		[]byte{},
+		compressed,
+	); err != nil {
+		t.Fatalf("insert historical request_log_content: %v", err)
+	}
+
+	startRequestLogContentSessionIDBackfill(getDB())
+
+	var sessionID string
+	if err := getDB().QueryRow("SELECT session_id FROM request_log_content WHERE log_id = ?", int64(9001)).Scan(&sessionID); err != nil {
+		t.Fatalf("query session_id: %v", err)
+	}
+	if sessionID != "" {
+		t.Fatalf("session_id = %q, want unchanged empty historical value", sessionID)
 	}
 }
 

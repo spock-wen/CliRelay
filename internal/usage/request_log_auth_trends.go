@@ -36,6 +36,11 @@ type HourlyUsagePoint struct {
 }
 
 func QueryDailyCallsByAuthIndexes(authIndexes []string, days int) ([]DailyCountPoint, error) {
+	return QueryDailyCallsByAuthIndexesForTenant(systemTenantID, authIndexes, days)
+}
+
+func QueryDailyCallsByAuthIndexesForTenant(tenantID string, authIndexes []string, days int) ([]DailyCountPoint, error) {
+	tenantID = normalizeTenantID(tenantID)
 	db := getReadDB()
 	if db == nil {
 		return []DailyCountPoint{}, nil
@@ -65,8 +70,8 @@ func QueryDailyCallsByAuthIndexes(authIndexes []string, days int) ([]DailyCountP
 	}
 
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(normalized)), ",")
-	args := make([]interface{}, 0, len(normalized)+1)
-	args = append(args, CutoffStartUTC(days).Format(time.RFC3339))
+	args := make([]interface{}, 0, len(normalized)+2)
+	args = append(args, tenantID, CutoffStartUTC(days).Format(time.RFC3339))
 	for _, idx := range normalized {
 		args = append(args, idx)
 	}
@@ -74,7 +79,7 @@ func QueryDailyCallsByAuthIndexes(authIndexes []string, days int) ([]DailyCountP
 	q := fmt.Sprintf(`
 		SELECT timestamp
 		FROM request_logs
-		WHERE timestamp >= ? AND auth_index IN (%s)
+		WHERE tenant_id = ? AND timestamp >= ? AND auth_index IN (%s)
 		ORDER BY timestamp ASC
 	`, placeholders)
 
@@ -86,15 +91,14 @@ func QueryDailyCallsByAuthIndexes(authIndexes []string, days int) ([]DailyCountP
 
 	byDate := make(map[string]int64, days)
 	for rows.Next() {
-		var ts string
+		var ts storedTime
 		if err := rows.Scan(&ts); err != nil {
 			return nil, fmt.Errorf("usage: daily calls by auth indexes scan: %w", err)
 		}
-		parsed, ok := parseStoredTime(ts)
-		if !ok {
+		if !ts.Valid {
 			continue
 		}
-		byDate[localDayKeyAt(parsed)]++
+		byDate[localDayKeyAt(ts.Time)]++
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -149,15 +153,14 @@ func QueryHourlyCallsByAuthIndex(authIndex string, hours int) ([]HourlyCountPoin
 	defer rows.Close()
 
 	for rows.Next() {
-		var ts string
+		var ts storedTime
 		if err := rows.Scan(&ts); err != nil {
 			return nil, fmt.Errorf("usage: hourly calls by auth index scan: %w", err)
 		}
-		parsed, ok := parseStoredTime(ts)
-		if !ok {
+		if !ts.Valid {
 			continue
 		}
-		key := parsed.In(loc).Truncate(time.Hour).Format("2006-01-02 15:00")
+		key := ts.Time.In(loc).Truncate(time.Hour).Format("2006-01-02 15:00")
 		if bucket := byKey[key]; bucket != nil {
 			bucket.Requests++
 		}

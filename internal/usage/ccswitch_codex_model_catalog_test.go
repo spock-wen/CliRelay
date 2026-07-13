@@ -7,7 +7,7 @@ func TestBuildCcSwitchCodexModelCatalogUsesRequestModels(t *testing.T) {
 		ClientType:   "codex",
 		DefaultModel: "gpt-5.5",
 		ModelMappings: []CcSwitchModelMappingRow{
-			{RequestModel: "gpt-5.5", TargetModel: "gpt-5.5"},
+			{RequestModel: "gpt-5.5", TargetModel: "gpt-5.5", ContextWindow: 272000},
 			{RequestModel: "deepseek-v4-flash", TargetModel: "deepseek-chat"},
 			{RequestModel: "DeepSeek-V4-Flash", TargetModel: "deepseek-chat"},
 			{RequestModel: "deepseek-v4-pro", TargetModel: "deepseek-reasoner"},
@@ -31,6 +31,14 @@ func TestBuildCcSwitchCodexModelCatalogUsesRequestModels(t *testing.T) {
 		if got[idx] != want[idx] {
 			t.Fatalf("slug[%d] = %q, want %q; all=%#v", idx, got[idx], want[idx], got)
 		}
+	}
+
+	gpt := catalog.Models[0]
+	if gpt.ContextWindow != 272000 {
+		t.Fatalf("gpt-5.5 context_window = %d, want 272000", gpt.ContextWindow)
+	}
+	if gpt.ModelMessages.ContextWindow != 272000 {
+		t.Fatalf("gpt-5.5 model_messages.context_window = %d, want 272000", gpt.ModelMessages.ContextWindow)
 	}
 
 	deepseek := catalog.Models[1]
@@ -75,5 +83,63 @@ func TestBuildCcSwitchCodexModelCatalogSkipsNonCodex(t *testing.T) {
 
 	if catalog := BuildCcSwitchCodexModelCatalog(row); catalog != nil {
 		t.Fatalf("catalog = %#v, want nil", catalog)
+	}
+}
+
+func TestBuildCcSwitchCodexModelCatalogUsesGPT56Capabilities(t *testing.T) {
+	row := CcSwitchImportConfigRow{
+		ClientType:   "codex",
+		DefaultModel: "gpt-5.6-sol",
+		ModelMappings: []CcSwitchModelMappingRow{
+			{RequestModel: "gpt-5.6-sol", TargetModel: "gpt-5.6-sol"},
+			{RequestModel: "gpt-5.6-terra", TargetModel: "gpt-5.6-terra", ContextWindow: 400000},
+			{RequestModel: "gpt-5.6-luna", TargetModel: "gpt-5.6-luna", ContextWindow: 2000000},
+			{RequestModel: "legacy-sol", TargetModel: "gpt-5.6-sol"},
+			{RequestModel: "gpt-5.6-ultra", TargetModel: "gpt-5.6-sol"},
+		},
+	}
+
+	catalog := BuildCcSwitchCodexModelCatalog(row)
+	if catalog == nil || len(catalog.Models) != 5 {
+		t.Fatalf("catalog = %#v, want five GPT-5.6 entries", catalog)
+	}
+	bySlug := make(map[string]CcSwitchCodexModelCatalogEntry, len(catalog.Models))
+	for _, model := range catalog.Models {
+		bySlug[model.Slug] = model
+	}
+
+	for _, slug := range []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "legacy-sol"} {
+		entry := bySlug[slug]
+		if entry.MaxContextWindow != 1050000 || entry.ModelMessages.MaxContextWindow != 1050000 {
+			t.Fatalf("%s max context = (%d, %d), want 1050000", slug, entry.MaxContextWindow, entry.ModelMessages.MaxContextWindow)
+		}
+		assertCcSwitchReasoningEfforts(t, slug, entry.SupportedReasoningLevels, []string{"low", "medium", "high", "xhigh", "max", "ultra"})
+	}
+	if got := bySlug["gpt-5.6-sol"].ContextWindow; got != 1050000 {
+		t.Fatalf("sol context = %d, want 1050000", got)
+	}
+	if got := bySlug["gpt-5.6-terra"].ContextWindow; got != 400000 {
+		t.Fatalf("terra default override = %d, want 400000", got)
+	}
+	if got := bySlug["gpt-5.6-luna"].ContextWindow; got != 1050000 {
+		t.Fatalf("luna clamped context = %d, want 1050000", got)
+	}
+	if got := bySlug["legacy-sol"].ContextWindow; got != 1050000 {
+		t.Fatalf("target-derived legacy alias context = %d, want 1050000", got)
+	}
+	if got := bySlug["gpt-5.6-ultra"].DefaultReasoningLevel; got != "ultra" {
+		t.Fatalf("ultra alias default reasoning = %q, want ultra", got)
+	}
+}
+
+func assertCcSwitchReasoningEfforts(t *testing.T, label string, got []CcSwitchCodexReasoningLevel, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s reasoning len = %d, want %d: %#v", label, len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i].Effort != want[i] {
+			t.Fatalf("%s reasoning[%d] = %q, want %q: %#v", label, i, got[i].Effort, want[i], got)
+		}
 	}
 }

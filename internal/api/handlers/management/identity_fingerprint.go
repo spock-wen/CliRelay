@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identityfingerprint"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/runtimeconfig"
 	settingsstore "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/store"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 )
@@ -31,17 +32,14 @@ func (h *Handler) GetIdentityFingerprint(c *gin.Context) {
 	learned, effective := h.identityFingerprintState(current)
 	c.JSON(http.StatusOK, identityFingerprintResponse{
 		IdentityFingerprint: current,
-		Defaults: config.IdentityFingerprintConfig{
-			Codex:  config.DefaultCodexIdentityFingerprint(),
-			Claude: config.DefaultClaudeIdentityFingerprint(),
-			Gemini: config.DefaultGeminiIdentityFingerprint(),
-		},
-		Learned:   learned,
-		Effective: effective,
+		Defaults:            config.DefaultIdentityFingerprintConfig(),
+		Learned:             learned,
+		Effective:           effective,
 		Status: map[string]identityFingerprintProviderStatus{
 			"claude": {Enabled: current.Claude.Enabled, LearnedCount: len(learned["claude"])},
 			"codex":  {Enabled: current.Codex.Enabled, LearnedCount: len(learned["codex"])},
 			"gemini": {Enabled: current.Gemini.Enabled, LearnedCount: len(learned["gemini"])},
+			"xai":    {Enabled: current.XAI.Enabled, LearnedCount: len(learned["xai"])},
 		},
 	})
 }
@@ -53,9 +51,7 @@ func (h *Handler) PutIdentityFingerprint(c *gin.Context) {
 		return
 	}
 
-	body.Codex = config.CleanCodexIdentityFingerprint(body.Codex)
-	body.Claude = config.CleanClaudeIdentityFingerprint(body.Claude)
-	body.Gemini = config.CleanGeminiIdentityFingerprint(body.Gemini)
+	body = config.NormalizeIdentityFingerprintConfig(body)
 	if err := validateCodexIdentityFingerprint(body.Codex); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -65,6 +61,10 @@ func (h *Handler) PutIdentityFingerprint(c *gin.Context) {
 		return
 	}
 	if err := validateGeminiIdentityFingerprint(body.Gemini); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if err := validateXAIIdentityFingerprint(body.XAI); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -83,7 +83,7 @@ func (h *Handler) PutIdentityFingerprint(c *gin.Context) {
 	h.cfg.IdentityFingerprint = body
 	h.mu.Unlock()
 
-	if !h.persistRuntimeSetting(c, settingsstore.RuntimeSettingIdentityFingerprint, body) {
+	if !h.persistRuntimeSetting(c, settingsstore.RuntimeSettingIdentityFingerprint, runtimeconfig.IdentityFingerprintRuntimeSettingValue(body)) {
 		h.mu.Lock()
 		if h.cfg != nil {
 			h.cfg.IdentityFingerprint = previous
@@ -125,13 +125,15 @@ func (h *Handler) identityFingerprintState(current config.IdentityFingerprintCon
 		"claude": {},
 		"codex":  {},
 		"gemini": {},
+		"xai":    {},
 	}
 	effective := map[string][]identityfingerprint.EffectiveFingerprint{
 		"claude": {},
 		"codex":  {},
 		"gemini": {},
+		"xai":    {},
 	}
-	for _, provider := range []identityfingerprint.Provider{identityfingerprint.ProviderClaude, identityfingerprint.ProviderCodex, identityfingerprint.ProviderGemini} {
+	for _, provider := range []identityfingerprint.Provider{identityfingerprint.ProviderClaude, identityfingerprint.ProviderCodex, identityfingerprint.ProviderGemini, identityfingerprint.ProviderXAI} {
 		records, err := usage.ListIdentityFingerprints(provider, 200)
 		if err != nil {
 			continue
@@ -145,10 +147,13 @@ func (h *Handler) identityFingerprintState(current config.IdentityFingerprintCon
 				_, eff := identityfingerprint.ResolveClaude(current.Claude, &record)
 				effective[key] = append(effective[key], eff)
 			case identityfingerprint.ProviderCodex:
-				_, eff := identityfingerprint.ResolveCodex(current.Codex, &record)
+				_, eff := identityfingerprint.ResolveCodexProfile(current.Codex, &record)
 				effective[key] = append(effective[key], eff)
 			case identityfingerprint.ProviderGemini:
 				_, eff := identityfingerprint.ResolveGemini(current.Gemini, &record)
+				effective[key] = append(effective[key], eff)
+			case identityfingerprint.ProviderXAI:
+				_, eff := identityfingerprint.ResolveXAI(current.XAI, &record)
 				effective[key] = append(effective[key], eff)
 			}
 		}
@@ -161,6 +166,11 @@ func validateCodexIdentityFingerprint(fp config.CodexIdentityFingerprintConfig) 
 		containsHeaderLineBreak(fp.Originator) || containsHeaderLineBreak(fp.WebsocketBeta) ||
 		containsHeaderLineBreak(fp.BetaFeatures) || containsHeaderLineBreak(fp.SessionID) {
 		return fmt.Errorf("identity fingerprint fields must not contain line breaks")
+	}
+	if fp.Enabled {
+		if _, _, ok := identityfingerprint.CodexProfileKey(fp.UserAgent, fp.Originator); !ok {
+			return fmt.Errorf("codex user-agent and originator must identify the same supported client profile")
+		}
 	}
 	for key, value := range fp.CustomHeaders {
 		key = strings.TrimSpace(key)
@@ -232,6 +242,32 @@ func validateGeminiIdentityFingerprint(fp config.GeminiIdentityFingerprintConfig
 	return nil
 }
 
+func validateXAIIdentityFingerprint(fp config.XAIIdentityFingerprintConfig) error {
+	if containsHeaderLineBreak(fp.UserAgent) ||
+		containsHeaderLineBreak(fp.ClientIdentifier) ||
+		containsHeaderLineBreak(fp.ClientVersion) ||
+		containsHeaderLineBreak(fp.GrokConversationID) {
+		return fmt.Errorf("identity fingerprint fields must not contain line breaks")
+	}
+	for key, value := range fp.CustomHeaders {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" {
+			return fmt.Errorf("custom header name cannot be empty")
+		}
+		if !isHTTPHeaderToken(key) {
+			return fmt.Errorf("invalid custom header name: %s", key)
+		}
+		if isIdentityFingerprintBlockedHeader(key) || isXAIIdentityFingerprintBlockedHeader(key) {
+			return fmt.Errorf("custom header %s is managed by the system", key)
+		}
+		if containsHeaderLineBreak(value) {
+			return fmt.Errorf("custom header %s must not contain line breaks", key)
+		}
+	}
+	return nil
+}
+
 func containsHeaderLineBreak(value string) bool {
 	return strings.ContainsAny(value, "\r\n")
 }
@@ -263,6 +299,15 @@ func isClaudeIdentityFingerprintBlockedHeader(key string) bool {
 func isGeminiIdentityFingerprintBlockedHeader(key string) bool {
 	switch strings.ToLower(strings.TrimSpace(key)) {
 	case "x-goog-api-client", "client-metadata":
+		return true
+	default:
+		return false
+	}
+}
+
+func isXAIIdentityFingerprintBlockedHeader(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "x-grok-client-identifier", "x-grok-client-version", "x-grok-conv-id":
 		return true
 	default:
 		return false

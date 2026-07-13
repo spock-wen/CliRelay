@@ -84,6 +84,71 @@ func ResolveCodex(cfg config.CodexIdentityFingerprintConfig, learned *LearnedRec
 	return resolved, effective
 }
 
+// ResolveCodexProfile resolves product identity fields from one selected profile only.
+// Session and custom-header settings remain account-global, but UA/Originator/Version/Beta
+// are never filled from another profile or a global product preset.
+func ResolveCodexSafeFallback(cfg config.CodexIdentityFingerprintConfig) (config.CodexIdentityFingerprintConfig, EffectiveFingerprint) {
+	clean := config.CleanCodexIdentityFingerprint(cfg)
+	resolved, effective := ResolveCodex(cfg, nil)
+	profileKey, family, ok := CodexProfileKey(clean.UserAgent, clean.Originator)
+	if !ok {
+		// Invalid or cross-product account presets must not become an outbound
+		// identity bundle. Fall back to one coherent builtin profile while keeping
+		// session and non-identity custom settings.
+		resolved, effective = ResolveCodex(config.CodexIdentityFingerprintConfig{
+			Enabled:       clean.Enabled,
+			SessionMode:   clean.SessionMode,
+			SessionID:     clean.SessionID,
+			CustomHeaders: clean.CustomHeaders,
+		}, nil)
+		profileKey, family, _ = CodexProfileKey(resolved.UserAgent, resolved.Originator)
+	}
+	effective.ProfileKey = profileKey
+	effective.ProfileFamily = family
+	effective.ClientProduct = profileKey
+	effective.ClientVariant = resolved.Originator
+	return resolved, effective
+}
+
+func ResolveCodexProfile(cfg config.CodexIdentityFingerprintConfig, profile *LearnedRecord) (config.CodexIdentityFingerprintConfig, EffectiveFingerprint) {
+	clean := config.CleanCodexIdentityFingerprint(cfg)
+	defaults := config.DefaultCodexIdentityFingerprint()
+	fields := make(map[string]FieldValue)
+	profileField := func(field string) string {
+		value := learnedField(profile, field)
+		if value != "" {
+			fields[field] = FieldValue{Value: value, Source: FieldSourceLearned}
+		}
+		return value
+	}
+
+	version := profileField(FieldCodexVersion)
+	if version == "" && profile != nil {
+		version = strings.TrimSpace(profile.Version)
+		if version != "" {
+			fields[FieldCodexVersion] = FieldValue{Value: version, Source: FieldSourceLearned}
+		}
+	}
+	sessionMode := clean.SessionMode
+	if sessionMode == "" {
+		sessionMode = defaults.SessionMode
+	}
+	resolved := config.CodexIdentityFingerprintConfig{
+		Enabled:       clean.Enabled,
+		UserAgent:     profileField(FieldUserAgent),
+		Version:       version,
+		Originator:    profileField(FieldCodexOriginator),
+		WebsocketBeta: profileField(FieldCodexWebsocketBeta),
+		BetaFeatures:  profileField(FieldCodexBetaFeatures),
+		SessionMode:   sessionMode,
+		SessionID:     clean.SessionID,
+		CustomHeaders: clean.CustomHeaders,
+	}
+	effective := effective(ProviderCodex, clean.Enabled, profile, fields)
+	effective.Version = version
+	return resolved, effective
+}
+
 func ResolveGemini(cfg config.GeminiIdentityFingerprintConfig, learned *LearnedRecord) (config.GeminiIdentityFingerprintConfig, EffectiveFingerprint) {
 	clean := config.CleanGeminiIdentityFingerprint(cfg)
 	defaults := config.DefaultGeminiIdentityFingerprint()
@@ -102,6 +167,31 @@ func ResolveGemini(cfg config.GeminiIdentityFingerprintConfig, learned *LearnedR
 		CustomHeaders:  clean.CustomHeaders,
 	}
 	return resolved, effective(ProviderGemini, clean.Enabled, learned, fields)
+}
+
+func ResolveXAI(cfg config.XAIIdentityFingerprintConfig, learned *LearnedRecord) (config.XAIIdentityFingerprintConfig, EffectiveFingerprint) {
+	clean := config.CleanXAIIdentityFingerprint(cfg)
+	defaults := config.DefaultXAIIdentityFingerprint()
+	fields := make(map[string]FieldValue)
+	pick := func(field, preset, learnedValue, defaultValue string) string {
+		value, source := pickField(preset, learnedValue, defaultValue)
+		fields[field] = FieldValue{Value: value, Source: source}
+		return value
+	}
+
+	resolved := config.XAIIdentityFingerprintConfig{
+		Enabled:            clean.Enabled,
+		UserAgent:          pick(FieldUserAgent, clean.UserAgent, learnedField(learned, FieldUserAgent), defaults.UserAgent),
+		ClientIdentifier:   pick(FieldXAIClientIdentifier, clean.ClientIdentifier, learnedField(learned, FieldXAIClientIdentifier), defaults.ClientIdentifier),
+		ClientVersion:      pick(FieldXAIClientVersion, clean.ClientVersion, learnedFieldOrVersion(learned, FieldXAIClientVersion), defaults.ClientVersion),
+		GrokConversationID: strings.TrimSpace(clean.GrokConversationID),
+		CustomHeaders:      clean.CustomHeaders,
+	}
+	effective := effective(ProviderXAI, clean.Enabled, learned, fields)
+	if value := strings.TrimSpace(resolved.ClientVersion); value != "" {
+		effective.Version = value
+	}
+	return resolved, effective
 }
 
 func pickField(preset, learned, fallback string) (string, FieldSource) {
@@ -139,6 +229,9 @@ func effective(provider Provider, enabled bool, learned *LearnedRecord, fields m
 	}
 	if learned != nil {
 		out.AccountKey = learned.AccountKey
+		out.ProfileKey = learned.ProfileKey
+		out.ProfileFamily = learned.ProfileFamily
+		out.ClientVariant = learned.ClientVariant
 		out.AuthSubjectID = learned.AuthSubjectID
 		out.ClientProduct = learned.ClientProduct
 		out.Version = learned.Version

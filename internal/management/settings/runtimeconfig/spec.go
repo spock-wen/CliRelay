@@ -15,6 +15,7 @@ const (
 	RuntimeSettingBedrockKeys          = "bedrock-api-key"
 	RuntimeSettingOpenCodeGoKeys       = "opencode-go-api-key"
 	RuntimeSettingClineKeys            = "cline-api-key"
+	RuntimeSettingOllamaCloudKeys      = "ollama-cloud-api-key"
 	RuntimeSettingOpenAICompatibility  = "openai-compatibility"
 	RuntimeSettingVertexCompatKeys     = "vertex-api-key"
 	RuntimeSettingClaudeHeaderDefaults = "claude-header-defaults"
@@ -168,6 +169,28 @@ func Specs() []Spec {
 			},
 		},
 		{
+			Key: RuntimeSettingOllamaCloudKeys,
+			Meaningful: func(cfg *config.Config) bool {
+				return len(cfg.OllamaCloudKey) > 0
+			},
+			Value: func(cfg *config.Config) any {
+				holder := &config.Config{OllamaCloudKey: append([]config.OllamaCloudKey(nil), cfg.OllamaCloudKey...)}
+				holder.SanitizeOllamaCloudKeys()
+				return holder.OllamaCloudKey
+			},
+			Apply: func(cfg *config.Config, raw json.RawMessage) bool {
+				var value []config.OllamaCloudKey
+				if err := json.Unmarshal(raw, &value); err != nil {
+					log.Warnf("runtimeconfig: decode %s: %v", RuntimeSettingOllamaCloudKeys, err)
+					return false
+				}
+				holder := &config.Config{OllamaCloudKey: value}
+				holder.SanitizeOllamaCloudKeys()
+				cfg.OllamaCloudKey = holder.OllamaCloudKey
+				return true
+			},
+		},
+		{
 			Key: RuntimeSettingOpenAICompatibility,
 			Meaningful: func(cfg *config.Config) bool {
 				return len(cfg.OpenAICompatibility) > 0
@@ -273,24 +296,18 @@ func Specs() []Spec {
 			Meaningful: func(cfg *config.Config) bool {
 				return codexIdentityFingerprintMeaningful(cfg.IdentityFingerprint.Codex) ||
 					claudeIdentityFingerprintMeaningful(cfg.IdentityFingerprint.Claude) ||
-					geminiIdentityFingerprintMeaningful(cfg.IdentityFingerprint.Gemini)
+					geminiIdentityFingerprintMeaningful(cfg.IdentityFingerprint.Gemini) ||
+					xaiIdentityFingerprintMeaningful(cfg.IdentityFingerprint.XAI)
 			},
 			Value: func(cfg *config.Config) any {
-				return config.IdentityFingerprintConfig{
-					Codex:  config.CleanCodexIdentityFingerprint(cfg.IdentityFingerprint.Codex),
-					Claude: config.CleanClaudeIdentityFingerprint(cfg.IdentityFingerprint.Claude),
-					Gemini: config.CleanGeminiIdentityFingerprint(cfg.IdentityFingerprint.Gemini),
-				}
+				return IdentityFingerprintRuntimeSettingValue(cfg.IdentityFingerprint)
 			},
 			Apply: func(cfg *config.Config, raw json.RawMessage) bool {
-				var value config.IdentityFingerprintConfig
-				if err := json.Unmarshal(raw, &value); err != nil {
+				value, err := identityFingerprintRuntimeSettingConfig(raw)
+				if err != nil {
 					log.Warnf("runtimeconfig: decode %s: %v", RuntimeSettingIdentityFingerprint, err)
 					return false
 				}
-				value.Codex = config.CleanCodexIdentityFingerprint(value.Codex)
-				value.Claude = config.CleanClaudeIdentityFingerprint(value.Claude)
-				value.Gemini = config.CleanGeminiIdentityFingerprint(value.Gemini)
 				cfg.IdentityFingerprint = value
 				return true
 			},
@@ -409,6 +426,54 @@ func geminiIdentityFingerprintMeaningful(fp config.GeminiIdentityFingerprintConf
 		strings.TrimSpace(clean.APIClient) != "" ||
 		strings.TrimSpace(clean.ClientMetadata) != "" ||
 		len(clean.CustomHeaders) > 0
+}
+
+func xaiIdentityFingerprintMeaningful(fp config.XAIIdentityFingerprintConfig) bool {
+	clean := config.CleanXAIIdentityFingerprint(fp)
+	return clean.Enabled ||
+		strings.TrimSpace(clean.UserAgent) != "" ||
+		strings.TrimSpace(clean.ClientIdentifier) != "" ||
+		strings.TrimSpace(clean.ClientVersion) != "" ||
+		strings.TrimSpace(clean.GrokConversationID) != "" ||
+		len(clean.CustomHeaders) > 0
+}
+
+const identityFingerprintRuntimeSettingVersion = 2
+
+type identityFingerprintRuntimePayload struct {
+	RuntimeSettingVersion int                                    `json:"runtime-setting-version,omitempty"`
+	Codex                 config.CodexIdentityFingerprintConfig  `json:"codex,omitempty"`
+	Claude                config.ClaudeIdentityFingerprintConfig `json:"claude,omitempty"`
+	Gemini                config.GeminiIdentityFingerprintConfig `json:"gemini,omitempty"`
+	XAI                   config.XAIIdentityFingerprintConfig    `json:"xai,omitempty"`
+}
+
+func IdentityFingerprintRuntimeSettingValue(value config.IdentityFingerprintConfig) any {
+	normalized := config.NormalizeIdentityFingerprintConfig(value)
+	return identityFingerprintRuntimePayload{
+		RuntimeSettingVersion: identityFingerprintRuntimeSettingVersion,
+		Codex:                 normalized.Codex,
+		Claude:                normalized.Claude,
+		Gemini:                normalized.Gemini,
+		XAI:                   normalized.XAI,
+	}
+}
+
+func identityFingerprintRuntimeSettingConfig(raw json.RawMessage) (config.IdentityFingerprintConfig, error) {
+	var payload identityFingerprintRuntimePayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return config.IdentityFingerprintConfig{}, err
+	}
+	value := config.IdentityFingerprintConfig{
+		Codex:  payload.Codex,
+		Claude: payload.Claude,
+		Gemini: payload.Gemini,
+		XAI:    payload.XAI,
+	}
+	if payload.RuntimeSettingVersion >= identityFingerprintRuntimeSettingVersion {
+		return config.NormalizeIdentityFingerprintConfig(value), nil
+	}
+	return config.NormalizeLegacyIdentityFingerprintRuntimeConfig(value), nil
 }
 
 func normalizeOAuthModelAliasSetting(entries map[string][]config.OAuthModelAlias) map[string][]config.OAuthModelAlias {

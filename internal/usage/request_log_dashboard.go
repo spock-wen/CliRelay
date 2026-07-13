@@ -1,6 +1,7 @@
 package usage
 
 import (
+	"database/sql"
 	"fmt"
 	"time"
 )
@@ -54,6 +55,10 @@ const dashboardThroughputBucketCount = 7
 // QueryDashboardKPI returns aggregated KPI data from SQLite for the dashboard.
 // This replaces the old in-memory snapshot-based counting which lost data on restart.
 func QueryDashboardKPI(days int) (DashboardKPI, error) {
+	return QueryDashboardKPIForTenant(systemTenantID, days)
+}
+
+func QueryDashboardKPIForTenant(tenantID string, days int) (DashboardKPI, error) {
 	db := getReadDB()
 	if db == nil {
 		return DashboardKPI{}, nil
@@ -77,8 +82,8 @@ func QueryDashboardKPI(days int) (DashboardKPI, error) {
 		"COALESCE(SUM(total_tokens), 0), " +
 		"COALESCE(SUM(cost), 0), " +
 		"COALESCE(SUM(" + cacheRateEffectiveInputSQL + "), 0) " +
-		"FROM request_logs WHERE timestamp >= ?"
-	err := db.QueryRow(kpiSQL, cutoff).Scan(
+		"FROM request_logs WHERE tenant_id = ? AND timestamp >= ?"
+	err := db.QueryRow(kpiSQL, normalizeTenantID(tenantID), cutoff).Scan(
 		&kpi.TotalRequests,
 		&kpi.SuccessRequests,
 		&kpi.FailedRequests,
@@ -104,8 +109,14 @@ func QueryDashboardKPI(days int) (DashboardKPI, error) {
 
 // QueryDashboardTrends returns fixed-width trend buckets used by the dashboard.
 // KPI trends follow the selected day range, while throughput always shows the
-// most recent 7 one-minute buckets.
+// most recent 7 points: completed minutes use calendar-minute totals, and the
+// latest point is a rolling last-60-seconds window so RPM/TPM stay continuous
+// across minute boundaries.
 func QueryDashboardTrends(days int) (DashboardTrends, error) {
+	return QueryDashboardTrendsForTenant(systemTenantID, days)
+}
+
+func QueryDashboardTrendsForTenant(tenantID string, days int) (DashboardTrends, error) {
 	db := getReadDB()
 	if db == nil {
 		return emptyDashboardTrends(days), nil
@@ -124,28 +135,24 @@ func QueryDashboardTrends(days int) (DashboardTrends, error) {
 	rows, err := db.Query(`
 		SELECT timestamp, failed, total_tokens
 		FROM request_logs
-		WHERE timestamp >= ?
-	`, CutoffStartUTC(days).Format(time.RFC3339))
+		WHERE tenant_id = ? AND timestamp >= ?
+	`, normalizeTenantID(tenantID), CutoffStartUTC(days).Format(time.RFC3339))
 	if err != nil {
 		return DashboardTrends{}, fmt.Errorf("usage: query dashboard trends: %w", err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
-		var ts string
+		var ts storedTime
 		var failedInt int
 		var totalTokens int64
 		if err := rows.Scan(&ts, &failedInt, &totalTokens); err != nil {
 			return DashboardTrends{}, fmt.Errorf("usage: scan dashboard trend row: %w", err)
 		}
-		parsed, err := time.Parse(time.RFC3339Nano, ts)
-		if err != nil {
-			parsed, err = time.Parse(time.RFC3339, ts)
-			if err != nil {
-				continue
-			}
+		if !ts.Valid {
+			continue
 		}
-		key := dashboardBucketKey(parsed.In(loc), days)
+		key := dashboardBucketKey(ts.Time.In(loc), days)
 		bucket := byKey[key]
 		if bucket == nil {
 			continue
@@ -162,7 +169,7 @@ func QueryDashboardTrends(days int) (DashboardTrends, error) {
 		return DashboardTrends{}, fmt.Errorf("usage: iterate dashboard trends: %w", err)
 	}
 
-	throughputSeries, err := queryDashboardThroughputSeriesAt(time.Now(), loc)
+	throughputSeries, err := queryDashboardThroughputSeriesAt(tenantID, time.Now(), loc, false)
 	if err != nil {
 		return DashboardTrends{}, err
 	}
@@ -170,6 +177,13 @@ func QueryDashboardTrends(days int) (DashboardTrends, error) {
 	trends := dashboardTrendsFromBuckets(buckets)
 	trends.ThroughputSeries = throughputSeries
 	return trends, nil
+}
+
+// QueryDashboardThroughputAcrossTenants returns the recent 7 RPM/TPM points
+// aggregated across every tenant (same continuous latest-window semantics as
+// tenant trends). Used by platform super-admins.
+func QueryDashboardThroughputAcrossTenants() ([]DashboardThroughputPoint, error) {
+	return queryDashboardThroughputSeriesAt("", time.Now(), getUsageLocation(), true)
 }
 
 func emptyDashboardTrends(days int) DashboardTrends {
@@ -237,7 +251,7 @@ func buildRecentThroughputBucketsAt(now time.Time, loc *time.Location) []dashboa
 	return buckets
 }
 
-func queryDashboardThroughputSeriesAt(now time.Time, loc *time.Location) ([]DashboardThroughputPoint, error) {
+func queryDashboardThroughputSeriesAt(tenantID string, now time.Time, loc *time.Location, allTenants bool) ([]DashboardThroughputPoint, error) {
 	db := getReadDB()
 	if db == nil {
 		return throughputSeriesFromBuckets(buildRecentThroughputBucketsAt(now, loc)), nil
@@ -246,46 +260,80 @@ func queryDashboardThroughputSeriesAt(now time.Time, loc *time.Location) ([]Dash
 		loc = time.Local
 	}
 
+	now = now.In(loc)
 	buckets := buildRecentThroughputBucketsAt(now, loc)
 	byKey := make(map[string]*dashboardBucket, len(buckets))
 	for i := range buckets {
 		byKey[buckets[i].key] = &buckets[i]
 	}
 
-	start := now.In(loc).Truncate(time.Minute).Add(-time.Duration(dashboardThroughputBucketCount-1) * time.Minute)
-	rows, err := db.Query(`
-		SELECT timestamp, total_tokens
-		FROM request_logs
-		WHERE timestamp >= ?
-	`, start.UTC().Format(time.RFC3339))
+	// Completed minute points stay calendar-aligned; the latest point is filled
+	// from a rolling 60s window so the dashboard value does not drop to zero at
+	// each minute boundary.
+	windowStart := now.Add(-time.Minute)
+	start := now.Truncate(time.Minute).Add(-time.Duration(dashboardThroughputBucketCount-1) * time.Minute)
+	if windowStart.Before(start) {
+		start = windowStart
+	}
+	startUTC := start.UTC().Format(time.RFC3339)
+
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if allTenants {
+		rows, err = db.Query(`
+			SELECT timestamp, total_tokens
+			FROM request_logs
+			WHERE timestamp >= ?
+		`, startUTC)
+	} else {
+		rows, err = db.Query(`
+			SELECT timestamp, total_tokens
+			FROM request_logs
+			WHERE tenant_id = ? AND timestamp >= ?
+		`, normalizeTenantID(tenantID), startUTC)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("usage: query dashboard throughput trends: %w", err)
 	}
 	defer rows.Close()
 
+	var (
+		windowRequests int64
+		windowTokens   int64
+	)
 	for rows.Next() {
-		var ts string
+		var ts storedTime
 		var totalTokens int64
 		if err := rows.Scan(&ts, &totalTokens); err != nil {
 			return nil, fmt.Errorf("usage: scan dashboard throughput row: %w", err)
 		}
-		parsed, err := time.Parse(time.RFC3339Nano, ts)
-		if err != nil {
-			parsed, err = time.Parse(time.RFC3339, ts)
-			if err != nil {
-				continue
-			}
-		}
-		key := parsed.In(loc).Truncate(time.Minute).Format("2006-01-02 15:04")
-		bucket := byKey[key]
-		if bucket == nil {
+		if !ts.Valid {
 			continue
 		}
-		bucket.requests++
-		bucket.totalToken += totalTokens
+		at := ts.Time.In(loc)
+		// Historical points: full calendar minute.
+		key := at.Truncate(time.Minute).Format("2006-01-02 15:04")
+		if bucket := byKey[key]; bucket != nil {
+			bucket.requests++
+			bucket.totalToken += totalTokens
+		}
+		// Latest point: requests that finished in the last 60 seconds.
+		if !at.Before(windowStart) && !at.After(now) {
+			windowRequests++
+			windowTokens += totalTokens
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("usage: iterate dashboard throughput rows: %w", err)
+	}
+
+	if len(buckets) > 0 {
+		// Replace the in-progress calendar minute with the rolling window so the
+		// rightmost chart point and headline RPM/TPM stay continuous.
+		buckets[len(buckets)-1].requests = windowRequests
+		buckets[len(buckets)-1].totalToken = windowTokens
 	}
 
 	return throughputSeriesFromBuckets(buckets), nil

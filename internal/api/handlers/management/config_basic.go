@@ -14,7 +14,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/bodyutil"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	settingsstore "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/store"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -32,7 +34,32 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		c.JSON(200, gin.H{})
 		return
 	}
-	c.JSON(200, sanitizeConfigForAPI(h.cfg))
+	tenantID := effectiveTenantID(c)
+	if tenantID == identity.SystemTenantID {
+		c.JSON(200, sanitizeConfigForAPI(h.cfg))
+		return
+	}
+	runtimeCfg := usage.BuildTenantRuntimeConfig(h.cfg, tenantID)
+	tenantView := &config.Config{
+		Routing:              runtimeCfg.Routing,
+		ProxyPool:            runtimeCfg.ProxyPool,
+		GeminiKey:            runtimeCfg.GeminiKey,
+		CodexKey:             runtimeCfg.CodexKey,
+		ClaudeKey:            runtimeCfg.ClaudeKey,
+		BedrockKey:           runtimeCfg.BedrockKey,
+		OpenCodeGoKey:        runtimeCfg.OpenCodeGoKey,
+		ClineKey:             runtimeCfg.ClineKey,
+		OllamaCloudKey:       runtimeCfg.OllamaCloudKey,
+		OpenAICompatibility:  runtimeCfg.OpenAICompatibility,
+		VertexCompatAPIKey:   runtimeCfg.VertexCompatAPIKey,
+		ClaudeHeaderDefaults: runtimeCfg.ClaudeHeaderDefaults,
+		KimiHeaderDefaults:   runtimeCfg.KimiHeaderDefaults,
+		CodexOAuthAdmission:  runtimeCfg.CodexOAuthAdmission,
+		OAuthExcludedModels:  runtimeCfg.OAuthExcludedModels,
+		OAuthModelAlias:      runtimeCfg.OAuthModelAlias,
+		Payload:              runtimeCfg.Payload,
+	}
+	c.JSON(200, sanitizeConfigForAPI(tenantView))
 }
 
 // maskKey masks an API key / secret, preserving first 6 and last 4 characters.
@@ -151,7 +178,18 @@ func sanitizeConfigForAPI(cfg *config.Config) *config.Config {
 		copy.ClineKey[i].Name = maskName(copy.ClineKey[i].Name)
 		copy.ClineKey[i].BaseURL = maskBaseURL(copy.ClineKey[i].BaseURL)
 		copy.ClineKey[i].ProxyURL = maskBaseURL(copy.ClineKey[i].ProxyURL)
+		copy.ClineKey[i].AuthCookie = maskKey(copy.ClineKey[i].AuthCookie)
 		copy.ClineKey[i].ExcludedModels = nil
+	}
+
+	// Mask Ollama Cloud API keys, names, URLs, and exclusions
+	for i := range copy.OllamaCloudKey {
+		copy.OllamaCloudKey[i].APIKey = maskKey(copy.OllamaCloudKey[i].APIKey)
+		copy.OllamaCloudKey[i].Name = maskName(copy.OllamaCloudKey[i].Name)
+		copy.OllamaCloudKey[i].BaseURL = maskBaseURL(copy.OllamaCloudKey[i].BaseURL)
+		copy.OllamaCloudKey[i].ProxyURL = maskBaseURL(copy.OllamaCloudKey[i].ProxyURL)
+		copy.OllamaCloudKey[i].AuthCookie = maskKey(copy.OllamaCloudKey[i].AuthCookie)
+		copy.OllamaCloudKey[i].ExcludedModels = nil
 	}
 
 	// Mask OpenAI compatibility API keys, names, URLs, and models
@@ -206,10 +244,11 @@ func sanitizeConfigForAPI(cfg *config.Config) *config.Config {
 }
 
 type releaseInfo struct {
-	TagName string `json:"tag_name"`
-	Name    string `json:"name"`
-	Body    string `json:"body"`
-	HTMLURL string `json:"html_url"`
+	TagName     string    `json:"tag_name"`
+	Name        string    `json:"name"`
+	Body        string    `json:"body"`
+	HTMLURL     string    `json:"html_url"`
+	PublishedAt time.Time `json:"published_at"`
 }
 
 // GetLatestVersion returns the latest release version from GitHub without downloading assets.

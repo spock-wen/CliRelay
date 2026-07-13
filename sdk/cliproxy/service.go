@@ -283,6 +283,7 @@ func (b *Builder) Build() (*Service, error) {
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
 	coreManager.SetConfig(b.cfg)
+	applyTenantRuntimeConfigs(b.cfg, coreManager)
 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
 
 	service := &Service{
@@ -327,7 +328,7 @@ func NewAPIKeyClientProvider() APIKeyClientProvider {
 type apiKeyClientProvider struct{}
 
 func (p *apiKeyClientProvider) Load(ctx context.Context, cfg *config.Config) (*APIKeyClientResult, error) {
-	geminiCount, vertexCompatCount, claudeCount, codexCount, bedrockCount, openCodeGoCount, openAICompat := buildAPIKeyClients(cfg)
+	geminiCount, vertexCompatCount, claudeCount, codexCount, bedrockCount, openCodeGoCount, ollamaCloudCount, openAICompat := buildAPIKeyClients(cfg)
 	if ctx != nil {
 		select {
 		case <-ctx.Done():
@@ -342,6 +343,7 @@ func (p *apiKeyClientProvider) Load(ctx context.Context, cfg *config.Config) (*A
 		CodexKeyCount:        codexCount,
 		BedrockKeyCount:      bedrockCount,
 		OpenCodeGoKeyCount:   openCodeGoCount,
+		OllamaCloudKeyCount:  ollamaCloudCount,
 		OpenAICompatCount:    openAICompat,
 	}, nil
 }

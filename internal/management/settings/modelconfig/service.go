@@ -2,6 +2,7 @@ package modelconfig
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
 	"strings"
@@ -18,10 +19,16 @@ type UpsertConfigInput struct {
 	Scope                     string
 	ModelID                   string
 	OwnedBy                   string
+	DisplayName               string
 	Description               string
 	Enabled                   bool
 	InputModalities           *[]string
 	OutputModalities          *[]string
+	ContextLength             *int
+	MaxCompletionTokens       *int
+	SupportedParameters       *[]string
+	Reasoning                 *any
+	KnowledgeCutoff           string
 	PricingMode               string
 	InputPricePerMillion      float64
 	OutputPricePerMillion     float64
@@ -54,26 +61,34 @@ func NormalizeScope(scope string) string {
 	}
 }
 
-func ListConfigs(scope string) []usage.ModelConfigRow {
-	return filterRowsByScope(usage.ListModelConfigs(), NormalizeScope(scope))
+func ListConfigs(scope string) []usage.ModelConfigRow { return ListConfigsForTenant("", scope) }
+func ListConfigsForTenant(tenantID, scope string) []usage.ModelConfigRow {
+	return filterRowsByScope(usage.ListModelConfigsForTenant(tenantID), NormalizeScope(scope))
 }
 
-func ListAllConfigs() []usage.ModelConfigRow {
-	return usage.ListModelConfigs()
+func ListAllConfigs() []usage.ModelConfigRow { return ListAllConfigsForTenant("") }
+func ListAllConfigsForTenant(tenantID string) []usage.ModelConfigRow {
+	return usage.ListModelConfigsForTenant(tenantID)
 }
 
-func GetConfig(modelID string) (usage.ModelConfigRow, bool) {
-	return usage.GetModelConfig(strings.TrimSpace(modelID))
+func GetConfig(modelID string) (usage.ModelConfigRow, bool) { return GetConfigForTenant("", modelID) }
+func GetConfigForTenant(tenantID, modelID string) (usage.ModelConfigRow, bool) {
+	return usage.GetModelConfigForTenant(tenantID, strings.TrimSpace(modelID))
 }
 
 func UpsertConfig(input UpsertConfigInput) (usage.ModelConfigRow, error) {
+	return UpsertConfigForTenant("", input)
+}
+func UpsertConfigForTenant(tenantID string, input UpsertConfigInput) (usage.ModelConfigRow, error) {
 	scope := NormalizeScope(input.Scope)
 	originalID := strings.TrimSpace(input.OriginalID)
 	row := usage.ModelConfigRow{
 		ModelID:                   strings.TrimSpace(input.ModelID),
 		OwnedBy:                   strings.TrimSpace(input.OwnedBy),
+		DisplayName:               strings.TrimSpace(input.DisplayName),
 		Description:               strings.TrimSpace(input.Description),
 		Enabled:                   input.Enabled,
+		KnowledgeCutoff:           strings.TrimSpace(input.KnowledgeCutoff),
 		PricingMode:               strings.TrimSpace(input.PricingMode),
 		InputPricePerMillion:      input.InputPricePerMillion,
 		OutputPricePerMillion:     input.OutputPricePerMillion,
@@ -89,6 +104,18 @@ func UpsertConfig(input UpsertConfigInput) (usage.ModelConfigRow, error) {
 	if input.OutputModalities != nil {
 		row.OutputModalities = *input.OutputModalities
 	}
+	if input.ContextLength != nil {
+		row.ContextLength = *input.ContextLength
+	}
+	if input.MaxCompletionTokens != nil {
+		row.MaxCompletionTokens = *input.MaxCompletionTokens
+	}
+	if input.SupportedParameters != nil {
+		row.SupportedParameters = *input.SupportedParameters
+	}
+	if input.Reasoning != nil {
+		row.Reasoning = encodeReasoningPayload(*input.Reasoning)
+	}
 	if row.ModelID == "" {
 		row.ModelID = originalID
 	}
@@ -100,48 +127,70 @@ func UpsertConfig(input UpsertConfigInput) (usage.ModelConfigRow, error) {
 	if originalID != "" {
 		lookupID = originalID
 	}
-	if existing, ok := usage.GetModelConfig(lookupID); ok {
+	if existing, ok := usage.GetModelConfigForTenant(tenantID, lookupID); ok {
 		if input.InputModalities == nil {
 			row.InputModalities = existing.InputModalities
 		}
 		if input.OutputModalities == nil {
 			row.OutputModalities = existing.OutputModalities
 		}
+		if strings.TrimSpace(input.DisplayName) == "" {
+			row.DisplayName = existing.DisplayName
+		}
+		if input.ContextLength == nil {
+			row.ContextLength = existing.ContextLength
+		}
+		if input.MaxCompletionTokens == nil {
+			row.MaxCompletionTokens = existing.MaxCompletionTokens
+		}
+		if input.SupportedParameters == nil {
+			row.SupportedParameters = existing.SupportedParameters
+		}
+		if input.Reasoning == nil {
+			row.Reasoning = existing.Reasoning
+		}
+		if strings.TrimSpace(input.KnowledgeCutoff) == "" {
+			row.KnowledgeCutoff = existing.KnowledgeCutoff
+		}
 	}
 
 	if originalID != "" && originalID != row.ModelID {
-		if err := usage.DeleteModelConfig(originalID); err != nil {
+		if err := usage.DeleteModelConfigForTenant(tenantID, originalID); err != nil {
 			return usage.ModelConfigRow{}, err
 		}
 	}
-	if err := usage.UpsertModelConfig(row); err != nil {
+	if err := usage.UpsertModelConfigForTenant(tenantID, row); err != nil {
 		return usage.ModelConfigRow{}, err
 	}
 
-	saved, ok := usage.GetModelConfig(row.ModelID)
+	saved, ok := usage.GetModelConfigForTenant(tenantID, row.ModelID)
 	if !ok {
 		return row, nil
 	}
 	return saved, nil
 }
 
-func DeleteConfig(modelID string) error {
+func DeleteConfig(modelID string) error { return DeleteConfigForTenant("", modelID) }
+func DeleteConfigForTenant(tenantID, modelID string) error {
 	modelID = strings.TrimSpace(modelID)
 	if modelID == "" {
 		return ErrModelIDRequired
 	}
-	return usage.DeleteModelConfig(modelID)
+	return usage.DeleteModelConfigForTenant(tenantID, modelID)
 }
 
 func ListOwnerPresetsWithCounts() []OwnerPresetWithCount {
+	return ListOwnerPresetsWithCountsForTenant("")
+}
+func ListOwnerPresetsWithCountsForTenant(tenantID string) []OwnerPresetWithCount {
 	modelCounts := make(map[string]int)
-	for _, model := range usage.ListModelConfigs() {
+	for _, model := range usage.ListModelConfigsForTenant(tenantID) {
 		if model.OwnedBy != "" {
 			modelCounts[model.OwnedBy]++
 		}
 	}
 
-	rows := usage.ListModelOwnerPresets()
+	rows := usage.ListModelOwnerPresetsForTenant(tenantID)
 	items := make([]OwnerPresetWithCount, 0, len(rows))
 	for _, row := range rows {
 		items = append(items, OwnerPresetWithCount{
@@ -153,14 +202,23 @@ func ListOwnerPresetsWithCounts() []OwnerPresetWithCount {
 }
 
 func ReplaceOwnerPresets(rows []usage.ModelOwnerPresetRow) error {
-	return usage.ReplaceModelOwnerPresets(rows)
+	return ReplaceOwnerPresetsForTenant("", rows)
+}
+func ReplaceOwnerPresetsForTenant(tenantID string, rows []usage.ModelOwnerPresetRow) error {
+	return usage.ReplaceModelOwnerPresetsForTenant(tenantID, rows)
 }
 
 func ListAuthGroupOwnerMappings() []usage.AuthGroupOwnerMappingRow {
-	return usage.ListAuthGroupOwnerMappings()
+	return ListAuthGroupOwnerMappingsForTenant("")
+}
+func ListAuthGroupOwnerMappingsForTenant(tenantID string) []usage.AuthGroupOwnerMappingRow {
+	return usage.ListAuthGroupOwnerMappingsForTenant(tenantID)
 }
 
 func UpsertAuthGroupOwnerMapping(authGroup, owner string) (usage.AuthGroupOwnerMappingRow, error) {
+	return UpsertAuthGroupOwnerMappingForTenant("", authGroup, owner)
+}
+func UpsertAuthGroupOwnerMappingForTenant(tenantID, authGroup, owner string) (usage.AuthGroupOwnerMappingRow, error) {
 	row := usage.AuthGroupOwnerMappingRow{
 		AuthGroup: strings.TrimSpace(authGroup),
 		Owner:     strings.TrimSpace(owner),
@@ -168,10 +226,10 @@ func UpsertAuthGroupOwnerMapping(authGroup, owner string) (usage.AuthGroupOwnerM
 	if row.AuthGroup == "" {
 		return usage.AuthGroupOwnerMappingRow{}, ErrAuthGroupRequired
 	}
-	if err := usage.UpsertAuthGroupOwnerMapping(row); err != nil {
+	if err := usage.UpsertAuthGroupOwnerMappingForTenant(tenantID, row); err != nil {
 		return usage.AuthGroupOwnerMappingRow{}, err
 	}
-	saved, ok := usage.GetAuthGroupOwnerMapping(row.AuthGroup)
+	saved, ok := usage.GetAuthGroupOwnerMappingForTenant(tenantID, row.AuthGroup)
 	if !ok {
 		return row, nil
 	}
@@ -179,15 +237,19 @@ func UpsertAuthGroupOwnerMapping(authGroup, owner string) (usage.AuthGroupOwnerM
 }
 
 func DeleteAuthGroupOwnerMapping(authGroup string) error {
+	return DeleteAuthGroupOwnerMappingForTenant("", authGroup)
+}
+func DeleteAuthGroupOwnerMappingForTenant(tenantID, authGroup string) error {
 	authGroup = strings.TrimSpace(authGroup)
 	if authGroup == "" {
 		return ErrAuthGroupRequired
 	}
-	return usage.DeleteAuthGroupOwnerMapping(authGroup)
+	return usage.DeleteAuthGroupOwnerMappingForTenant(tenantID, authGroup)
 }
 
-func ListPricing() []usage.ModelPricingRow {
-	pricingMap := usage.GetAllModelPricing()
+func ListPricing() []usage.ModelPricingRow { return ListPricingForTenant("") }
+func ListPricingForTenant(tenantID string) []usage.ModelPricingRow {
+	pricingMap := usage.GetAllModelPricingForTenant(tenantID)
 	items := make([]usage.ModelPricingRow, 0, len(pricingMap))
 	for _, row := range pricingMap {
 		items = append(items, row)
@@ -198,14 +260,15 @@ func ListPricing() []usage.ModelPricingRow {
 	return items
 }
 
-func UpsertPricing(items []PricingUpsertItem) (int, error) {
+func UpsertPricing(items []PricingUpsertItem) (int, error) { return UpsertPricingForTenant("", items) }
+func UpsertPricingForTenant(tenantID string, items []PricingUpsertItem) (int, error) {
 	updated := 0
 	for _, item := range items {
 		modelID := strings.TrimSpace(item.ModelID)
 		if modelID == "" {
 			continue
 		}
-		if err := usage.UpsertModelPricingV2(
+		if err := usage.UpsertModelPricingV2ForTenant(tenantID,
 			modelID,
 			item.InputPricePerMillion,
 			item.OutputPricePerMillion,
@@ -221,15 +284,27 @@ func UpsertPricing(items []PricingUpsertItem) (int, error) {
 }
 
 func GetOpenRouterSyncState() usage.OpenRouterModelSyncState {
-	return usage.GetOpenRouterModelSyncState()
+	return GetOpenRouterSyncStateForTenant("")
+}
+
+func GetOpenRouterSyncStateForTenant(tenantID string) usage.OpenRouterModelSyncState {
+	return usage.GetOpenRouterModelSyncStateForTenant(tenantID)
 }
 
 func UpdateOpenRouterSyncSettings(enabled bool, intervalMinutes int) (usage.OpenRouterModelSyncState, error) {
-	return usage.UpdateOpenRouterModelSyncSettings(enabled, intervalMinutes)
+	return UpdateOpenRouterSyncSettingsForTenant("", enabled, intervalMinutes)
+}
+
+func UpdateOpenRouterSyncSettingsForTenant(tenantID string, enabled bool, intervalMinutes int) (usage.OpenRouterModelSyncState, error) {
+	return usage.UpdateOpenRouterModelSyncSettingsForTenant(tenantID, enabled, intervalMinutes)
 }
 
 func RunOpenRouterSync(ctx context.Context) (usage.OpenRouterModelSyncResult, usage.OpenRouterModelSyncState, error) {
-	return usage.RunOpenRouterModelSync(ctx)
+	return RunOpenRouterSyncForTenant(ctx, "")
+}
+
+func RunOpenRouterSyncForTenant(ctx context.Context, tenantID string) (usage.OpenRouterModelSyncResult, usage.OpenRouterModelSyncState, error) {
+	return usage.RunOpenRouterModelSyncForTenant(ctx, tenantID)
 }
 
 func sourceForScope(scope string) string {
@@ -276,4 +351,20 @@ func filterRowsByScope(rows []usage.ModelConfigRow, scope string) []usage.ModelC
 		}
 	}
 	return filtered
+}
+
+func encodeReasoningPayload(value any) string {
+	if value == nil {
+		return ""
+	}
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	default:
+		encoded, err := json.Marshal(v)
+		if err != nil {
+			return ""
+		}
+		return string(encoded)
+	}
 }

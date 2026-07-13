@@ -39,6 +39,33 @@ func currentAPIKeyRowsByID() map[string]APIKeyRow {
 	return result
 }
 
+func currentAPIKeyRowsByIDForTenant(tenantID string) map[string]APIKeyRow {
+	rows := ListAPIKeysForTenant(tenantID)
+	result := make(map[string]APIKeyRow, len(rows))
+	for _, row := range rows {
+		id := strings.TrimSpace(row.ID)
+		if id != "" {
+			result[id] = row
+		}
+	}
+	return result
+}
+
+// currentAPIKeyRowsByKeyForTenant indexes live API keys by raw secret so
+// legacy request_logs rows missing api_key_id can still resolve to the same
+// identity as rows that already carry the stable id.
+func currentAPIKeyRowsByKeyForTenant(tenantID string) map[string]APIKeyRow {
+	rows := ListAPIKeysForTenant(tenantID)
+	result := make(map[string]APIKeyRow, len(rows))
+	for _, row := range rows {
+		key := strings.TrimSpace(row.Key)
+		if key != "" {
+			result[key] = row
+		}
+	}
+	return result
+}
+
 func uniqueAPIKeyIDByName() map[string]string {
 	return uniqueAPIKeyIDByNameFromRows(ListAPIKeys())
 }

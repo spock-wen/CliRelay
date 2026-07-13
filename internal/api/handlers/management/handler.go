@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	serviceapp "github.com/router-for-me/CLIProxyAPI/v6/internal/app/service"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	imagegeneration "github.com/router-for-me/CLIProxyAPI/v6/internal/management/imagegeneration"
 	settingsstore "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/store"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -39,27 +41,29 @@ const attemptMaxIdleTime = 2 * time.Hour
 
 // Handler aggregates config reference, persistence path and helpers.
 type Handler struct {
-	cfg                 *config.Config
-	configFilePath      string
-	mu                  sync.Mutex
-	attemptsMu          sync.Mutex
-	failedAttempts      map[string]*attemptInfo // keyed by client IP
-	authManager         *coreauth.Manager
-	usageStats          *usage.RequestStatistics
-	tokenStore          coreauth.Store
-	localPassword       string
-	allowRemoteOverride bool
-	envSecret           string
-	logDir              string
-	postAuthHook        coreauth.PostAuthHook
-	onConfigMutated     func(*config.Config)
-	startTime           time.Time
-	attemptCleanupStop  chan struct{}
-	attemptCleanupOnce  sync.Once
-	accessManager       *sdkaccess.Manager
-	trendCacheMu        sync.Mutex
-	trendCache          map[string]trendCacheEntry
-	imageGeneration     *imagegeneration.Service
+	cfg                  *config.Config
+	configFilePath       string
+	mu                   sync.Mutex
+	attemptsMu           sync.Mutex
+	failedAttempts       map[string]*attemptInfo // keyed by client IP
+	authManager          *coreauth.Manager
+	usageStats           *usage.RequestStatistics
+	tokenStore           coreauth.Store
+	localPassword        string
+	allowRemoteOverride  bool
+	envSecret            string
+	logDir               string
+	postAuthHook         coreauth.PostAuthHook
+	onConfigMutated      func(*config.Config)
+	onModelConfigMutated func()
+	startTime            time.Time
+	attemptCleanupStop   chan struct{}
+	attemptCleanupOnce   sync.Once
+	accessManager        *sdkaccess.Manager
+	trendCacheMu         sync.Mutex
+	trendCache           map[string]trendCacheEntry
+	imageGeneration      *imagegeneration.Service
+	identityService      *identity.Service
 }
 
 type trendCacheEntry struct {
@@ -94,8 +98,8 @@ func (h *Handler) newImageGenerationService() *imagegeneration.Service {
 	if h == nil {
 		return nil
 	}
-	return imagegeneration.NewService(func(ctx context.Context, payload []byte, alt string) ([]byte, error) {
-		return h.executeImageGenerationTest(ctx, payload, alt)
+	return imagegeneration.NewService(func(ctx context.Context, tenantID string, payload []byte, alt string) ([]byte, error) {
+		return h.executeImageGenerationTestForTenant(ctx, tenantID, payload, alt)
 	}, imageGenerationSystemAPIKey)
 }
 
@@ -172,6 +176,8 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 
 func (h *Handler) SetConfigMutatedHook(fn func(*config.Config)) { h.onConfigMutated = fn }
 
+func (h *Handler) SetModelConfigMutatedHook(fn func()) { h.onModelConfigMutated = fn }
+
 // SetAccessManager wires the request authentication access manager so management writes
 // (such as API key channel/model restrictions) can be applied immediately at runtime.
 func (h *Handler) SetAccessManager(manager *sdkaccess.Manager) { h.accessManager = manager }
@@ -214,6 +220,15 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		currentUIVersion, currentUICommit := h.currentFrontendState()
 		c.Header("X-CPA-UI-VERSION", currentUIVersion)
 		c.Header("X-CPA-UI-COMMIT", currentUICommit)
+
+		// Session tokens (cps_*) come from Authorization: Bearer on normal HTTP, or from
+		// ?token= on the system-stats WebSocket handshake (browsers cannot set WS headers).
+		// Resolve the session token before falling through to management-key auth so a
+		// valid user session is never bcrypt-compared against the remote management secret.
+		if token := resolveSessionToken(c); strings.HasPrefix(token, "cps_") {
+			_ = h.authenticateSessionToken(c, token)
+			return
+		}
 
 		clientIP := c.ClientIP()
 		localClient := clientIP == "127.0.0.1" || clientIP == "::1"
@@ -302,8 +317,12 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		}
 		// Fallback: ?token= query param is accepted only for WebSocket handshakes;
 		// normal HTTP requests must not carry credentials in URLs.
+		// Session tokens (cps_*) were already handled above; remaining query tokens are
+		// treated as management keys (legacy panel / service credential).
 		if provided == "" && shouldReadManagementTokenFromQuery(c) {
-			provided = c.Query("token")
+			if queryToken := strings.TrimSpace(c.Query("token")); !strings.HasPrefix(queryToken, "cps_") {
+				provided = queryToken
+			}
 		}
 
 		if provided == "" {
@@ -322,7 +341,8 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		if localClient {
 			if lp := h.localPassword; lp != "" {
 				if util.ConstantTimeStringEqual(provided, lp) {
-					c.Next()
+					h.setServicePrincipal(c)
+					h.nextWithManagementAudit(c)
 					return
 				}
 			}
@@ -330,7 +350,8 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 
 		if envSecret != "" && util.ConstantTimeStringEqual(provided, envSecret) {
 			clearFailures()
-			c.Next()
+			h.setServicePrincipal(c)
+			h.nextWithManagementAudit(c)
 			return
 		}
 
@@ -348,9 +369,62 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		}
 
 		clearFailures()
+		h.setServicePrincipal(c)
 
-		c.Next()
+		h.nextWithManagementAudit(c)
 	}
+}
+
+// resolveSessionToken returns a user-session token for management auth.
+// Prefer Authorization Bearer; for WebSocket handshakes only, also accept ?token=cps_*.
+func resolveSessionToken(c *gin.Context) string {
+	if token := bearerToken(c); strings.HasPrefix(token, "cps_") {
+		return token
+	}
+	if !shouldReadManagementTokenFromQuery(c) {
+		return ""
+	}
+	if token := strings.TrimSpace(c.Query("token")); strings.HasPrefix(token, "cps_") {
+		return token
+	}
+	return ""
+}
+
+// authenticateSessionToken validates a cps_* identity session and enforces RBAC + tenant scope.
+// Returns false when the request was already aborted with an error response.
+func (h *Handler) authenticateSessionToken(c *gin.Context, token string) bool {
+	service := h.identity()
+	if service == nil {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{"code": "identity_unavailable", "message": "identity service unavailable"}})
+		return false
+	}
+	principal, err := service.Authenticate(c.Request.Context(), token, c.GetHeader("X-Effective-Tenant-ID"))
+	if err != nil {
+		identityError(c, err)
+		return false
+	}
+	if principal.User.MustChangePassword {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": gin.H{"code": "password_change_required", "message": "password change required"}})
+		return false
+	}
+	permission := permissionForManagementRequest(c.Request.Method, c.Request.URL.Path)
+	if permission == "" || !principal.Has(permission) {
+		h.recordManagementAudit(c, principal, "denied")
+		identityError(c, identity.ErrPermissionDenied)
+		return false
+	}
+	// Some runtime/config stores remain process-global. Business-tenant sessions
+	// may only use fully tenant-scoped routes. Platform super-admins keep access
+	// after tenant switch so ops pages like /logs still work under an effective
+	// business tenant.
+	if deniesTenantResourceScope(principal, c.Request.URL.Path) {
+		h.recordManagementAudit(c, principal, "denied")
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": gin.H{"code": "tenant_resource_scope_unavailable", "message": "tenant business resources are not enabled for this tenant"}})
+		return false
+	}
+	c.Set(managementPrincipalKey, principal)
+	h.nextWithManagementAudit(c)
+	return true
 }
 
 // persist saves the current in-memory config to disk.
@@ -384,6 +458,23 @@ func (h *Handler) persistRuntimeSetting(c *gin.Context, key string, value any) b
 	if h.onConfigMutated != nil {
 		h.onConfigMutated(cfg)
 	}
+	return true
+}
+
+func (h *Handler) persistRuntimeSettingForTenant(c *gin.Context, key string, value any, cfg *config.Config) bool {
+	tenantID := effectiveTenantID(c)
+	if tenantID == identity.SystemTenantID {
+		return h.persistRuntimeSetting(c, key, value)
+	}
+	if err := usage.UpsertRuntimeSettingForTenant(tenantID, key, value); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to save runtime setting: %v", err)})
+		return false
+	}
+	if h.authManager != nil {
+		h.authManager.SetConfigForTenant(tenantID, cfg)
+		serviceapp.RebindTenantExecutors(h.cfg, h.authManager, tenantID, nil)
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	return true
 }
 

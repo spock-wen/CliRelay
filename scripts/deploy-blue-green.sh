@@ -11,8 +11,13 @@ DRAIN_SECONDS="${DRAIN_SECONDS:-35}"
 HEALTH_TIMEOUT_SECONDS="${HEALTH_TIMEOUT_SECONDS:-90}"
 MIN_AVAILABLE_MB="${MIN_AVAILABLE_MB:-512}"
 NGINX_CONTAINER="${NGINX_CONTAINER:-nginx}"
+SERVICE_CPU_QUOTA="${SERVICE_CPU_QUOTA:-170%}"
+SERVICE_MEMORY_HIGH="${SERVICE_MEMORY_HIGH:-1400M}"
+SERVICE_MEMORY_MAX="${SERVICE_MEMORY_MAX:-1600M}"
+SERVICE_TASKS_MAX="${SERVICE_TASKS_MAX:-512}"
 COMMIT_SHA="${COMMIT_SHA:?COMMIT_SHA is required}"
 ACTIVE_PORT_FILE="${BASE_DIR}/.active-port"
+CLEANUP_SCRIPT="${CLEANUP_SCRIPT:-${BASE_DIR}/scripts/cleanup-drained-slot.sh}"
 
 fail() {
 	echo "$*" >&2
@@ -37,7 +42,48 @@ config_path="$(printf '%s\n' "$service_exec" | sed -nE 's/.* -config[= ]([^ ;]+)
 config_path="${config_path:-${service_dir}/config.yaml}"
 
 [ -f "$TEMP_BIN" ] || fail "uploaded temp binary not found: $TEMP_BIN"
+[ -f "$CLEANUP_SCRIPT" ] || fail "drain cleanup script not found: $CLEANUP_SCRIPT"
 [ -f "$config_path" ] || fail "config file not found: $config_path"
+
+read_config_scalar() {
+	awk -v section="$1" -v key="$2" '
+		$0 ~ "^[[:space:]]*" section ":[[:space:]]*$" {in_section=1; next}
+		in_section && $0 ~ "^[^[:space:]#][^:]*:" {in_section=0}
+		in_section && $0 ~ "^[[:space:]]*" key ":[[:space:]]*" {
+			sub("^[[:space:]]*" key ":[[:space:]]*", "")
+			gsub(/^[[:space:]"'\'']+|[[:space:]"'\'']+$/, "")
+			print
+			exit
+		}
+	' "$config_path" 2>/dev/null || true
+}
+
+read_env_scalar() {
+	[ -f "$2" ] || return 0
+	awk -F= -v key="$1" '
+		$1 == key {
+			value = substr($0, length(key) + 2)
+			gsub(/^[[:space:]"'\'']+|[[:space:]"'\'']+$/, "", value)
+			print value
+			exit
+		}
+	' "$2" 2>/dev/null || true
+}
+
+env_path="${CLIRELAY_ENV_FILE:-${BASE_DIR}/.env}"
+postgres_dsn="${CLIRELAY_POSTGRES_DSN:-$(read_env_scalar CLIRELAY_POSTGRES_DSN "$env_path")}"
+postgres_dsn="${postgres_dsn:-$(read_config_scalar postgres dsn)}"
+[ -n "$postgres_dsn" ] || fail "postgres.dsn or CLIRELAY_POSTGRES_DSN is required before deploying this runtime data stack"
+
+redis_enable="${CLIRELAY_REDIS_ENABLE:-$(read_env_scalar CLIRELAY_REDIS_ENABLE "$env_path")}"
+redis_enable="${redis_enable:-$(read_config_scalar redis enable)}"
+case "${redis_enable,,}" in
+	true|yes|1)
+		redis_addr="${CLIRELAY_REDIS_ADDR:-$(read_env_scalar CLIRELAY_REDIS_ADDR "$env_path")}"
+		redis_addr="${redis_addr:-$(read_config_scalar redis addr)}"
+		[ -n "$redis_addr" ] || fail "redis.addr or CLIRELAY_REDIS_ADDR is required when redis is enabled"
+		;;
+esac
 
 config_port="$(awk '/^port:[[:space:]]*[0-9]+/ {print $2; exit}' "$config_path" 2>/dev/null || true)"
 active_port="$(cat "$ACTIVE_PORT_FILE" 2>/dev/null || true)"
@@ -90,6 +136,7 @@ unit_file="/etc/systemd/system/${next_unit}.service"
 	echo "WorkingDirectory=${working_dir}"
 	[ -n "$user" ] && echo "User=${user}"
 	[ -n "$group" ] && echo "Group=${group}"
+	[ -f "$env_path" ] && echo "EnvironmentFile=${env_path}"
 	[ -n "$environment" ] && echo "Environment=${environment}"
 	# Keep the canonical config path; only override the listen port for this deploy slot.
 	echo "Environment=CLIRELAY_PORT=${next_port} PORT=${next_port}"
@@ -98,9 +145,14 @@ unit_file="/etc/systemd/system/${next_unit}.service"
 	echo "RestartSec=3"
 	echo "KillSignal=SIGTERM"
 	echo "TimeoutStopSec=45"
-	echo
-	echo "[Install]"
-	echo "WantedBy=multi-user.target"
+	[ -n "$SERVICE_CPU_QUOTA" ] && echo "CPUQuota=${SERVICE_CPU_QUOTA}"
+	[ -n "$SERVICE_MEMORY_HIGH" ] && echo "MemoryHigh=${SERVICE_MEMORY_HIGH}"
+	[ -n "$SERVICE_MEMORY_MAX" ] && echo "MemoryMax=${SERVICE_MEMORY_MAX}"
+	[ -n "$SERVICE_TASKS_MAX" ] && echo "TasksMax=${SERVICE_TASKS_MAX}"
+	echo "OOMPolicy=stop"
+		echo
+		echo "[Install]"
+		echo "WantedBy=multi-user.target"
 } > "$unit_file"
 
 systemctl daemon-reload
@@ -209,14 +261,28 @@ fi
 
 echo "$next_port" > "$ACTIVE_PORT_FILE"
 cutover_done=1
-echo "CliRelay is serving on ${next_unit} (${next_port}); draining ${active_port} for ${DRAIN_SECONDS}s"
-sleep "$DRAIN_SECONDS"
 
-for old_unit in "$SERVICE_NAME" "${SERVICE_NAME}-${active_port}"; do
-	if [ "$old_unit" != "$next_unit" ]; then
-		systemctl disable --now "$old_unit" 2>/dev/null || systemctl stop "$old_unit" 2>/dev/null || true
-	fi
-done
-
-find "$BASE_DIR" -maxdepth 1 -type f -name "${SERVICE_NAME}-*" ! -name "$(basename "$next_bin")" -mtime +7 -delete 2>/dev/null || true
-echo "Deploy complete: ${next_unit}"
+cleanup_unit="${SERVICE_NAME}-drain-${active_port}-$(date +%s)"
+if systemd-run \
+	--unit="$cleanup_unit" \
+	--collect \
+	--on-active="${DRAIN_SECONDS}s" \
+	env \
+		SERVICE_NAME="$SERVICE_NAME" \
+		BASE_DIR="$BASE_DIR" \
+		PORT_A="$PORT_A" \
+		PORT_B="$PORT_B" \
+		ACTIVE_PORT_FILE="$ACTIVE_PORT_FILE" \
+		bash "$CLEANUP_SCRIPT" "$active_port" "$next_port"; then
+	echo "Deploy complete: ${next_unit} (${next_port}) is serving ${COMMIT_SHA}; ${active_port} will drain for ${DRAIN_SECONDS}s in ${cleanup_unit}."
+else
+	echo "Failed to schedule ${cleanup_unit}; draining ${active_port} synchronously." >&2
+	sleep "$DRAIN_SECONDS"
+	SERVICE_NAME="$SERVICE_NAME" \
+		BASE_DIR="$BASE_DIR" \
+		PORT_A="$PORT_A" \
+		PORT_B="$PORT_B" \
+		ACTIVE_PORT_FILE="$ACTIVE_PORT_FILE" \
+		bash "$CLEANUP_SCRIPT" "$active_port" "$next_port"
+	echo "Deploy complete after synchronous drain: ${next_unit} (${next_port}) is serving ${COMMIT_SHA}."
+fi
