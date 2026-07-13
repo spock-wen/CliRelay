@@ -7,14 +7,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	internalrouting "github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
 	log "github.com/sirupsen/logrus"
 )
 
 type CcSwitchModelMappingRow struct {
-	Role         string `json:"role,omitempty"`
-	RequestModel string `json:"request-model"`
-	TargetModel  string `json:"target-model"`
+	Role          string `json:"role,omitempty"`
+	RequestModel  string `json:"request-model"`
+	TargetModel   string `json:"target-model"`
+	ContextWindow int    `json:"context-window,omitempty"`
 }
 
 type CcSwitchImportConfigRow struct {
@@ -37,7 +39,8 @@ type CcSwitchImportConfigRow struct {
 
 const createCcSwitchImportConfigsTableSQL = `
 CREATE TABLE IF NOT EXISTS ccswitch_import_configs (
-  id                     TEXT PRIMARY KEY NOT NULL,
+  tenant_id              TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+  id                     TEXT NOT NULL,
   client_type            TEXT NOT NULL,
   provider_name          TEXT NOT NULL DEFAULT '',
   note                   TEXT NOT NULL DEFAULT '',
@@ -49,7 +52,8 @@ CREATE TABLE IF NOT EXISTS ccswitch_import_configs (
   usage_auto_interval    INTEGER NOT NULL DEFAULT 30,
   api_key_field          TEXT NOT NULL DEFAULT '',
   created_at             TEXT NOT NULL DEFAULT '',
-  updated_at             TEXT NOT NULL DEFAULT ''
+  updated_at             TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (tenant_id, id)
 );
 `
 
@@ -67,13 +71,56 @@ func initCcSwitchImportConfigsTable(db *sql.DB) {
 			log.Errorf("usage: migrate ccswitch_import_configs.route_path: %v", err)
 		}
 	}
-	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ccswitch_import_configs_route_path
-		ON ccswitch_import_configs(route_path) WHERE route_path <> ''`); err != nil {
-		log.Errorf("usage: create ccswitch_import_configs.route_path index: %v", err)
+	migrateCcSwitchImportConfigsTenantSchema(db)
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_ccswitch_import_configs_tenant_route_path
+		ON ccswitch_import_configs(tenant_id, route_path) WHERE route_path <> ''`); err != nil {
+		log.Errorf("usage: create tenant ccswitch_import_configs.route_path index: %v", err)
+	}
+}
+
+func migrateCcSwitchImportConfigsTenantSchema(db *sql.DB) {
+	pk, err := sqlitePrimaryKeyColumns(db, "ccswitch_import_configs")
+	if err != nil || len(pk) == 2 && pk[0] == "tenant_id" && pk[1] == "id" {
+		return
+	}
+	hasTenant := sqliteColumnExists(db, "ccswitch_import_configs", "tenant_id")
+	tx, err := db.Begin()
+	if err != nil {
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	if !hasTenant {
+		if _, err = tx.Exec("ALTER TABLE ccswitch_import_configs ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'"); err != nil {
+			return
+		}
+	}
+	if _, err = tx.Exec("DROP INDEX IF EXISTS idx_ccswitch_import_configs_route_path"); err != nil {
+		return
+	}
+	if _, err = tx.Exec("ALTER TABLE ccswitch_import_configs RENAME TO ccswitch_import_configs_legacy"); err != nil {
+		return
+	}
+	if _, err = tx.Exec(createCcSwitchImportConfigsTableSQL); err != nil {
+		return
+	}
+	columns := "tenant_id,id,client_type,provider_name,note,default_model,model_mappings,allowed_channel_groups,route_path,endpoint_path,usage_auto_interval,api_key_field,created_at,updated_at"
+	if _, err = tx.Exec("INSERT INTO ccswitch_import_configs(" + columns + ") SELECT " + columns + " FROM ccswitch_import_configs_legacy"); err != nil {
+		return
+	}
+	if _, err = tx.Exec("DROP TABLE ccswitch_import_configs_legacy"); err != nil {
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		log.Warnf("usage: migrate ccswitch_import_configs tenant schema: %v", err)
 	}
 }
 
 func ListCcSwitchImportConfigs() []CcSwitchImportConfigRow {
+	return ListCcSwitchImportConfigsForTenant(systemTenantID)
+}
+
+func ListCcSwitchImportConfigsForTenant(tenantID string) []CcSwitchImportConfigRow {
+	tenantID = normalizeTenantID(tenantID)
 	db := getDB()
 	if db == nil {
 		return nil
@@ -81,7 +128,7 @@ func ListCcSwitchImportConfigs() []CcSwitchImportConfigRow {
 
 	rows, err := db.Query(`SELECT id, client_type, provider_name, note, default_model, model_mappings,
 		allowed_channel_groups, route_path, endpoint_path, usage_auto_interval, api_key_field, created_at, updated_at
-		FROM ccswitch_import_configs ORDER BY created_at ASC, id ASC`)
+		FROM ccswitch_import_configs WHERE tenant_id = ? ORDER BY created_at ASC, id ASC`, tenantID)
 	if err != nil {
 		log.Errorf("usage: list ccswitch_import_configs: %v", err)
 		return nil
@@ -99,6 +146,11 @@ func ListCcSwitchImportConfigs() []CcSwitchImportConfigRow {
 }
 
 func FindCcSwitchImportConfigByRoutePath(routePath string) (CcSwitchImportConfigRow, bool) {
+	return FindCcSwitchImportConfigByRoutePathForTenant(systemTenantID, routePath)
+}
+
+func FindCcSwitchImportConfigByRoutePathForTenant(tenantID, routePath string) (CcSwitchImportConfigRow, bool) {
+	tenantID = normalizeTenantID(tenantID)
 	db := getDB()
 	if db == nil {
 		return CcSwitchImportConfigRow{}, false
@@ -110,7 +162,7 @@ func FindCcSwitchImportConfigByRoutePath(routePath string) (CcSwitchImportConfig
 
 	row := db.QueryRow(`SELECT id, client_type, provider_name, note, default_model, model_mappings,
 		allowed_channel_groups, route_path, endpoint_path, usage_auto_interval, api_key_field, created_at, updated_at
-		FROM ccswitch_import_configs WHERE route_path = ? LIMIT 1`, normalizedRoutePath)
+		FROM ccswitch_import_configs WHERE tenant_id = ? AND route_path = ? LIMIT 1`, tenantID, normalizedRoutePath)
 	result := scanCcSwitchImportConfigFromRow(row)
 	if result == nil {
 		return CcSwitchImportConfigRow{}, false
@@ -119,6 +171,11 @@ func FindCcSwitchImportConfigByRoutePath(routePath string) (CcSwitchImportConfig
 }
 
 func ReplaceAllCcSwitchImportConfigs(configs []CcSwitchImportConfigRow) error {
+	return ReplaceAllCcSwitchImportConfigsForTenant(systemTenantID, configs)
+}
+
+func ReplaceAllCcSwitchImportConfigsForTenant(tenantID string, configs []CcSwitchImportConfigRow) error {
+	tenantID = normalizeTenantID(tenantID)
 	db := getDB()
 	if db == nil {
 		return fmt.Errorf("database not initialised")
@@ -129,15 +186,15 @@ func ReplaceAllCcSwitchImportConfigs(configs []CcSwitchImportConfigRow) error {
 		return err
 	}
 
-	if _, err := tx.Exec("DELETE FROM ccswitch_import_configs"); err != nil {
+	if _, err := tx.Exec("DELETE FROM ccswitch_import_configs WHERE tenant_id = ?", tenantID); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
 
 	stmt, err := tx.Prepare(`INSERT INTO ccswitch_import_configs
-		(id, client_type, provider_name, note, default_model, model_mappings, allowed_channel_groups,
+		(tenant_id, id, client_type, provider_name, note, default_model, model_mappings, allowed_channel_groups,
 		 route_path, endpoint_path, usage_auto_interval, api_key_field, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		_ = tx.Rollback()
 		return err
@@ -183,6 +240,7 @@ func ReplaceAllCcSwitchImportConfigs(configs []CcSwitchImportConfigRow) error {
 		row.UpdatedAt = now
 
 		if _, err := stmt.Exec(
+			tenantID,
 			row.ID,
 			row.ClientType,
 			row.ProviderName,
@@ -296,15 +354,37 @@ func normalizeCcSwitchModelMappings(values []CcSwitchModelMappingRow) []CcSwitch
 		}
 		seen[key] = struct{}{}
 		result = append(result, CcSwitchModelMappingRow{
-			Role:         role,
-			RequestModel: requestModel,
-			TargetModel:  targetModel,
+			Role:          role,
+			RequestModel:  requestModel,
+			TargetModel:   targetModel,
+			ContextWindow: normalizeCcSwitchContextWindowForModels(value.ContextWindow, requestModel, targetModel),
 		})
 	}
 	if result == nil {
 		return []CcSwitchModelMappingRow{}
 	}
 	return result
+}
+
+func normalizeCcSwitchContextWindow(value int) int {
+	if value <= 0 {
+		return 0
+	}
+	return value
+}
+
+func normalizeCcSwitchContextWindowForModels(value int, modelIDs ...string) int {
+	contextWindow := normalizeCcSwitchContextWindow(value)
+	if contextWindow == 0 {
+		return 0
+	}
+	for _, modelID := range modelIDs {
+		capability, ok := registry.GetCodexModelCapability(modelID)
+		if ok && contextWindow > capability.MaxContextWindow {
+			return capability.MaxContextWindow
+		}
+	}
+	return contextWindow
 }
 
 func normalizeCcSwitchModelRole(value string) string {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -44,7 +45,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		if optional {
 			if os.IsNotExist(err) || errors.Is(err, syscall.EISDIR) {
 				// Missing and optional: return empty config (cloud deploy standby).
-				return &Config{}, nil
+				cfg := &Config{}
+				cfg.SanitizeIdentityFingerprint()
+				return cfg, nil
 			}
 		}
 		return nil, fmt.Errorf("failed to read config file: %w", err)
@@ -52,7 +55,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// In cloud deploy mode (optional=true), if file is empty or contains only whitespace, return empty config.
 	if optional && len(data) == 0 {
-		return &Config{}, nil
+		cfg := &Config{}
+		cfg.SanitizeIdentityFingerprint()
+		return cfg, nil
 	}
 
 	// Unmarshal the YAML data into the Config struct.
@@ -65,7 +70,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.RequestBody.ModelMaxMB = DefaultModelRequestBodyMB
 	cfg.RequestBody.DiskThresholdMB = DefaultRequestBodyDiskThresholdMB
 	cfg.UsageStatisticsEnabled = false
-	cfg.RequestLogStorage.StoreContent = true
+	cfg.RequestLogStorage.StoreContent = false
 	cfg.RequestLogStorage.ContentRetentionDays = 30
 	cfg.RequestLogStorage.CleanupIntervalMinutes = 1440
 	// Default cap for stored request/response bodies in usage.db.
@@ -87,7 +92,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
-			return &Config{}, nil
+			cfg := &Config{}
+			cfg.SanitizeIdentityFingerprint()
+			return cfg, nil
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
@@ -108,6 +115,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	cfg.ApplyEnvOverrides()
 	cfg.SanitizeIdentityFingerprint()
+	cfg.SanitizeCodexOAuthAdmission()
 	cfg.SanitizeOAuthModelAlias()
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 	cfg.SanitizeAutoUpdate()
@@ -115,6 +123,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.SanitizeCodexKeys()
 	cfg.SanitizeClaudeKeys()
 	cfg.SanitizeOpenCodeGoKeys()
+	cfg.SanitizeClineKeys()
+	cfg.SanitizeOllamaCloudKeys()
 	cfg.SanitizeGeminiKeys()
 	cfg.SanitizeProxyWarmup()
 
@@ -146,6 +156,12 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 	if cfg.Port == 0 {
 		cfg.Port = 8315
+	}
+	if cfg.Postgres.MaxOpenConns <= 0 {
+		cfg.Postgres.MaxOpenConns = 16
+	}
+	if cfg.Postgres.MaxIdleConns <= 0 {
+		cfg.Postgres.MaxIdleConns = 4
 	}
 	if cfg.RequestBody.ModelMaxMB <= 0 {
 		cfg.RequestBody.ModelMaxMB = DefaultModelRequestBodyMB
@@ -218,5 +234,32 @@ func (cfg *Config) ApplyEnvOverrides() {
 	}
 	if authPath := strings.TrimSpace(os.Getenv(EnvAuthPath)); authPath != "" {
 		cfg.AuthDir = authPath
+	}
+	if dsn := strings.TrimSpace(os.Getenv(EnvPostgresDSN)); dsn != "" {
+		cfg.Postgres.DSN = dsn
+	}
+	if raw := strings.TrimSpace(os.Getenv(EnvRedisEnable)); raw != "" {
+		if enabled, err := strconv.ParseBool(raw); err == nil {
+			cfg.Redis.Enable = enabled
+		}
+	}
+	if addr := strings.TrimSpace(os.Getenv(EnvRedisAddr)); addr != "" {
+		cfg.Redis.Addr = addr
+	}
+	if password := os.Getenv(EnvRedisPassword); password != "" {
+		cfg.Redis.Password = password
+	}
+	if raw := strings.TrimSpace(os.Getenv(EnvRedisDB)); raw != "" {
+		if db, err := strconv.Atoi(raw); err == nil && db >= 0 {
+			cfg.Redis.DB = db
+		}
+	}
+	for _, key := range []string{EnvPort, EnvLegacyPort} {
+		if rawPort := strings.TrimSpace(os.Getenv(key)); rawPort != "" {
+			if port, err := strconv.Atoi(rawPort); err == nil && port > 0 {
+				cfg.Port = port
+			}
+			return
+		}
 	}
 }

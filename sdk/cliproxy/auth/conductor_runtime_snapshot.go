@@ -11,6 +11,8 @@ type runtimeConfigSnapshot struct {
 	GeminiKey           []runtimeAPIKeyModelConfig
 	ClaudeKey           []runtimeAPIKeyModelConfig
 	CodexKey            []runtimeAPIKeyModelConfig
+	ClineKey            []runtimeAPIKeyModelConfig
+	OllamaCloudKey      []runtimeAPIKeyModelConfig
 	BedrockKey          []runtimeBedrockKeyConfig
 	VertexCompatAPIKey  []runtimeAPIKeyModelConfig
 	OpenAICompatibility []runtimeOpenAICompatibilityConfig
@@ -96,21 +98,29 @@ func newRuntimeConfigSnapshot(cfg *sdkconfig.Config) *runtimeConfigSnapshot {
 		GeminiKey:           cloneRuntimeAPIKeyModelConfigs(cfg.GeminiKey),
 		ClaudeKey:           cloneRuntimeAPIKeyModelConfigs(cfg.ClaudeKey),
 		CodexKey:            cloneRuntimeAPIKeyModelConfigs(cfg.CodexKey),
+		ClineKey:            cloneRuntimeClineModelConfigs(cfg.ClineKey),
+		OllamaCloudKey:      cloneRuntimeAPIKeyModelConfigs(cfg.OllamaCloudKey),
 		BedrockKey:          cloneRuntimeBedrockKeyConfigs(cfg.BedrockKey),
 		VertexCompatAPIKey:  cloneRuntimeAPIKeyModelConfigs(cfg.VertexCompatAPIKey),
 		OpenAICompatibility: cloneRuntimeOpenAICompatibilityConfigs(cfg.OpenAICompatibility),
 	}
 }
 
+type runtimeConfigSnapshotSet map[string]*runtimeConfigSnapshot
+
 func (m *Manager) currentRuntimeConfig() *runtimeConfigSnapshot {
+	return m.currentRuntimeConfigForTenant(defaultTenantID)
+}
+
+func (m *Manager) currentRuntimeConfigForTenant(tenantID string) *runtimeConfigSnapshot {
 	if m == nil {
 		return emptyRuntimeConfigSnapshot
 	}
-	cfg, _ := m.runtimeConfig.Load().(*runtimeConfigSnapshot)
-	if cfg == nil {
-		return emptyRuntimeConfigSnapshot
+	set, _ := m.runtimeConfig.Load().(runtimeConfigSnapshotSet)
+	if cfg := set[normalizedTenantID(tenantID)]; cfg != nil {
+		return cfg
 	}
-	return cfg
+	return emptyRuntimeConfigSnapshot
 }
 
 func cloneRuntimeRoutingChannelGroups(groups []sdkconfig.RoutingChannelGroup) []runtimeRoutingChannelGroup {
@@ -160,6 +170,21 @@ func cloneRuntimeAPIKeyModelConfigs[T interface {
 	return out
 }
 
+func cloneRuntimeClineModelConfigs(entries []sdkconfig.ClineKey) []runtimeAPIKeyModelConfig {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]runtimeAPIKeyModelConfig, 0, len(entries))
+	for i := range entries {
+		out = append(out, runtimeAPIKeyModelConfig{
+			APIKey:  entries[i].APIKey,
+			BaseURL: entries[i].BaseURL,
+			Models:  cloneRuntimeModelAliasEntries(entries[i].Models),
+		})
+	}
+	return out
+}
+
 func modelsForRuntimeConfigEntry[T any](entry T) []runtimeModelAliasEntry {
 	switch typed := any(entry).(type) {
 	case sdkconfig.GeminiKey:
@@ -167,6 +192,10 @@ func modelsForRuntimeConfigEntry[T any](entry T) []runtimeModelAliasEntry {
 	case sdkconfig.ClaudeKey:
 		return cloneRuntimeModelAliasEntries(typed.Models)
 	case sdkconfig.CodexKey:
+		return cloneRuntimeModelAliasEntries(typed.Models)
+	case sdkconfig.ClineKey:
+		return cloneRuntimeModelAliasEntries(typed.Models)
+	case sdkconfig.OllamaCloudKey:
 		return cloneRuntimeModelAliasEntries(typed.Models)
 	case sdkconfig.VertexCompatKey:
 		return cloneRuntimeModelAliasEntries(typed.Models)

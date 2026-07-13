@@ -26,6 +26,22 @@ func cloneError(err *Error) *Error {
 }
 
 func errorFromExecution(err error) *Error {
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		result := cloneError(authErr)
+		if result.Message == "" {
+			result.Message = err.Error()
+		}
+		type quotaWindowProvider interface {
+			QuotaWindow() (string, int)
+		}
+		var qwp quotaWindowProvider
+		if errors.As(err, &qwp) && qwp != nil && result.QuotaWindow == "" && result.QuotaWindowMinutes == 0 {
+			result.QuotaWindow, result.QuotaWindowMinutes = qwp.QuotaWindow()
+		}
+		return result
+	}
+
 	result := &Error{Message: err.Error()}
 	if se, ok := errors.AsType[cliproxyexecutor.StatusError](err); ok && se != nil {
 		result.HTTPStatus = se.StatusCode()
@@ -70,6 +86,24 @@ func retryAfterFromError(err error) *time.Duration {
 		return nil
 	}
 	return new(*retryAfter)
+}
+
+func headersFromError(err error) http.Header {
+	if err == nil {
+		return nil
+	}
+	type headerProvider interface {
+		Headers() http.Header
+	}
+	var hp headerProvider
+	if errors.As(err, &hp) && hp != nil {
+		headers := hp.Headers()
+		if len(headers) == 0 {
+			return nil
+		}
+		return headers.Clone()
+	}
+	return nil
 }
 
 func statusCodeFromResult(err *Error) int {

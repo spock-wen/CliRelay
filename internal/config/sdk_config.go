@@ -61,7 +61,8 @@ type SDKConfig struct {
 // RequestLogStorageConfig controls retention and cleanup of full request/response bodies.
 type RequestLogStorageConfig struct {
 	// StoreContent toggles persistence of full request and response bodies.
-	// When false, new content is no longer written, but existing stored content is preserved.
+	// Request details remain stored when this is false. Disabling through the
+	// management API also clears previously stored request/response bodies.
 	StoreContent bool `yaml:"store-content" json:"store-content"`
 
 	// ContentRetentionDays defines how many days full request/response bodies are kept.
@@ -122,6 +123,10 @@ type APIKeyEntry struct {
 	// When model pricing is configured, requests will be rejected once the API key's
 	// total accumulated cost exceeds this limit.
 	SpendingLimit float64 `yaml:"spending-limit,omitempty" json:"spending-limit,omitempty"`
+
+	// DailySpendingLimit is the maximum allowed spending in US dollars per day. 0 means
+	// unlimited. It resets at the project timezone day boundary.
+	DailySpendingLimit float64 `yaml:"daily-spending-limit,omitempty" json:"daily-spending-limit,omitempty"`
 
 	// ConcurrencyLimit is the maximum number of concurrent requests. 0 means unlimited.
 	ConcurrencyLimit int `yaml:"concurrency-limit,omitempty" json:"concurrency-limit,omitempty"`

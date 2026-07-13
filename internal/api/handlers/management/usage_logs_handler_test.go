@@ -154,9 +154,15 @@ func TestGetUsageLogsKeepsStoredChannelNameWhenCurrentAuthNameDiffers(t *testing
 	var payload struct {
 		Items []struct {
 			ChannelName string `json:"channel_name"`
+			AuthIndex   string `json:"auth_index"`
 		} `json:"items"`
 		Filters struct {
-			Channels []string `json:"channels"`
+			Channels       []string `json:"channels"`
+			ChannelOptions []struct {
+				Value     string `json:"value"`
+				Label     string `json:"label"`
+				AuthIndex string `json:"auth_index"`
+			} `json:"channel_options"`
 		} `json:"filters"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
@@ -165,13 +171,27 @@ func TestGetUsageLogsKeepsStoredChannelNameWhenCurrentAuthNameDiffers(t *testing
 	if len(payload.Items) != 1 {
 		t.Fatalf("expected 1 item, got %d", len(payload.Items))
 	}
+	// Historical rows keep the channel_name snapshot written at request time.
 	if payload.Items[0].ChannelName != "tabcode-plus" {
 		t.Fatalf("channel_name = %q, want %q", payload.Items[0].ChannelName, "tabcode-plus")
 	}
-	if len(payload.Filters.Channels) != 1 || payload.Filters.Channels[0] != "tabcode-plus" {
-		t.Fatalf("filters.channels = %#v, want [tabcode-plus]", payload.Filters.Channels)
+	// Filter facets use the live auth label / auth_index so renamed channels stay
+	// selectable as one account, while still matching historical rows by index.
+	if len(payload.Filters.ChannelOptions) != 1 {
+		t.Fatalf("channel_options = %#v, want one option", payload.Filters.ChannelOptions)
+	}
+	opt := payload.Filters.ChannelOptions[0]
+	if opt.Label != "tabcode-pro" {
+		t.Fatalf("channel_options[0].label = %q, want tabcode-pro", opt.Label)
+	}
+	if opt.Value != auth.Index || opt.AuthIndex != auth.Index {
+		t.Fatalf("channel_options[0] value/auth_index = %#v, want auth index %q", opt, auth.Index)
+	}
+	if len(payload.Filters.Channels) != 1 || payload.Filters.Channels[0] != "tabcode-pro" {
+		t.Fatalf("filters.channels = %#v, want [tabcode-pro]", payload.Filters.Channels)
 	}
 
+	// Legacy clients can still filter by the historical channel_name string.
 	rec = httptest.NewRecorder()
 	c, _ = gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodGet, "/usage/logs?days=7&page=1&size=50&channel=tabcode-plus", nil)
@@ -186,18 +206,34 @@ func TestGetUsageLogsKeepsStoredChannelNameWhenCurrentAuthNameDiffers(t *testing
 		t.Fatalf("filtered items = %#v, want one tabcode-plus item", payload.Items)
 	}
 
+	// Selecting the live label resolves to auth_index and still returns history.
 	rec = httptest.NewRecorder()
 	c, _ = gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodGet, "/usage/logs?days=7&page=1&size=50&channel=tabcode-pro", nil)
 	h.UsageLogs().GetUsageLogs(c)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("mismatched filtered expected status %d, got %d, body=%s", http.StatusOK, rec.Code, rec.Body.String())
+		t.Fatalf("live-label filtered expected status %d, got %d, body=%s", http.StatusOK, rec.Code, rec.Body.String())
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
-		t.Fatalf("unmarshal mismatched filtered response: %v", err)
+		t.Fatalf("unmarshal live-label filtered response: %v", err)
 	}
-	if len(payload.Items) != 0 {
-		t.Fatalf("mismatched filtered items = %#v, want none", payload.Items)
+	if len(payload.Items) != 1 || payload.Items[0].AuthIndex != auth.Index {
+		t.Fatalf("live-label filtered items = %#v, want one item for auth %q", payload.Items, auth.Index)
+	}
+
+	// Filtering by auth_index value (new clients) also returns the historical row.
+	rec = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/usage/logs?days=7&page=1&size=50&channel="+auth.Index, nil)
+	h.UsageLogs().GetUsageLogs(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("auth-index filtered expected status %d, got %d, body=%s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal auth-index filtered response: %v", err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].ChannelName != "tabcode-plus" {
+		t.Fatalf("auth-index filtered items = %#v, want one tabcode-plus item", payload.Items)
 	}
 }
 
@@ -1338,7 +1374,9 @@ func TestGetPublicUsageLogs_EmptyDB_DoesNotReturnNullModels(t *testing.T) {
 
 	var payload struct {
 		Filters struct {
-			Models []string `json:"models"`
+			Models   []string `json:"models"`
+			Channels []string `json:"channels"`
+			Statuses []string `json:"statuses"`
 		} `json:"filters"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
@@ -1346,6 +1384,12 @@ func TestGetPublicUsageLogs_EmptyDB_DoesNotReturnNullModels(t *testing.T) {
 	}
 	if payload.Filters.Models == nil {
 		t.Fatalf("filters.models is null; expected []")
+	}
+	if payload.Filters.Channels == nil {
+		t.Fatalf("filters.channels is null; expected []")
+	}
+	if payload.Filters.Statuses == nil {
+		t.Fatalf("filters.statuses is null; expected []")
 	}
 }
 
@@ -1386,7 +1430,9 @@ func TestGetPublicUsageLogs_AcceptsPOSTBody(t *testing.T) {
 
 	var payload struct {
 		Filters struct {
-			Models []string `json:"models"`
+			Models   []string `json:"models"`
+			Channels []string `json:"channels"`
+			Statuses []string `json:"statuses"`
 		} `json:"filters"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
@@ -1394,6 +1440,213 @@ func TestGetPublicUsageLogs_AcceptsPOSTBody(t *testing.T) {
 	}
 	if payload.Filters.Models == nil {
 		t.Fatalf("filters.models is null; expected []")
+	}
+	if payload.Filters.Channels == nil {
+		t.Fatalf("filters.channels is null; expected []")
+	}
+	if payload.Filters.Statuses == nil {
+		t.Fatalf("filters.statuses is null; expected []")
+	}
+}
+
+func TestGetPublicUsageLogs_ReturnsCurrentAPIKeyName(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "usage.db")
+	if err := usage.InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(func() {
+		usage.CloseDB()
+		_ = os.Remove(dbPath)
+		_ = os.Remove(dbPath + "-wal")
+		_ = os.Remove(dbPath + "-shm")
+	})
+	if err := usage.UpsertAPIKey(usage.APIKeyRow{Key: "sk-test", Name: "Primary"}); err != nil {
+		t.Fatalf("UpsertAPIKey: %v", err)
+	}
+
+	h := &Handler{
+		cfg: &config.Config{},
+	}
+
+	body := []byte(`{"api_key":"sk-test","days":7,"page":1,"size":50}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(
+		http.MethodPost,
+		"/v0/management/public/usage/logs",
+		bytes.NewReader(body),
+	)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.UsageLogs().GetPublicUsageLogs(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d, body=%s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		APIKeyName string `json:"api_key_name"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if payload.APIKeyName != "Primary" {
+		t.Fatalf("api_key_name = %q, want Primary", payload.APIKeyName)
+	}
+}
+
+func TestGetPublicUsageLogs_ReturnsChannelNameWithoutSensitiveFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "usage.db")
+	if err := usage.InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(func() {
+		usage.CloseDB()
+		_ = os.Remove(dbPath)
+		_ = os.Remove(dbPath + "-wal")
+		_ = os.Remove(dbPath + "-shm")
+	})
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "public-lookup-auth",
+		FileName: "codex-test.json",
+		Provider: "codex",
+		Label:    "Codex 主渠道",
+		Metadata: map[string]any{"email": "owner@example.com"},
+	})
+	if err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	usage.InsertLog(
+		"sk-test", "Primary", "gpt-5.5", "owner@example.com", "owner@example.com", auth.Index,
+		false, time.Now().UTC(), 123, 45,
+		usage.TokenStats{InputTokens: 1, OutputTokens: 2, TotalTokens: 3},
+		"", "",
+	)
+
+	h := &Handler{
+		cfg:         &config.Config{},
+		authManager: manager,
+	}
+
+	body := []byte(`{"api_key":"sk-test","days":7,"page":1,"size":50}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(
+		http.MethodPost,
+		"/v0/management/public/usage/logs",
+		bytes.NewReader(body),
+	)
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.UsageLogs().GetPublicUsageLogs(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d, body=%s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Items []struct {
+			APIKey      string `json:"api_key"`
+			APIKeyName  string `json:"api_key_name"`
+			Source      string `json:"source"`
+			AuthIndex   string `json:"auth_index"`
+			ChannelName string `json:"channel_name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(payload.Items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(payload.Items))
+	}
+	item := payload.Items[0]
+	if item.ChannelName != "Codex 主渠道" {
+		t.Fatalf("channel_name = %q, want Codex 主渠道", item.ChannelName)
+	}
+	if item.APIKey != "" || item.APIKeyName != "" || item.Source != "" || item.AuthIndex != "" {
+		t.Fatalf("sensitive fields not scrubbed: %+v", item)
+	}
+}
+
+func TestGetPublicUsageLogs_FiltersByDisplayedChannelName(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "usage.db")
+	if err := usage.InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(func() {
+		usage.CloseDB()
+		_ = os.Remove(dbPath)
+		_ = os.Remove(dbPath + "-wal")
+		_ = os.Remove(dbPath + "-shm")
+	})
+
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	auth, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "public-lookup-filter-auth",
+		FileName: "codex-test.json",
+		Provider: "codex",
+		Label:    "Codex 主渠道",
+		Metadata: map[string]any{"email": "owner@example.com"},
+	})
+	if err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	now := time.Now().UTC()
+	usage.InsertLog("sk-test", "Primary", "gpt-5.5", "owner@example.com", "owner@example.com", auth.Index, false, now, 123, 45, usage.TokenStats{TotalTokens: 3}, "", "")
+	usage.InsertLog("sk-test", "Primary", "gpt-5.5", "other", "OpenCode", "auth-other", false, now.Add(time.Second), 123, 45, usage.TokenStats{TotalTokens: 3}, "", "")
+
+	h := &Handler{
+		cfg:         &config.Config{},
+		authManager: manager,
+	}
+
+	body := []byte(`{"api_key":"sk-test","days":7,"page":1,"size":50,"channels":["Codex 主渠道"],"statuses":["success"]}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/public/usage/logs", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.UsageLogs().GetPublicUsageLogs(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d, body=%s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var payload struct {
+		Items []struct {
+			ChannelName string `json:"channel_name"`
+		} `json:"items"`
+		Filters struct {
+			Channels []string `json:"channels"`
+			Statuses []string `json:"statuses"`
+		} `json:"filters"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].ChannelName != "Codex 主渠道" {
+		t.Fatalf("items = %+v, want only Codex 主渠道", payload.Items)
+	}
+	if !containsString(payload.Filters.Channels, "Codex 主渠道") || !containsString(payload.Filters.Channels, "OpenCode") {
+		t.Fatalf("filters.channels = %#v, want linked channel options", payload.Filters.Channels)
+	}
+	if !containsString(payload.Filters.Statuses, "success") {
+		t.Fatalf("filters.statuses = %#v, want success", payload.Filters.Statuses)
 	}
 }
 
@@ -1578,5 +1831,128 @@ func TestDeleteUsageLogsSupportsSelectiveBodyCleanup(t *testing.T) {
 	}
 	if result.Items[0].HasContent {
 		t.Fatalf("HasContent = true, want false after selective cleanup")
+	}
+}
+
+func TestGetUsageLogsFiltersByOrphanAuthIndexWithoutLiveMeta(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "usage.db")
+	if err := usage.InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(func() {
+		usage.CloseDB()
+		_ = os.Remove(dbPath)
+		_ = os.Remove(dbPath + "-wal")
+		_ = os.Remove(dbPath + "-shm")
+	})
+
+	// Live auth uses the file: seed index (current EnsureIndex behavior).
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	liveAuth, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "xai-asherandersenloqv@outlook.com.json",
+		FileName: "xai-asherandersenloqv@outlook.com.json",
+		Provider: "xai",
+		Label:    "asherandersenloqv@outlook.com",
+		Metadata: map[string]any{
+			"email":     "asherandersenloqv@outlook.com",
+			"auth_kind": "oauth",
+		},
+	})
+	if err != nil {
+		t.Fatalf("register live auth: %v", err)
+	}
+
+	// Historical rows were written under the id: seed index before FileName was
+	// consistently set. That orphan index no longer exists in live auth meta.
+	orphanIndex := "69e8946f1ffc2d23"
+	now := time.Now().UTC()
+	usage.InsertLog(
+		"", "", "grok-4.5", "asherandersenloqv@outlook.com", "asherandersenloqv@outlook.com", orphanIndex,
+		false, now.Add(-time.Minute), 100, 10,
+		usage.TokenStats{InputTokens: 1, OutputTokens: 2, TotalTokens: 3},
+		"", "",
+	)
+	usage.InsertLog(
+		"", "", "grok-4.5", "asherandersenloqv@outlook.com", "asherandersenloqv@outlook.com", liveAuth.Index,
+		false, now, 100, 10,
+		usage.TokenStats{InputTokens: 1, OutputTokens: 2, TotalTokens: 3},
+		"", "",
+	)
+
+	h := &Handler{
+		cfg:         &config.Config{},
+		authManager: manager,
+	}
+
+	// Facet list should collapse the live and historical aliases into one option.
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/usage/logs?days=7&page=1&size=50", nil)
+	h.UsageLogs().GetUsageLogs(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list expected status %d, got %d, body=%s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var listPayload struct {
+		Filters struct {
+			ChannelOptions []struct {
+				Value     string `json:"value"`
+				Label     string `json:"label"`
+				Provider  string `json:"provider"`
+				AuthType  string `json:"auth_type"`
+				AuthIndex string `json:"auth_index"`
+			} `json:"channel_options"`
+		} `json:"filters"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listPayload); err != nil {
+		t.Fatalf("unmarshal list response: %v", err)
+	}
+	if len(listPayload.Filters.ChannelOptions) != 1 {
+		t.Fatalf("channel_options = %#v, want one merged option", listPayload.Filters.ChannelOptions)
+	}
+	option := listPayload.Filters.ChannelOptions[0]
+	if option.Value != liveAuth.Index || option.AuthIndex != liveAuth.Index {
+		t.Fatalf("merged option value/auth_index = %#v, want live index %q", option, liveAuth.Index)
+	}
+	if option.Label != "asherandersenloqv@outlook.com" || option.Provider != "xai" || option.AuthType != "oauth" {
+		t.Fatalf("merged option metadata = %#v", option)
+	}
+
+	// Old deep links using the orphan index expand to the complete alias group.
+	rec = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/usage/logs?days=7&page=1&size=50&channel="+orphanIndex, nil)
+	h.UsageLogs().GetUsageLogs(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("orphan filter expected status %d, got %d, body=%s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var filtered struct {
+		Items []struct {
+			AuthIndex   string `json:"auth_index"`
+			ChannelName string `json:"channel_name"`
+			Model       string `json:"model"`
+		} `json:"items"`
+		Total int64 `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &filtered); err != nil {
+		t.Fatalf("unmarshal orphan filtered response: %v", err)
+	}
+	if filtered.Total != 2 || len(filtered.Items) != 2 {
+		t.Fatalf("orphan filtered total/items = %d/%d, want 2/2; body=%s", filtered.Total, len(filtered.Items), rec.Body.String())
+	}
+	found := map[string]bool{}
+	for _, item := range filtered.Items {
+		found[item.AuthIndex] = true
+		if item.ChannelName != "asherandersenloqv@outlook.com" {
+			t.Fatalf("orphan filtered channel_name = %q", item.ChannelName)
+		}
+	}
+	if !found[orphanIndex] || !found[liveAuth.Index] {
+		t.Fatalf("orphan filter missing alias rows: %#v", filtered.Items)
 	}
 }

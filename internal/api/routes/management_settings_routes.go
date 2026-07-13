@@ -13,6 +13,7 @@ func registerManagementSettingsRoutes(group *gin.RouterGroup, h *managementhandl
 	group.GET("/update/check", h.CheckUpdate)
 	group.GET("/update/current", h.GetCurrentUpdateState)
 	group.GET("/update/progress", h.GetUpdateProgress)
+	group.GET("/update/events", h.StreamUpdateProgress)
 	group.POST("/update/apply", h.ApplyUpdate)
 	group.GET("/auto-update/enabled", h.GetAutoUpdateEnabled)
 	group.PUT("/auto-update/enabled", h.PutAutoUpdateEnabled)
@@ -41,6 +42,10 @@ func registerManagementSettingsRoutes(group *gin.RouterGroup, h *managementhandl
 	group.PUT("/usage-statistics-enabled", h.PutUsageStatisticsEnabled)
 	group.PATCH("/usage-statistics-enabled", h.PutUsageStatisticsEnabled)
 
+	group.GET("/request-log-storage/store-content", h.GetRequestLogBodyStorage)
+	group.PUT("/request-log-storage/store-content", h.PutRequestLogBodyStorage)
+	group.PATCH("/request-log-storage/store-content", h.PutRequestLogBodyStorage)
+
 	group.GET("/proxy-url", h.GetProxyURL)
 	group.PUT("/proxy-url", h.PutProxyURL)
 	group.PATCH("/proxy-url", h.PutProxyURL)
@@ -60,6 +65,7 @@ func registerManagementSettingsRoutes(group *gin.RouterGroup, h *managementhandl
 	group.PUT("/quota-exceeded/switch-preview-model", h.PutSwitchPreviewModel)
 	group.PATCH("/quota-exceeded/switch-preview-model", h.PutSwitchPreviewModel)
 	group.POST("/quota/reconcile", h.PostQuotaReconcile)
+	group.POST("/quota/clear-status", h.PostQuotaClearStatus)
 }
 
 func registerManagementRuntimeTuningRoutes(group *gin.RouterGroup, h *managementhandlers.Handler) {

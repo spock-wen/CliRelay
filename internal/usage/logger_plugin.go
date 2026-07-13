@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -79,6 +80,7 @@ func InitRedis(cfg config.RedisConfig) {
 		return
 	}
 
+	redisCtx = context.Background()
 	redisClient = redis.NewClient(&redis.Options{
 		Addr:     cfg.Addr,
 		Password: cfg.Password,
@@ -126,8 +128,11 @@ func StopRedis() {
 	if redisClient != nil {
 		saveToRedis() // Perform a final save
 		redisClient.Close()
+		redisClient = nil
 		log.Infof("Redis usage persistence flushed and closed")
 	}
+	redisCancel = nil
+	redisCtx = context.Background()
 	CloseDB()
 }
 
@@ -303,10 +308,13 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	totalTokens := detail.TotalTokens
 	statsKey := record.APIKey
 	if statsKey == "" {
+		statsKey = strings.TrimSpace(record.APIIdentifier)
+	}
+	if statsKey == "" {
 		statsKey = resolveAPIIdentifier(ctx, record)
 	}
-	failed := record.Failed
-	if !failed {
+	failed := record.Failed || record.ResponseStatus >= httpStatusBadRequest
+	if !failed && record.ResponseStatus == 0 {
 		failed = !resolveSuccess(ctx)
 	}
 	success := !failed
@@ -362,9 +370,28 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 			apiKeyName = row.Name
 		}
 	}
-	InsertLogWithDetailsIdentitySubject(statsKey, apiKeyID, record.AuthSubjectID, apiKeyName, modelName, record.Source, record.ChannelName,
+	inputContent := resolveDeferredUsageContent(record.InputContent, record.InputContentPath)
+	outputContent := resolveDeferredUsageContent(record.OutputContent, record.OutputContentPath)
+	detailContent := resolveDeferredUsageContent(record.DetailContent, record.DetailContentPath)
+	InsertLogWithDetailsIdentitySubjectUpstreamVision(statsKey, apiKeyID, record.AuthSubjectID, apiKeyName, modelName, record.UpstreamModel, record.VisionFallbackModel, record.Source, record.ChannelName,
 		record.AuthIndex, failed, timestamp, record.LatencyMs, record.FirstTokenMs, detail,
-		record.InputContent, record.OutputContent, record.DetailContent)
+		inputContent, outputContent, detailContent)
+}
+
+func resolveDeferredUsageContent(inline, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return inline
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Errorf("usage: read deferred request log content: %v", err)
+		return inline
+	}
+	if inline == "" {
+		return string(data)
+	}
+	return inline + string(data)
 }
 
 func (s *RequestStatistics) updateAPIStats(stats *apiStats, model string, detail RequestDetail) {

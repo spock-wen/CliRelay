@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -23,9 +22,10 @@ const defaultOpenRouterModelSyncIntervalMinutes = 24 * 60
 const minOpenRouterModelSyncIntervalMinutes = 60
 
 type OpenRouterRemotePricing struct {
-	Prompt         string `json:"prompt"`
-	Completion     string `json:"completion"`
-	InputCacheRead string `json:"input_cache_read"`
+	Prompt          string `json:"prompt"`
+	Completion      string `json:"completion"`
+	InputCacheRead  string `json:"input_cache_read"`
+	InputCacheWrite string `json:"input_cache_write"`
 }
 
 type OpenRouterRemoteArchitecture struct {
@@ -34,12 +34,31 @@ type OpenRouterRemoteArchitecture struct {
 	OutputModalities []string `json:"output_modalities"`
 }
 
+type OpenRouterRemoteTopProvider struct {
+	ContextLength       int  `json:"context_length"`
+	MaxCompletionTokens int  `json:"max_completion_tokens"`
+	IsModerated         bool `json:"is_moderated"`
+}
+
+type OpenRouterRemoteReasoning struct {
+	Mandatory        bool     `json:"mandatory"`
+	DefaultEnabled   bool     `json:"default_enabled"`
+	SupportedEfforts []string `json:"supported_efforts"`
+	DefaultEffort    string   `json:"default_effort"`
+	Exclude          bool     `json:"exclude"`
+}
+
 type OpenRouterRemoteModel struct {
-	ID           string                       `json:"id"`
-	Name         string                       `json:"name"`
-	Description  string                       `json:"description"`
-	Architecture OpenRouterRemoteArchitecture `json:"architecture"`
-	Pricing      OpenRouterRemotePricing      `json:"pricing"`
+	ID                  string                       `json:"id"`
+	Name                string                       `json:"name"`
+	Description         string                       `json:"description"`
+	ContextLength       int                          `json:"context_length"`
+	KnowledgeCutoff     string                       `json:"knowledge_cutoff"`
+	SupportedParameters []string                     `json:"supported_parameters"`
+	Architecture        OpenRouterRemoteArchitecture `json:"architecture"`
+	Pricing             OpenRouterRemotePricing      `json:"pricing"`
+	TopProvider         OpenRouterRemoteTopProvider  `json:"top_provider"`
+	Reasoning           *OpenRouterRemoteReasoning   `json:"reasoning"`
 }
 
 type OpenRouterModelSyncResult struct {
@@ -73,7 +92,7 @@ var (
 	openRouterModelFetcherMu sync.RWMutex
 	openRouterModelFetcher   OpenRouterModelFetcher = fetchOpenRouterModels
 
-	openRouterSyncRunning       atomic.Bool
+	openRouterSyncRunning       sync.Map
 	openRouterSyncSchedulerOnce sync.Once
 )
 
@@ -90,6 +109,11 @@ func SetOpenRouterModelFetcherForTest(fetcher OpenRouterModelFetcher) func() {
 }
 
 func SyncOpenRouterModelList(ctx context.Context, models []OpenRouterRemoteModel) (OpenRouterModelSyncResult, error) {
+	return SyncOpenRouterModelListForTenant(ctx, systemTenantID, models)
+}
+
+func SyncOpenRouterModelListForTenant(ctx context.Context, tenantID string, models []OpenRouterRemoteModel) (OpenRouterModelSyncResult, error) {
+	tenantID = normalizeTenantID(tenantID)
 	result := OpenRouterModelSyncResult{Seen: len(models)}
 	for _, model := range models {
 		if err := ctx.Err(); err != nil {
@@ -107,27 +131,33 @@ func SyncOpenRouterModelList(ctx context.Context, models []OpenRouterRemoteModel
 			result.Skipped++
 			continue
 		}
-		legacyModelIDs := openRouterLegacyLocalModelIDs(remoteModelID, owner, modelID)
-		if existing, exists := GetModelConfig(modelID); exists {
+		legacyModelIDs := openRouterLegacyLocalModelIDs(tenantID, remoteModelID, owner, modelID)
+		if existing, exists := GetModelConfigForTenant(tenantID, modelID); exists {
 			openRouterApplyModelSync(&existing, model, owner)
-			if err := UpsertModelConfig(existing); err != nil {
+			if err := UpsertModelConfigForTenant(tenantID, existing); err != nil {
 				return result, fmt.Errorf("sync openrouter model pricing %s: %w", modelID, err)
 			}
-			if err := openRouterDeleteLegacyOpenRouterRows(modelID, legacyModelIDs); err != nil {
+			if err := openRouterDeleteLegacyOpenRouterRows(tenantID, modelID, legacyModelIDs); err != nil {
 				return result, err
 			}
-			if err := openRouterSyncExistingAliasRows(modelID, model, owner, legacyModelIDs); err != nil {
+			if err := openRouterSyncExistingAliasRows(tenantID, modelID, model, owner, legacyModelIDs); err != nil {
+				return result, err
+			}
+			if err := openRouterSyncExistingWrapperRows(tenantID, modelID, model); err != nil {
 				return result, err
 			}
 			result.Updated++
 			continue
 		}
-		migrated, err := openRouterMigrateLegacyOpenRouterRow(modelID, owner, model, legacyModelIDs)
+		migrated, err := openRouterMigrateLegacyOpenRouterRow(tenantID, modelID, owner, model, legacyModelIDs)
 		if err != nil {
 			return result, err
 		}
 		if migrated {
-			if err := openRouterSyncExistingAliasRows(modelID, model, owner, legacyModelIDs); err != nil {
+			if err := openRouterSyncExistingAliasRows(tenantID, modelID, model, owner, legacyModelIDs); err != nil {
+				return result, err
+			}
+			if err := openRouterSyncExistingWrapperRows(tenantID, modelID, model); err != nil {
 				return result, err
 			}
 			result.Updated++
@@ -135,45 +165,51 @@ func SyncOpenRouterModelList(ctx context.Context, models []OpenRouterRemoteModel
 		}
 
 		row := ModelConfigRow{
-			ModelID:               modelID,
-			OwnedBy:               owner,
-			Description:           openRouterModelDescription(model),
-			Enabled:               true,
-			PricingMode:           "token",
-			InputPricePerMillion:  openRouterPricePerMillion(model.Pricing.Prompt),
-			OutputPricePerMillion: openRouterPricePerMillion(model.Pricing.Completion),
-			CachedPricePerMillion: openRouterPricePerMillion(model.Pricing.InputCacheRead),
-			Source:                openRouterModelSource,
+			ModelID:     modelID,
+			OwnedBy:     owner,
+			Description: openRouterModelDescription(model),
+			Enabled:     true,
+			Source:      openRouterModelSource,
 		}
-		row.InputModalities, row.OutputModalities = openRouterModelModalities(model)
-		if err := UpsertModelConfig(row); err != nil {
+		// Populate pricing, modalities, and OpenRouter metadata through the shared update path.
+		openRouterApplyModelSyncValues(&row, model)
+		if err := UpsertModelConfigForTenant(tenantID, row); err != nil {
 			return result, fmt.Errorf("sync openrouter model %s: %w", modelID, err)
 		}
-		if err := openRouterSyncExistingAliasRows(modelID, model, owner, legacyModelIDs); err != nil {
+		if err := openRouterSyncExistingAliasRows(tenantID, modelID, model, owner, legacyModelIDs); err != nil {
+			return result, err
+		}
+		if err := openRouterSyncExistingWrapperRows(tenantID, modelID, model); err != nil {
 			return result, err
 		}
 		result.Added++
 	}
-	if err := openRouterMergeVariantGroups(models); err != nil {
+	if err := openRouterMergeVariantGroups(tenantID, models); err != nil {
 		return result, err
 	}
 	return result, nil
 }
 
 func GetOpenRouterModelSyncState() OpenRouterModelSyncState {
+	return GetOpenRouterModelSyncStateForTenant(systemTenantID)
+}
+
+func GetOpenRouterModelSyncStateForTenant(tenantID string) OpenRouterModelSyncState {
+	tenantID = normalizeTenantID(tenantID)
 	db := getDB()
 	state := OpenRouterModelSyncState{
 		IntervalMinutes: defaultOpenRouterModelSyncIntervalMinutes,
-		Running:         openRouterSyncRunning.Load(),
+		Running:         openRouterModelSyncRunning(tenantID),
 	}
 	if db == nil {
 		return state
 	}
-	ensureOpenRouterModelSyncStateRow()
+	ensureOpenRouterModelSyncStateRowForTenant(tenantID)
 	var enabled int
 	if err := db.QueryRow(
 		`SELECT enabled, interval_minutes, last_sync_at, last_success_at, last_error, last_seen, last_added, last_updated, last_skipped, updated_at
-		 FROM model_openrouter_sync_state WHERE id = 1`,
+		 FROM model_openrouter_sync_state WHERE tenant_id = ? AND id = 1`,
+		tenantID,
 	).Scan(
 		&enabled,
 		&state.IntervalMinutes,
@@ -190,39 +226,50 @@ func GetOpenRouterModelSyncState() OpenRouterModelSyncState {
 	}
 	state.Enabled = intToBool(enabled)
 	state.IntervalMinutes = normalizeOpenRouterModelSyncInterval(state.IntervalMinutes)
-	state.Running = openRouterSyncRunning.Load()
+	state.Running = openRouterModelSyncRunning(tenantID)
 	return state
 }
 
 func UpdateOpenRouterModelSyncSettings(enabled bool, intervalMinutes int) (OpenRouterModelSyncState, error) {
+	return UpdateOpenRouterModelSyncSettingsForTenant(systemTenantID, enabled, intervalMinutes)
+}
+
+func UpdateOpenRouterModelSyncSettingsForTenant(tenantID string, enabled bool, intervalMinutes int) (OpenRouterModelSyncState, error) {
+	tenantID = normalizeTenantID(tenantID)
 	db := getDB()
 	if db == nil {
 		return OpenRouterModelSyncState{}, fmt.Errorf("usage: database not initialised")
 	}
-	ensureOpenRouterModelSyncStateRow()
+	ensureOpenRouterModelSyncStateRowForTenant(tenantID)
 	_, err := db.Exec(
 		`UPDATE model_openrouter_sync_state
 		 SET enabled = ?, interval_minutes = ?, updated_at = ?
-		 WHERE id = 1`,
+		 WHERE tenant_id = ? AND id = 1`,
 		boolToInt(enabled),
 		normalizeOpenRouterModelSyncInterval(intervalMinutes),
 		nowRFC3339(),
+		tenantID,
 	)
 	if err != nil {
 		return OpenRouterModelSyncState{}, fmt.Errorf("usage: update openrouter sync settings: %w", err)
 	}
-	return GetOpenRouterModelSyncState(), nil
+	return GetOpenRouterModelSyncStateForTenant(tenantID), nil
 }
 
 func RunOpenRouterModelSync(ctx context.Context) (OpenRouterModelSyncResult, OpenRouterModelSyncState, error) {
+	return RunOpenRouterModelSyncForTenant(ctx, systemTenantID)
+}
+
+func RunOpenRouterModelSyncForTenant(ctx context.Context, tenantID string) (OpenRouterModelSyncResult, OpenRouterModelSyncState, error) {
+	tenantID = normalizeTenantID(tenantID)
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if !openRouterSyncRunning.CompareAndSwap(false, true) {
-		state := GetOpenRouterModelSyncState()
+	if _, loaded := openRouterSyncRunning.LoadOrStore(tenantID, struct{}{}); loaded {
+		state := GetOpenRouterModelSyncStateForTenant(tenantID)
 		return OpenRouterModelSyncResult{}, state, fmt.Errorf("usage: openrouter model sync already running")
 	}
-	defer openRouterSyncRunning.Store(false)
+	defer openRouterSyncRunning.Delete(tenantID)
 
 	openRouterModelFetcherMu.RLock()
 	fetcher := openRouterModelFetcher
@@ -233,11 +280,11 @@ func RunOpenRouterModelSync(ctx context.Context) (OpenRouterModelSyncResult, Ope
 
 	models, err := fetcher(ctx)
 	if err != nil {
-		state := recordOpenRouterModelSyncResult(OpenRouterModelSyncResult{}, err)
+		state := recordOpenRouterModelSyncResultForTenant(tenantID, OpenRouterModelSyncResult{}, err)
 		return OpenRouterModelSyncResult{}, state, err
 	}
-	result, err := SyncOpenRouterModelList(ctx, models)
-	state := recordOpenRouterModelSyncResult(result, err)
+	result, err := SyncOpenRouterModelListForTenant(ctx, tenantID, models)
+	state := recordOpenRouterModelSyncResultForTenant(tenantID, result, err)
 	return result, state, err
 }
 
@@ -255,14 +302,17 @@ func runOpenRouterModelSyncScheduler(ctx context.Context) {
 	defer ticker.Stop()
 
 	runIfDue := func() {
-		state := GetOpenRouterModelSyncState()
-		if !state.Enabled || !isOpenRouterModelSyncDue(state, time.Now().UTC()) {
-			return
-		}
-		syncCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		defer cancel()
-		if _, _, err := RunOpenRouterModelSync(syncCtx); err != nil {
-			log.Warnf("usage: scheduled openrouter model sync failed: %v", err)
+		for _, tenantID := range enabledOpenRouterSyncTenantIDs() {
+			state := GetOpenRouterModelSyncStateForTenant(tenantID)
+			if !isOpenRouterModelSyncDue(state, time.Now().UTC()) {
+				continue
+			}
+			syncCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			_, _, err := RunOpenRouterModelSyncForTenant(syncCtx, tenantID)
+			cancel()
+			if err != nil {
+				log.Warnf("usage: scheduled openrouter model sync failed for tenant %s: %v", tenantID, err)
+			}
 		}
 	}
 
@@ -275,6 +325,33 @@ func runOpenRouterModelSyncScheduler(ctx context.Context) {
 			runIfDue()
 		}
 	}
+}
+
+func openRouterModelSyncRunning(tenantID string) bool {
+	_, running := openRouterSyncRunning.Load(normalizeTenantID(tenantID))
+	return running
+}
+
+func enabledOpenRouterSyncTenantIDs() []string {
+	db := getDB()
+	if db == nil {
+		return nil
+	}
+	ensureOpenRouterModelSyncStateRowForTenant(systemTenantID)
+	rows, err := db.Query(`SELECT tenant_id FROM model_openrouter_sync_state WHERE enabled = 1 ORDER BY tenant_id`)
+	if err != nil {
+		log.Warnf("usage: list enabled openrouter model sync tenants: %v", err)
+		return nil
+	}
+	defer rows.Close()
+	var tenantIDs []string
+	for rows.Next() {
+		var tenantID string
+		if rows.Scan(&tenantID) == nil {
+			tenantIDs = append(tenantIDs, normalizeTenantID(tenantID))
+		}
+	}
+	return tenantIDs
 }
 
 func fetchOpenRouterModels(ctx context.Context) ([]OpenRouterRemoteModel, error) {
@@ -305,7 +382,7 @@ func fetchOpenRouterModels(ctx context.Context) ([]OpenRouterRemoteModel, error)
 	return payload.Data, nil
 }
 
-func ensureOpenRouterModelSyncStateRow() {
+func ensureOpenRouterModelSyncStateRowForTenant(tenantID string) {
 	db := getDB()
 	if db == nil {
 		return
@@ -313,8 +390,9 @@ func ensureOpenRouterModelSyncStateRow() {
 	ensureOpenRouterModelSyncStateSchema(db)
 	_, _ = db.Exec(
 		`INSERT OR IGNORE INTO model_openrouter_sync_state
-		 (id, enabled, interval_minutes, last_sync_at, last_success_at, last_error, last_seen, last_added, last_updated, last_skipped, updated_at)
-		 VALUES (1, 0, ?, '', '', '', 0, 0, 0, 0, ?)`,
+		 (tenant_id, id, enabled, interval_minutes, last_sync_at, last_success_at, last_error, last_seen, last_added, last_updated, last_skipped, updated_at)
+		 VALUES (?, 1, 0, ?, '', '', '', 0, 0, 0, 0, ?)`,
+		tenantID,
 		defaultOpenRouterModelSyncIntervalMinutes,
 		nowRFC3339(),
 	)
@@ -353,14 +431,15 @@ func sqliteColumnExists(db *sql.DB, tableName, columnName string) bool {
 	return false
 }
 
-func recordOpenRouterModelSyncResult(result OpenRouterModelSyncResult, syncErr error) OpenRouterModelSyncState {
+func recordOpenRouterModelSyncResultForTenant(tenantID string, result OpenRouterModelSyncResult, syncErr error) OpenRouterModelSyncState {
+	tenantID = normalizeTenantID(tenantID)
 	db := getDB()
 	if db == nil {
-		return GetOpenRouterModelSyncState()
+		return GetOpenRouterModelSyncStateForTenant(tenantID)
 	}
-	ensureOpenRouterModelSyncStateRow()
+	ensureOpenRouterModelSyncStateRowForTenant(tenantID)
 	now := nowRFC3339()
-	state := GetOpenRouterModelSyncState()
+	state := GetOpenRouterModelSyncStateForTenant(tenantID)
 	lastSuccessAt := state.LastSuccessAt
 	lastError := ""
 	if syncErr != nil {
@@ -371,7 +450,7 @@ func recordOpenRouterModelSyncResult(result OpenRouterModelSyncResult, syncErr e
 	_, _ = db.Exec(
 		`UPDATE model_openrouter_sync_state
 		 SET last_sync_at = ?, last_success_at = ?, last_error = ?, last_seen = ?, last_added = ?, last_updated = ?, last_skipped = ?, updated_at = ?
-		 WHERE id = 1`,
+		 WHERE tenant_id = ? AND id = 1`,
 		now,
 		lastSuccessAt,
 		lastError,
@@ -380,8 +459,9 @@ func recordOpenRouterModelSyncResult(result OpenRouterModelSyncResult, syncErr e
 		result.Updated,
 		result.Skipped,
 		now,
+		tenantID,
 	)
-	return GetOpenRouterModelSyncState()
+	return GetOpenRouterModelSyncStateForTenant(tenantID)
 }
 
 func normalizeOpenRouterModelSyncInterval(minutes int) int {
@@ -415,10 +495,28 @@ func openRouterApplyModelSync(row *ModelConfigRow, model OpenRouterRemoteModel, 
 	if description := openRouterModelDescription(model); description != "" && openRouterShouldSyncDescription(*row) {
 		row.Description = description
 	}
+	openRouterApplyModelSyncValues(row, model)
+}
+
+func openRouterApplyModelSyncValues(row *ModelConfigRow, model OpenRouterRemoteModel) {
+	if row == nil {
+		return
+	}
+	if openRouterApplyImageGenerationSemantics(row, model) {
+		openRouterApplyModelMetadata(row, model)
+		return
+	}
 	row.PricingMode = "token"
 	row.InputPricePerMillion = openRouterPricePerMillion(model.Pricing.Prompt)
 	row.OutputPricePerMillion = openRouterPricePerMillion(model.Pricing.Completion)
 	row.CachedPricePerMillion = openRouterPricePerMillion(model.Pricing.InputCacheRead)
+	if cacheWrite := openRouterPricePerMillion(model.Pricing.InputCacheWrite); cacheWrite > 0 {
+		row.CacheWritePricePerMillion = cacheWrite
+	}
+	// Keep cache-read aligned with OpenRouter when available.
+	if cacheRead := openRouterPricePerMillion(model.Pricing.InputCacheRead); cacheRead > 0 {
+		row.CacheReadPricePerMillion = cacheRead
+	}
 	row.PricePerCall = 0
 	inputModalities, outputModalities := openRouterModelModalities(model)
 	if len(inputModalities) > 0 {
@@ -427,6 +525,155 @@ func openRouterApplyModelSync(row *ModelConfigRow, model OpenRouterRemoteModel, 
 	if len(outputModalities) > 0 {
 		row.OutputModalities = outputModalities
 	}
+	openRouterApplyModelMetadata(row, model)
+}
+
+func openRouterApplyModelMetadata(row *ModelConfigRow, model OpenRouterRemoteModel) {
+	if row == nil {
+		return
+	}
+	if displayName := openRouterModelDisplayName(model); displayName != "" && openRouterShouldSyncDisplayName(*row) {
+		row.DisplayName = displayName
+	}
+	if contextLength := openRouterModelContextLength(model); contextLength > 0 {
+		row.ContextLength = contextLength
+	}
+	if maxCompletion := openRouterModelMaxCompletionTokens(model); maxCompletion > 0 {
+		row.MaxCompletionTokens = maxCompletion
+	}
+	if params := openRouterModelSupportedParameters(model); len(params) > 0 {
+		row.SupportedParameters = params
+	}
+	if reasoning := openRouterModelReasoningJSON(model); reasoning != "" {
+		row.Reasoning = reasoning
+	}
+	if cutoff := strings.TrimSpace(model.KnowledgeCutoff); cutoff != "" {
+		row.KnowledgeCutoff = cutoff
+	}
+}
+
+func openRouterShouldSyncDisplayName(row ModelConfigRow) bool {
+	if strings.TrimSpace(row.DisplayName) == "" {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(row.Source)) {
+	case openRouterModelSource, "seed":
+		return true
+	default:
+		return false
+	}
+}
+
+func openRouterModelDisplayName(model OpenRouterRemoteModel) string {
+	name := strings.TrimSpace(model.Name)
+	if name == "" {
+		return ""
+	}
+	// OpenRouter names often look like "OpenAI: GPT-5". Prefer the model label.
+	if _, right, found := strings.Cut(name, ":"); found {
+		if trimmed := strings.TrimSpace(right); trimmed != "" {
+			return trimmed
+		}
+	}
+	return name
+}
+
+func openRouterModelContextLength(model OpenRouterRemoteModel) int {
+	if model.ContextLength > 0 {
+		return model.ContextLength
+	}
+	if model.TopProvider.ContextLength > 0 {
+		return model.TopProvider.ContextLength
+	}
+	return 0
+}
+
+func openRouterModelMaxCompletionTokens(model OpenRouterRemoteModel) int {
+	if model.TopProvider.MaxCompletionTokens > 0 {
+		return model.TopProvider.MaxCompletionTokens
+	}
+	return 0
+}
+
+func openRouterModelSupportedParameters(model OpenRouterRemoteModel) []string {
+	return normalizeModelModalities(model.SupportedParameters)
+}
+
+func openRouterModelReasoningJSON(model OpenRouterRemoteModel) string {
+	if model.Reasoning == nil {
+		return ""
+	}
+	payload := map[string]any{
+		"mandatory":         model.Reasoning.Mandatory,
+		"default_enabled":   model.Reasoning.DefaultEnabled,
+		"supported_efforts": normalizeModelModalities(model.Reasoning.SupportedEfforts),
+		"default_effort":    strings.TrimSpace(model.Reasoning.DefaultEffort),
+		"exclude":           model.Reasoning.Exclude,
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+func openRouterApplyImageGenerationSemantics(row *ModelConfigRow, model OpenRouterRemoteModel) bool {
+	if row == nil || !openRouterIsImageGenerationRow(*row) {
+		return false
+	}
+	row.PricingMode = "call"
+	row.InputPricePerMillion = 0
+	row.OutputPricePerMillion = 0
+	row.CachedPricePerMillion = 0
+	if row.PricePerCall <= 0 {
+		row.PricePerCall = openRouterDefaultImageGenerationPricePerCall(row.ModelID)
+	}
+
+	inputModalities, outputModalities := openRouterModelModalities(model)
+	row.InputModalities = unionModalities(row.InputModalities, inputModalities)
+	row.OutputModalities = unionModalities(
+		imageOutputModalities(row.OutputModalities),
+		imageOutputModalities(outputModalities),
+	)
+	if len(row.InputModalities) == 0 {
+		row.InputModalities = []string{"text"}
+	}
+	row.OutputModalities = unionModalities(row.OutputModalities, []string{"image"})
+	return true
+}
+
+func openRouterIsImageGenerationRow(row ModelConfigRow) bool {
+	modelID := strings.ToLower(strings.TrimSpace(row.ModelID))
+	if strings.HasPrefix(modelID, "gpt-image-") {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(row.PricingMode), "call") {
+		return true
+	}
+	for _, modality := range row.OutputModalities {
+		if strings.EqualFold(strings.TrimSpace(modality), "image") {
+			return true
+		}
+	}
+	return false
+}
+
+func openRouterDefaultImageGenerationPricePerCall(modelID string) float64 {
+	switch strings.ToLower(strings.TrimSpace(modelID)) {
+	case "gpt-image-2":
+		return 0.04
+	default:
+		return 0
+	}
+}
+
+func imageOutputModalities(modalities []string) []string {
+	for _, modality := range modalities {
+		if strings.EqualFold(strings.TrimSpace(modality), "image") {
+			return []string{"image"}
+		}
+	}
+	return nil
 }
 
 func openRouterShouldSyncDescription(row ModelConfigRow) bool {
@@ -441,21 +688,21 @@ func openRouterShouldSyncDescription(row ModelConfigRow) bool {
 	}
 }
 
-func openRouterMigrateLegacyOpenRouterRow(modelID, owner string, model OpenRouterRemoteModel, legacyModelIDs []string) (bool, error) {
+func openRouterMigrateLegacyOpenRouterRow(tenantID, modelID, owner string, model OpenRouterRemoteModel, legacyModelIDs []string) (bool, error) {
 	for _, legacyModelID := range legacyModelIDs {
 		if openRouterIsDateSuffixAlias(legacyModelID, modelID) {
 			continue
 		}
-		existing, exists := GetModelConfig(legacyModelID)
+		existing, exists := GetModelConfigForTenant(tenantID, legacyModelID)
 		if !exists || existing.Source != openRouterModelSource {
 			continue
 		}
 		existing.ModelID = modelID
 		openRouterApplyModelSync(&existing, model, owner)
-		if err := UpsertModelConfig(existing); err != nil {
+		if err := UpsertModelConfigForTenant(tenantID, existing); err != nil {
 			return false, fmt.Errorf("migrate openrouter model %s to %s: %w", legacyModelID, modelID, err)
 		}
-		if err := openRouterDeleteLegacyOpenRouterRows(modelID, legacyModelIDs); err != nil {
+		if err := openRouterDeleteLegacyOpenRouterRows(tenantID, modelID, legacyModelIDs); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -463,25 +710,25 @@ func openRouterMigrateLegacyOpenRouterRow(modelID, owner string, model OpenRoute
 	return false, nil
 }
 
-func openRouterDeleteLegacyOpenRouterRows(baseModelID string, modelIDs []string) error {
+func openRouterDeleteLegacyOpenRouterRows(tenantID, baseModelID string, modelIDs []string) error {
 	for _, modelID := range modelIDs {
 		if openRouterIsDateSuffixAlias(modelID, baseModelID) {
 			continue
 		}
-		existing, exists := GetModelConfig(modelID)
+		existing, exists := GetModelConfigForTenant(tenantID, modelID)
 		if !exists || existing.Source != openRouterModelSource {
 			continue
 		}
-		if err := DeleteModelConfig(modelID); err != nil {
+		if err := DeleteModelConfigForTenant(tenantID, modelID); err != nil {
 			return fmt.Errorf("delete old openrouter model %s: %w", modelID, err)
 		}
 	}
 	return nil
 }
 
-func openRouterSyncExistingAliasRows(baseModelID string, model OpenRouterRemoteModel, owner string, modelIDs []string) error {
+func openRouterSyncExistingAliasRows(tenantID, baseModelID string, model OpenRouterRemoteModel, owner string, modelIDs []string) error {
 	for _, modelID := range modelIDs {
-		existing, exists := GetModelConfig(modelID)
+		existing, exists := GetModelConfigForTenant(tenantID, modelID)
 		if !exists {
 			continue
 		}
@@ -489,11 +736,37 @@ func openRouterSyncExistingAliasRows(baseModelID string, model OpenRouterRemoteM
 			continue
 		}
 		openRouterApplyModelSync(&existing, model, owner)
-		if err := UpsertModelConfig(existing); err != nil {
+		if err := UpsertModelConfigForTenant(tenantID, existing); err != nil {
 			return fmt.Errorf("sync openrouter model alias %s: %w", modelID, err)
 		}
 	}
 	return nil
+}
+
+func openRouterSyncExistingWrapperRows(tenantID, baseModelID string, model OpenRouterRemoteModel) error {
+	for _, wrapperID := range openRouterWrapperModelIDs(baseModelID) {
+		existing, exists := GetModelConfigForTenant(tenantID, wrapperID)
+		if !exists {
+			continue
+		}
+		existing.OwnedBy = "cline"
+		if description := openRouterModelDescription(model); description != "" && openRouterShouldSyncDescription(existing) {
+			existing.Description = description
+		}
+		openRouterApplyModelSyncValues(&existing, model)
+		if err := UpsertModelConfigForTenant(tenantID, existing); err != nil {
+			return fmt.Errorf("sync openrouter model wrapper %s: %w", wrapperID, err)
+		}
+	}
+	return nil
+}
+
+func openRouterWrapperModelIDs(baseModelID string) []string {
+	baseModelID = strings.TrimSpace(baseModelID)
+	if baseModelID == "" || strings.Contains(baseModelID, "/") {
+		return nil
+	}
+	return []string{"cline-pass/" + baseModelID}
 }
 
 func openRouterStaticBaseModelRow(modelID string) (ModelConfigRow, bool) {
@@ -514,12 +787,16 @@ func openRouterStaticBaseModelRow(modelID string) (ModelConfigRow, bool) {
 		description = strings.TrimSpace(info.DisplayName)
 	}
 	return ModelConfigRow{
-		ModelID:     modelID,
-		OwnedBy:     ownedBy,
-		Description: description,
-		Enabled:     true,
-		PricingMode: "token",
-		Source:      "seed",
+		ModelID:             modelID,
+		OwnedBy:             ownedBy,
+		DisplayName:         strings.TrimSpace(info.DisplayName),
+		Description:         description,
+		Enabled:             true,
+		ContextLength:       info.ContextLength,
+		MaxCompletionTokens: info.MaxCompletionTokens,
+		SupportedParameters: append([]string(nil), info.SupportedParameters...),
+		PricingMode:         "token",
+		Source:              "seed",
 	}, true
 }
 
@@ -532,7 +809,7 @@ func openRouterStaticBaseModelRow(modelID string) (ModelConfigRow, bool) {
 //   - When an exact base match AND dated variants exist in the same sync batch,
 //     the base model ends up with the highest prices from any member of the group,
 //     rather than being overwritten by the last-processed variant.
-func openRouterMergeVariantGroups(models []OpenRouterRemoteModel) error {
+func openRouterMergeVariantGroups(tenantID string, models []OpenRouterRemoteModel) error {
 	type groupEntry struct {
 		providerlessID string
 		model          OpenRouterRemoteModel
@@ -553,7 +830,7 @@ func openRouterMergeVariantGroups(models []OpenRouterRemoteModel) error {
 	}
 
 	for baseID, entries := range groups {
-		baseModel, exists := GetModelConfig(baseID)
+		baseModel, exists := GetModelConfigForTenant(tenantID, baseID)
 		if !exists {
 			var ok bool
 			baseModel, ok = openRouterStaticBaseModelRow(baseID)
@@ -561,15 +838,24 @@ func openRouterMergeVariantGroups(models []OpenRouterRemoteModel) error {
 				continue
 			}
 		}
-		// Aggregate: highest prices, best description, most complete modalities.
+		imageGenerationBase := openRouterIsImageGenerationRow(baseModel)
+		// Aggregate: highest prices, best description, most complete modalities/metadata.
 		bestInputPrice := baseModel.InputPricePerMillion
 		bestOutputPrice := baseModel.OutputPricePerMillion
 		bestCachedPrice := baseModel.CachedPricePerMillion
+		bestCacheWritePrice := baseModel.CacheWritePricePerMillion
+		bestCacheReadPrice := baseModel.CacheReadPricePerMillion
 		bestModalities := struct {
 			input  []string
 			output []string
 		}{baseModel.InputModalities, baseModel.OutputModalities}
 		bestDesc := ""
+		bestDisplayName := ""
+		bestContextLength := baseModel.ContextLength
+		bestMaxCompletion := baseModel.MaxCompletionTokens
+		bestParams := append([]string(nil), baseModel.SupportedParameters...)
+		bestReasoning := baseModel.Reasoning
+		bestKnowledgeCutoff := baseModel.KnowledgeCutoff
 
 		for _, e := range entries {
 			price := openRouterPricePerMillion(e.model.Pricing.Prompt)
@@ -584,24 +870,55 @@ func openRouterMergeVariantGroups(models []OpenRouterRemoteModel) error {
 			if price > bestCachedPrice {
 				bestCachedPrice = price
 			}
+			if price > bestCacheReadPrice {
+				bestCacheReadPrice = price
+			}
+			price = openRouterPricePerMillion(e.model.Pricing.InputCacheWrite)
+			if price > bestCacheWritePrice {
+				bestCacheWritePrice = price
+			}
 			if desc := openRouterModelDescription(e.model); desc != "" && (bestDesc == "" || len(desc) > len(bestDesc)) {
 				bestDesc = desc
 			}
+			if displayName := openRouterModelDisplayName(e.model); displayName != "" && (bestDisplayName == "" || len(displayName) > len(bestDisplayName)) {
+				bestDisplayName = displayName
+			}
+			if contextLength := openRouterModelContextLength(e.model); contextLength > bestContextLength {
+				bestContextLength = contextLength
+			}
+			if maxCompletion := openRouterModelMaxCompletionTokens(e.model); maxCompletion > bestMaxCompletion {
+				bestMaxCompletion = maxCompletion
+			}
+			bestParams = unionModalities(bestParams, openRouterModelSupportedParameters(e.model))
+			if reasoning := openRouterModelReasoningJSON(e.model); reasoning != "" && (bestReasoning == "" || len(reasoning) > len(bestReasoning)) {
+				bestReasoning = reasoning
+			}
+			if cutoff := strings.TrimSpace(e.model.KnowledgeCutoff); cutoff != "" {
+				bestKnowledgeCutoff = cutoff
+			}
 			inMod, outMod := openRouterModelModalities(e.model)
 			bestModalities.input = unionModalities(bestModalities.input, inMod)
-			bestModalities.output = unionModalities(bestModalities.output, outMod)
+			if imageGenerationBase {
+				bestModalities.output = unionModalities(bestModalities.output, imageOutputModalities(outMod))
+			} else {
+				bestModalities.output = unionModalities(bestModalities.output, outMod)
+			}
 		}
 
 		// Apply the merged data back to the base model.
 		updated := false
 
-		if bestInputPrice != baseModel.InputPricePerMillion ||
+		if !imageGenerationBase && (bestInputPrice != baseModel.InputPricePerMillion ||
 			bestOutputPrice != baseModel.OutputPricePerMillion ||
-			bestCachedPrice != baseModel.CachedPricePerMillion {
+			bestCachedPrice != baseModel.CachedPricePerMillion ||
+			bestCacheReadPrice != baseModel.CacheReadPricePerMillion ||
+			bestCacheWritePrice != baseModel.CacheWritePricePerMillion) {
 			baseModel.PricingMode = "token"
 			baseModel.InputPricePerMillion = bestInputPrice
 			baseModel.OutputPricePerMillion = bestOutputPrice
 			baseModel.CachedPricePerMillion = bestCachedPrice
+			baseModel.CacheReadPricePerMillion = bestCacheReadPrice
+			baseModel.CacheWritePricePerMillion = bestCacheWritePrice
 			updated = true
 		}
 
@@ -616,9 +933,33 @@ func openRouterMergeVariantGroups(models []OpenRouterRemoteModel) error {
 			baseModel.Description = bestDesc
 			updated = true
 		}
+		if bestDisplayName != "" && openRouterShouldSyncDisplayName(baseModel) {
+			baseModel.DisplayName = bestDisplayName
+			updated = true
+		}
+		if bestContextLength > baseModel.ContextLength {
+			baseModel.ContextLength = bestContextLength
+			updated = true
+		}
+		if bestMaxCompletion > baseModel.MaxCompletionTokens {
+			baseModel.MaxCompletionTokens = bestMaxCompletion
+			updated = true
+		}
+		if len(bestParams) > len(baseModel.SupportedParameters) {
+			baseModel.SupportedParameters = bestParams
+			updated = true
+		}
+		if bestReasoning != "" && (baseModel.Reasoning == "" || len(bestReasoning) > len(baseModel.Reasoning)) {
+			baseModel.Reasoning = bestReasoning
+			updated = true
+		}
+		if bestKnowledgeCutoff != "" && bestKnowledgeCutoff != baseModel.KnowledgeCutoff {
+			baseModel.KnowledgeCutoff = bestKnowledgeCutoff
+			updated = true
+		}
 
 		if updated {
-			if err := UpsertModelConfig(baseModel); err != nil {
+			if err := UpsertModelConfigForTenant(tenantID, baseModel); err != nil {
 				return fmt.Errorf("merge variant group for %s: %w", baseID, err)
 			}
 		}

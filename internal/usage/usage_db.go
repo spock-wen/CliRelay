@@ -5,40 +5,49 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	postgresstore "github.com/router-for-me/CLIProxyAPI/v6/internal/storage/postgres"
 	log "github.com/sirupsen/logrus"
 	_ "modernc.org/sqlite"
 )
 
 // LogRow represents a single request log entry returned by QueryLogs.
 type LogRow struct {
-	ID              int64     `json:"id"`
-	Timestamp       time.Time `json:"timestamp"`
-	APIKey          string    `json:"api_key"`
-	APIKeyName      string    `json:"api_key_name"`
-	Model           string    `json:"model"`
-	Source          string    `json:"source"`
-	ChannelName     string    `json:"channel_name"`
-	AuthIndex       string    `json:"auth_index"`
-	Failed          bool      `json:"failed"`
-	Streaming       bool      `json:"streaming"`
-	LatencyMs       int64     `json:"latency_ms"`
-	FirstTokenMs    int64     `json:"first_token_ms"`
-	InputTokens     int64     `json:"input_tokens"`
-	OutputTokens    int64     `json:"output_tokens"`
-	ReasoningTokens int64     `json:"reasoning_tokens"`
-	CachedTokens    int64     `json:"cached_tokens"`
-	TotalTokens     int64     `json:"total_tokens"`
-	Cost            float64   `json:"cost"`
-	HasContent      bool      `json:"has_content"`
+	ID                  int64     `json:"id"`
+	Timestamp           time.Time `json:"timestamp"`
+	APIKey              string    `json:"api_key"`
+	APIKeyName          string    `json:"api_key_name"`
+	Model               string    `json:"model"`
+	UpstreamModel       string    `json:"upstream_model,omitempty"`
+	VisionFallbackModel string    `json:"vision_fallback_model,omitempty"`
+	Source              string    `json:"source"`
+	ChannelName         string    `json:"channel_name"`
+	Provider            string    `json:"provider,omitempty"`
+	AuthType            string    `json:"auth_type,omitempty"` // "oauth" | "api"
+	AuthIndex           string    `json:"auth_index"`
+	Failed              bool      `json:"failed"`
+	Streaming           bool      `json:"streaming"`
+	LatencyMs           int64     `json:"latency_ms"`
+	FirstTokenMs        int64     `json:"first_token_ms"`
+	InputTokens         int64     `json:"input_tokens"`
+	OutputTokens        int64     `json:"output_tokens"`
+	ReasoningTokens     int64     `json:"reasoning_tokens"`
+	CachedTokens        int64     `json:"cached_tokens"`
+	TotalTokens         int64     `json:"total_tokens"`
+	Cost                float64   `json:"cost"`
+	HasContent          bool      `json:"has_content"`
 }
 
 // LogQueryParams holds filter/pagination parameters for QueryLogs.
 type LogQueryParams struct {
+	TenantID        string
 	Page            int      // 1-based
 	Size            int      // rows per page
 	Days            int      // time range in days
@@ -72,16 +81,31 @@ type FilterOptions struct {
 	APIKeys     []string          `json:"api_keys"`
 	APIKeyNames map[string]string `json:"api_key_names"`
 	Models      []string          `json:"models"`
-	Channels    []string          `json:"channels"`
+	// Channels is a legacy plain-name list kept for older clients.
+	// Prefer ChannelOptions when both are present.
+	Channels       []string              `json:"channels"`
+	ChannelOptions []ChannelFilterOption `json:"channel_options,omitempty"`
+	Statuses       []string              `json:"statuses"`
+}
+
+// ChannelFilterOption is one selectable channel in request-log filters.
+// Value is stable for filtering (auth_index when known, otherwise the display name).
+type ChannelFilterOption struct {
+	Value     string `json:"value"`
+	Label     string `json:"label"`
+	Provider  string `json:"provider,omitempty"`
+	AuthType  string `json:"auth_type,omitempty"` // "oauth" | "api"
+	AuthIndex string `json:"auth_index,omitempty"`
 }
 
 // LogStats holds aggregated stats over the filtered result set.
 type LogStats struct {
-	Total       int64   `json:"total"`
-	SuccessRate float64 `json:"success_rate"`
-	TotalTokens int64   `json:"total_tokens"`
-	TotalCost   float64 `json:"total_cost"`
-	CacheRate   float64 `json:"cache_rate"`
+	Total         int64   `json:"total"`
+	SuccessRate   float64 `json:"success_rate"`
+	TotalTokens   int64   `json:"total_tokens"`
+	TotalSessions int64   `json:"total_sessions"`
+	TotalCost     float64 `json:"total_cost"`
+	CacheRate     float64 `json:"cache_rate"`
 }
 
 const cacheRateEffectiveInputSQL = "CASE WHEN cached_tokens > input_tokens THEN input_tokens + cached_tokens ELSE input_tokens END"
@@ -102,9 +126,10 @@ type ClearRequestLogsResult struct {
 }
 
 type ClearRequestLogsOptions struct {
-	ClearBodyContent    bool `json:"clear_body_content"`
-	ClearDetailContent  bool `json:"clear_detail_content"`
-	ClearRequestRecords bool `json:"clear_request_records"`
+	TenantID            string `json:"-"`
+	ClearBodyContent    bool   `json:"clear_body_content"`
+	ClearDetailContent  bool   `json:"clear_detail_content"`
+	ClearRequestRecords bool   `json:"clear_request_records"`
 }
 
 const systemRequestLogFilterValue = "__system__"
@@ -114,17 +139,27 @@ var (
 	usageReadDB *sql.DB
 	usageDBMu   sync.Mutex
 	usageDBPath string
+	usageDriver string
 	usageLoc    *time.Location
 )
 
+// DatabaseStats summarizes the active runtime database for management telemetry.
+type DatabaseStats struct {
+	Driver    string
+	SizeBytes int64
+}
+
 const createTableSQL = `
 CREATE TABLE IF NOT EXISTS request_logs (
+  tenant_id        TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   timestamp        DATETIME NOT NULL,
   api_key          TEXT NOT NULL DEFAULT '',
   api_key_id       TEXT NOT NULL DEFAULT '',
   auth_subject_id  TEXT NOT NULL DEFAULT '',
   model            TEXT NOT NULL DEFAULT '',
+  upstream_model   TEXT NOT NULL DEFAULT '',
+  vision_fallback_model TEXT NOT NULL DEFAULT '',
   source           TEXT NOT NULL DEFAULT '',
   channel_name     TEXT NOT NULL DEFAULT '',
   auth_index       TEXT NOT NULL DEFAULT '',
@@ -142,23 +177,27 @@ CREATE TABLE IF NOT EXISTS request_logs (
 );
 
 CREATE TABLE IF NOT EXISTS request_log_content (
+  tenant_id        TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
   log_id           INTEGER PRIMARY KEY,
   timestamp        DATETIME NOT NULL,
   compression      TEXT NOT NULL DEFAULT 'zstd',
   input_content    BLOB NOT NULL DEFAULT X'',
   output_content   BLOB NOT NULL DEFAULT X'',
   detail_content   BLOB NOT NULL DEFAULT X'',
+  session_id       TEXT NOT NULL DEFAULT '',
   FOREIGN KEY(log_id) REFERENCES request_logs(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON request_logs(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_logs_api_key ON request_logs(api_key);
+CREATE INDEX IF NOT EXISTS idx_logs_api_key_timestamp ON request_logs(api_key, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_logs_model ON request_logs(model);
 CREATE INDEX IF NOT EXISTS idx_logs_failed ON request_logs(failed);
 CREATE INDEX IF NOT EXISTS idx_logs_auth_index ON request_logs(auth_index);
 CREATE INDEX IF NOT EXISTS idx_log_content_timestamp ON request_log_content(timestamp DESC);
 
 CREATE TABLE IF NOT EXISTS auth_file_quota_snapshots (
+	  tenant_id    TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
   date_key      TEXT NOT NULL,
   auth_index    TEXT NOT NULL,
   auth_subject_id TEXT NOT NULL DEFAULT '',
@@ -166,13 +205,14 @@ CREATE TABLE IF NOT EXISTS auth_file_quota_snapshots (
   quota_key     TEXT NOT NULL,
   percent       REAL,
   recorded_at   DATETIME NOT NULL,
-  PRIMARY KEY (date_key, auth_index, quota_key)
+	  PRIMARY KEY (tenant_id, date_key, auth_index, quota_key)
 );
 
 CREATE INDEX IF NOT EXISTS idx_quota_snapshots_date ON auth_file_quota_snapshots(date_key);
 CREATE INDEX IF NOT EXISTS idx_quota_snapshots_auth ON auth_file_quota_snapshots(auth_index);
 
 CREATE TABLE IF NOT EXISTS auth_file_quota_snapshot_points (
+	  tenant_id      TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
   id             INTEGER PRIMARY KEY AUTOINCREMENT,
   recorded_at    DATETIME NOT NULL,
   auth_index     TEXT NOT NULL,
@@ -189,6 +229,7 @@ CREATE INDEX IF NOT EXISTS idx_quota_snapshot_points_auth_time ON auth_file_quot
 CREATE INDEX IF NOT EXISTS idx_quota_snapshot_points_auth_key_time ON auth_file_quota_snapshot_points(auth_index, quota_key, recorded_at);
 
 CREATE TABLE IF NOT EXISTS auth_subject_quota_cycles (
+	  tenant_id       TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
   subject_id       TEXT NOT NULL,
   auth_index       TEXT NOT NULL DEFAULT '',
   provider         TEXT NOT NULL DEFAULT '',
@@ -197,7 +238,7 @@ CREATE TABLE IF NOT EXISTS auth_subject_quota_cycles (
   reset_at         DATETIME NOT NULL,
   window_seconds   INTEGER NOT NULL DEFAULT 0,
   last_verified_at DATETIME NOT NULL,
-  PRIMARY KEY (subject_id, quota_key)
+	  PRIMARY KEY (tenant_id, subject_id, quota_key)
 );
 
 CREATE INDEX IF NOT EXISTS idx_auth_subject_quota_cycles_subject_window
@@ -240,6 +281,24 @@ func migrateApiKeyNameColumn(db *sql.DB) {
 	}
 }
 
+func migrateUpstreamModelColumn(db *sql.DB) {
+	_, err := db.Exec("ALTER TABLE request_logs ADD COLUMN upstream_model TEXT NOT NULL DEFAULT ''")
+	if err != nil {
+		if !strings.Contains(err.Error(), "duplicate") {
+			log.Warnf("usage: migrate column upstream_model: %v", err)
+		}
+	}
+}
+
+func migrateVisionFallbackModelColumn(db *sql.DB) {
+	_, err := db.Exec("ALTER TABLE request_logs ADD COLUMN vision_fallback_model TEXT NOT NULL DEFAULT ''")
+	if err != nil {
+		if !strings.Contains(err.Error(), "duplicate") {
+			log.Warnf("usage: migrate column vision_fallback_model: %v", err)
+		}
+	}
+}
+
 func migrateAPIKeyIDColumn(db *sql.DB) {
 	_, err := db.Exec("ALTER TABLE request_logs ADD COLUMN api_key_id TEXT NOT NULL DEFAULT ''")
 	if err != nil {
@@ -249,6 +308,19 @@ func migrateAPIKeyIDColumn(db *sql.DB) {
 	}
 	if _, err := db.Exec("CREATE INDEX IF NOT EXISTS idx_logs_api_key_id ON request_logs(api_key_id)"); err != nil {
 		log.Warnf("usage: create idx_logs_api_key_id: %v", err)
+	}
+}
+
+func ensureRequestLogLookupIndexes(db *sql.DB) {
+	for _, stmt := range []string{
+		"CREATE INDEX IF NOT EXISTS idx_logs_api_key_timestamp ON request_logs(api_key, timestamp DESC)",
+		"CREATE INDEX IF NOT EXISTS idx_logs_api_key_id_timestamp ON request_logs(api_key_id, timestamp DESC)",
+		"CREATE INDEX IF NOT EXISTS idx_logs_api_key_chart_cover ON request_logs(api_key, api_key_id, timestamp DESC, model, failed, input_tokens, output_tokens, total_tokens, cost, cached_tokens)",
+		"CREATE INDEX IF NOT EXISTS idx_logs_api_key_id_chart_cover ON request_logs(api_key_id, timestamp DESC, model, failed, input_tokens, output_tokens, total_tokens, cost, cached_tokens)",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			log.Warnf("usage: create request log lookup index: %v", err)
+		}
 	}
 }
 
@@ -275,6 +347,7 @@ func migrateAuthSubjectIDColumns(db *sql.DB) {
 	}
 	if _, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS auth_subject_quota_cycles (
+		  tenant_id       TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
 		  subject_id       TEXT NOT NULL,
 		  auth_index       TEXT NOT NULL DEFAULT '',
 		  provider         TEXT NOT NULL DEFAULT '',
@@ -283,7 +356,7 @@ func migrateAuthSubjectIDColumns(db *sql.DB) {
 		  reset_at         DATETIME NOT NULL,
 		  window_seconds   INTEGER NOT NULL DEFAULT 0,
 		  last_verified_at DATETIME NOT NULL,
-		  PRIMARY KEY (subject_id, quota_key)
+		  PRIMARY KEY (tenant_id, subject_id, quota_key)
 		)
 	`); err != nil {
 		log.Warnf("usage: create auth_subject_quota_cycles table: %v", err)
@@ -293,6 +366,156 @@ func migrateAuthSubjectIDColumns(db *sql.DB) {
 		ON auth_subject_quota_cycles(subject_id, window_seconds, last_verified_at)
 	`); err != nil {
 		log.Warnf("usage: create idx_auth_subject_quota_cycles_subject_window: %v", err)
+	}
+}
+
+func migrateRequestLogTenantColumns(db *sql.DB) {
+	for _, table := range []string{"request_logs", "request_log_content"} {
+		_, err := db.Exec("ALTER TABLE " + table + " ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'")
+		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate") {
+			log.Warnf("usage: migrate %s tenant_id: %v", table, err)
+		}
+	}
+	for _, stmt := range []string{
+		"CREATE INDEX IF NOT EXISTS idx_logs_tenant_timestamp ON request_logs(tenant_id, timestamp DESC)",
+		"CREATE INDEX IF NOT EXISTS idx_logs_tenant_api_key_timestamp ON request_logs(tenant_id, api_key_id, timestamp DESC)",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			log.Warnf("usage: create tenant request log index: %v", err)
+		}
+	}
+}
+
+func migrateQuotaTenantColumns(db *sql.DB) {
+	for _, table := range []string{"auth_file_quota_snapshots", "auth_file_quota_snapshot_points", "auth_subject_quota_cycles"} {
+		_, err := db.Exec("ALTER TABLE " + table + " ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001'")
+		if err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate") {
+			log.Warnf("usage: migrate %s tenant_id: %v", table, err)
+		}
+	}
+	for _, stmt := range []string{
+		"CREATE INDEX IF NOT EXISTS idx_quota_snapshots_tenant_date ON auth_file_quota_snapshots(tenant_id, date_key)",
+		"CREATE INDEX IF NOT EXISTS idx_quota_points_tenant_auth_time ON auth_file_quota_snapshot_points(tenant_id, auth_index, recorded_at)",
+		"CREATE INDEX IF NOT EXISTS idx_quota_cycles_tenant_subject ON auth_subject_quota_cycles(tenant_id, subject_id, last_verified_at)",
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			log.Warnf("usage: create tenant quota index: %v", err)
+		}
+	}
+}
+
+func sqlitePrimaryKeyColumns(db *sql.DB, table string) ([]string, error) {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type column struct {
+		name string
+		pk   int
+	}
+	var columns []column
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, columnType string
+		var defaultValue any
+		if err = rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &pk); err != nil {
+			return nil, err
+		}
+		if pk > 0 {
+			columns = append(columns, column{name: name, pk: pk})
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(columns, func(i, j int) bool { return columns[i].pk < columns[j].pk })
+	result := make([]string, 0, len(columns))
+	for _, item := range columns {
+		result = append(result, item.name)
+	}
+	return result, nil
+}
+
+func migrateQuotaTenantPrimaryKeys(db *sql.DB) {
+	for _, migration := range []struct {
+		table   string
+		wantPK  []string
+		create  string
+		columns string
+		indexes []string
+	}{
+		{
+			table:  "auth_file_quota_snapshots",
+			wantPK: []string{"tenant_id", "date_key", "auth_index", "quota_key"},
+			create: `CREATE TABLE auth_file_quota_snapshots_tenant_migration (
+				tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+				date_key TEXT NOT NULL, auth_index TEXT NOT NULL, auth_subject_id TEXT NOT NULL DEFAULT '',
+				provider TEXT NOT NULL DEFAULT '', quota_key TEXT NOT NULL, percent REAL,
+				recorded_at DATETIME NOT NULL, PRIMARY KEY (tenant_id, date_key, auth_index, quota_key))`,
+			columns: "tenant_id,date_key,auth_index,auth_subject_id,provider,quota_key,percent,recorded_at",
+			indexes: []string{
+				"CREATE INDEX IF NOT EXISTS idx_quota_snapshots_date ON auth_file_quota_snapshots(date_key)",
+				"CREATE INDEX IF NOT EXISTS idx_quota_snapshots_auth ON auth_file_quota_snapshots(auth_index)",
+				"CREATE INDEX IF NOT EXISTS idx_quota_snapshots_subject ON auth_file_quota_snapshots(auth_subject_id)",
+				"CREATE INDEX IF NOT EXISTS idx_quota_snapshots_tenant_date ON auth_file_quota_snapshots(tenant_id, date_key)",
+			},
+		},
+		{
+			table:  "auth_subject_quota_cycles",
+			wantPK: []string{"tenant_id", "subject_id", "quota_key"},
+			create: `CREATE TABLE auth_subject_quota_cycles_tenant_migration (
+				tenant_id TEXT NOT NULL DEFAULT '00000000-0000-0000-0000-000000000001',
+				subject_id TEXT NOT NULL, auth_index TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT '',
+				quota_key TEXT NOT NULL, cycle_start_at DATETIME NOT NULL, reset_at DATETIME NOT NULL,
+				window_seconds INTEGER NOT NULL DEFAULT 0, last_verified_at DATETIME NOT NULL,
+				PRIMARY KEY (tenant_id, subject_id, quota_key))`,
+			columns: "tenant_id,subject_id,auth_index,provider,quota_key,cycle_start_at,reset_at,window_seconds,last_verified_at",
+			indexes: []string{
+				"CREATE INDEX IF NOT EXISTS idx_auth_subject_quota_cycles_subject_window ON auth_subject_quota_cycles(subject_id, window_seconds, last_verified_at)",
+				"CREATE INDEX IF NOT EXISTS idx_quota_cycles_tenant_subject ON auth_subject_quota_cycles(tenant_id, subject_id, last_verified_at)",
+			},
+		},
+	} {
+		currentPK, err := sqlitePrimaryKeyColumns(db, migration.table)
+		if err != nil {
+			log.Warnf("usage: inspect %s primary key: %v", migration.table, err)
+			continue
+		}
+		if slices.Equal(currentPK, migration.wantPK) {
+			continue
+		}
+		tx, err := db.Begin()
+		if err != nil {
+			log.Warnf("usage: begin %s tenant primary key migration: %v", migration.table, err)
+			continue
+		}
+		migrationTable := migration.table + "_tenant_migration"
+		if _, err = tx.Exec("DROP TABLE IF EXISTS " + migrationTable); err == nil {
+			_, err = tx.Exec(migration.create)
+		}
+		if err == nil {
+			_, err = tx.Exec("INSERT INTO " + migrationTable + " (" + migration.columns + ") SELECT " + migration.columns + " FROM " + migration.table)
+		}
+		if err == nil {
+			_, err = tx.Exec("DROP TABLE " + migration.table)
+		}
+		if err == nil {
+			_, err = tx.Exec("ALTER TABLE " + migrationTable + " RENAME TO " + migration.table)
+		}
+		for _, indexSQL := range migration.indexes {
+			if err == nil {
+				_, err = tx.Exec(indexSQL)
+			}
+		}
+		if err != nil {
+			_ = tx.Rollback()
+			log.Warnf("usage: migrate %s tenant primary key: %v", migration.table, err)
+			continue
+		}
+		if err = tx.Commit(); err != nil {
+			log.Warnf("usage: commit %s tenant primary key migration: %v", migration.table, err)
+		}
 	}
 }
 
@@ -324,6 +547,15 @@ func migrateRequestLogDetailColumn(db *sql.DB) {
 	}
 }
 
+func migrateRequestLogContentSessionIDColumn(db *sql.DB) {
+	_, err := db.Exec("ALTER TABLE request_log_content ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
+	if err != nil {
+		if !strings.Contains(err.Error(), "duplicate") {
+			log.Warnf("usage: migrate column session_id: %v", err)
+		}
+	}
+}
+
 func ensureRequestLogDetailIndexes(db *sql.DB) {
 	if _, err := db.Exec(`
 		CREATE INDEX IF NOT EXISTS idx_log_content_detail_timestamp
@@ -332,6 +564,110 @@ func ensureRequestLogDetailIndexes(db *sql.DB) {
 	`); err != nil {
 		log.Warnf("usage: create idx_log_content_detail_timestamp: %v", err)
 	}
+	if _, err := db.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_log_content_session_timestamp
+		ON request_log_content(session_id, timestamp DESC)
+		WHERE session_id <> ''
+	`); err != nil {
+		log.Warnf("usage: create idx_log_content_session_timestamp: %v", err)
+	}
+}
+
+const (
+	requestLogSessionBackfillMaxRows        = 50
+	requestLogSessionBackfillMaxContentSize = 1 << 20
+)
+
+func backfillRequestLogContentSessionIDs(db *sql.DB) {
+	rows, err := db.Query(`
+		SELECT log_id, compression, detail_content
+		  FROM request_log_content
+		 WHERE session_id = ''
+		   AND length(detail_content) > 0
+		   AND length(detail_content) <= ?
+		 ORDER BY timestamp DESC
+		 LIMIT ?
+	`, requestLogSessionBackfillMaxContentSize, requestLogSessionBackfillMaxRows)
+	if err != nil {
+		log.Warnf("usage: query request log session_id backfill rows: %v", err)
+		return
+	}
+
+	type update struct {
+		logID     int64
+		sessionID string
+	}
+	updates := make([]update, 0)
+	var scanned int64
+	for rows.Next() {
+		var logID int64
+		var compression string
+		var compressed []byte
+		if err := rows.Scan(&logID, &compression, &compressed); err != nil {
+			_ = rows.Close()
+			log.Warnf("usage: scan request log session_id backfill row: %v", err)
+			return
+		}
+		scanned++
+		detail, err := decompressLogContent(compression, compressed)
+		if err != nil {
+			log.Warnf("usage: decompress request log session_id backfill row %d: %v", logID, err)
+			continue
+		}
+		if sessionID := extractSessionIDFromDetails(detail); sessionID != "" {
+			updates = append(updates, update{logID: logID, sessionID: sessionID})
+		}
+	}
+	if err := rows.Close(); err != nil {
+		log.Warnf("usage: close request log session_id backfill rows: %v", err)
+		return
+	}
+	if err := rows.Err(); err != nil {
+		log.Warnf("usage: iterate request log session_id backfill rows: %v", err)
+		return
+	}
+	if len(updates) == 0 {
+		return
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		log.Warnf("usage: begin request log session_id backfill: %v", err)
+		return
+	}
+	stmt, err := tx.Prepare("UPDATE request_log_content SET session_id = ? WHERE log_id = ?")
+	if err != nil {
+		_ = tx.Rollback()
+		log.Warnf("usage: prepare request log session_id backfill: %v", err)
+		return
+	}
+	for _, update := range updates {
+		if _, err := stmt.Exec(update.sessionID, update.logID); err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			log.Warnf("usage: update request log session_id backfill row %d: %v", update.logID, err)
+			return
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		_ = tx.Rollback()
+		log.Warnf("usage: close request log session_id backfill statement: %v", err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		log.Warnf("usage: commit request log session_id backfill: %v", err)
+		return
+	}
+	log.Infof("usage: backfilled request log session_id values: %d/%d", len(updates), scanned)
+}
+
+func startRequestLogContentSessionIDBackfill(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	// Historical detail_content can be very large; production databases have
+	// reached gigabytes here. New writes already populate session_id inline, so
+	// startup must not read/decompress old rows on the request-serving process.
 }
 
 // InitDB opens (or creates) the SQLite database at the given path and creates
@@ -410,34 +746,81 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 		return fmt.Errorf("usage: ping sqlite read-only handle: %w", err)
 	}
 
-	log.Debugf("usage: creating tables")
-	if _, err := db.Exec(createTableSQL); err != nil {
-		_ = db.Close()
-		return fmt.Errorf("usage: create table: %w", err)
-	}
+	return initOpenedDBLocked(db, readDB, dbPath, "sqlite", storageCfg, loc, true)
+}
 
+func InitPostgres(pgCfg config.PostgresConfig, storageCfg config.RequestLogStorageConfig, loc *time.Location) error {
+	usageDBMu.Lock()
+	defer usageDBMu.Unlock()
+
+	if usageDB != nil {
+		return nil
+	}
+	if loc == nil {
+		loc = time.Local
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	db, err := postgresstore.OpenRuntimeDB(ctx, pgCfg)
+	if err != nil {
+		return err
+	}
+	return initOpenedDBLocked(db, db, "postgres", "postgres", storageCfg, loc, false)
+}
+
+func initOpenedDBLocked(db, readDB *sql.DB, dbPath, driver string, storageCfg config.RequestLogStorageConfig, loc *time.Location, runSQLiteBootstrap bool) error {
+	if loc == nil {
+		loc = time.Local
+	}
+	usageLoc = loc
+
+	log.Debugf("usage: creating tables")
+	if runSQLiteBootstrap {
+		if _, err := db.Exec(createTableSQL); err != nil {
+			_ = db.Close()
+			return fmt.Errorf("usage: create table: %w", err)
+		}
+	}
 	usageDB = db
 	usageReadDB = readDB
 	usageDBPath = dbPath
+	usageDriver = driver
 	requestLogStorage = normalizeRequestLogStorageConfig(storageCfg)
-	log.Debugf("usage: running content column migration")
-	migrateContentColumns(db)
-	log.Debugf("usage: running cost column migration")
-	migrateCostColumn(db)
-	log.Debugf("usage: running api_key_name column migration")
-	migrateApiKeyNameColumn(db)
-	log.Debugf("usage: running api_key_id column migration")
-	migrateAPIKeyIDColumn(db)
-	log.Debugf("usage: running auth_subject_id column migration")
-	migrateAuthSubjectIDColumns(db)
-	log.Debugf("usage: running first_token_ms column migration")
-	migrateFirstTokenColumn(db)
-	log.Debugf("usage: running streaming column migration")
-	migrateStreamingColumn(db)
-	log.Debugf("usage: running request log detail column migration")
-	migrateRequestLogDetailColumn(db)
-	log.Debugf("usage: ensuring request log detail indexes")
-	ensureRequestLogDetailIndexes(db)
+	SetRequestLogBodyStorageEnabled(storageCfg.StoreContent)
+	if runSQLiteBootstrap {
+		log.Debugf("usage: running tenant scope column migration")
+		migrateRequestLogTenantColumns(db)
+		log.Debugf("usage: running quota tenant scope column migration")
+		migrateQuotaTenantColumns(db)
+		log.Debugf("usage: running content column migration")
+		migrateContentColumns(db)
+		log.Debugf("usage: running cost column migration")
+		migrateCostColumn(db)
+		log.Debugf("usage: running api_key_name column migration")
+		migrateApiKeyNameColumn(db)
+		log.Debugf("usage: running upstream_model column migration")
+		migrateUpstreamModelColumn(db)
+		log.Debugf("usage: running vision_fallback_model column migration")
+		migrateVisionFallbackModelColumn(db)
+		log.Debugf("usage: running api_key_id column migration")
+		migrateAPIKeyIDColumn(db)
+		log.Debugf("usage: ensuring request log lookup indexes")
+		ensureRequestLogLookupIndexes(db)
+		log.Debugf("usage: running auth_subject_id column migration")
+		migrateAuthSubjectIDColumns(db)
+		log.Debugf("usage: rebuilding quota tenant primary keys")
+		migrateQuotaTenantPrimaryKeys(db)
+		log.Debugf("usage: running first_token_ms column migration")
+		migrateFirstTokenColumn(db)
+		log.Debugf("usage: running streaming column migration")
+		migrateStreamingColumn(db)
+		log.Debugf("usage: running request log detail column migration")
+		migrateRequestLogDetailColumn(db)
+		log.Debugf("usage: running request log content session_id column migration")
+		migrateRequestLogContentSessionIDColumn(db)
+		log.Debugf("usage: ensuring request log detail indexes")
+		ensureRequestLogDetailIndexes(db)
+	}
 	log.Debugf("usage: initializing pricing table")
 	initPricingTable(db)
 	log.Debugf("usage: initializing model config tables")
@@ -456,12 +839,16 @@ func InitDB(dbPath string, storageCfg config.RequestLogStorageConfig, loc *time.
 	initProxyPoolTable(db)
 	log.Debugf("usage: initializing runtime_settings table")
 	initRuntimeSettingsTable(db)
-	startRequestLogMaintenance(db)
-	log.Infof("usage: SQLite database initialised at %s", dbPath)
+	log.Debugf("usage: initializing identity_fingerprints table")
+	initIdentityFingerprintsTable(db)
+	startRequestLogMaintenance(db, driver)
+	log.Debugf("usage: request log content session_id backfill disabled during startup")
+	startRequestLogContentSessionIDBackfill(db)
+	log.Infof("usage: %s database initialised at %s", driver, dbPath)
 	return nil
 }
 
-// CloseDB closes the SQLite database gracefully.
+// CloseDB closes the runtime database gracefully.
 func CloseDB() {
 	usageDBMu.Lock()
 	defer usageDBMu.Unlock()
@@ -476,36 +863,49 @@ func CloseDB() {
 		usageReadDB = nil
 	}
 	usageLoc = nil
-	log.Info("usage: SQLite database closed")
+	usageDriver = ""
+	log.Info("usage: database closed")
 }
 
-// InsertLog writes a single request log entry into the SQLite database.
+// InsertLog writes a single request log entry into the runtime database.
 // It is safe to call concurrently.
 func InsertLog(apiKey, apiKeyName, model, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent string) {
-	insertLogIdentity(apiKey, "", "", apiKeyName, model, source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, "")
+	insertLogIdentity(apiKey, "", "", apiKeyName, model, "", "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, "")
 }
 
 func InsertLogWithDetails(apiKey, apiKeyName, model, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent, detailContent string) {
-	insertLogIdentity(apiKey, "", "", apiKeyName, model, source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
+	insertLogIdentity(apiKey, "", "", apiKeyName, model, "", "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
 }
 
 func InsertLogWithDetailsIdentity(apiKey, apiKeyID, apiKeyName, model, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent, detailContent string) {
-	insertLogIdentity(apiKey, apiKeyID, "", apiKeyName, model, source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
+	insertLogIdentity(apiKey, apiKeyID, "", apiKeyName, model, "", "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
 }
 
 func InsertLogWithDetailsIdentitySubject(apiKey, apiKeyID, authSubjectID, apiKeyName, model, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent, detailContent string) {
-	insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
+	insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, "", "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
 }
 
-func insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, source, channelName, authIndex string,
+func InsertLogWithDetailsIdentitySubjectUpstream(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, source, channelName, authIndex string,
+	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
+	inputContent, outputContent, detailContent string) {
+	insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, "", source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
+}
+
+func InsertLogWithDetailsIdentitySubjectUpstreamVision(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, visionFallbackModel, source, channelName, authIndex string,
+	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
+	inputContent, outputContent, detailContent string) {
+	insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, visionFallbackModel, source, channelName, authIndex, failed, timestamp, latencyMs, firstTokenMs, tokens, inputContent, outputContent, detailContent)
+}
+
+func insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, visionFallbackModel, source, channelName, authIndex string,
 	failed bool, timestamp time.Time, latencyMs, firstTokenMs int64, tokens TokenStats,
 	inputContent, outputContent, detailContent string) {
 	db := getDB()
@@ -522,12 +922,16 @@ func insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, sourc
 		streamingInt = 1
 	}
 
-	// Calculate cost based on model pricing using semantic cache read/write
-	cost := CalculateCostV2(model, tokens)
+	tenantID := normalizeTenantID(ResolveAPIKeyTenant(apiKey))
+
+	// Calculate cost from the authenticated API key's tenant-scoped pricing catalog.
+	cost := CalculateCostV2ForTenant(tenantID, model, tokens)
 
 	apiKeyID = strings.TrimSpace(apiKeyID)
 	authSubjectID = strings.TrimSpace(authSubjectID)
 	apiKeyName = strings.TrimSpace(apiKeyName)
+	upstreamModel = strings.TrimSpace(upstreamModel)
+	visionFallbackModel = strings.TrimSpace(visionFallbackModel)
 	if identity := ResolveAPIKeyIdentity(apiKey); identity != nil {
 		if apiKeyID == "" {
 			apiKeyID = identity.ID
@@ -545,35 +949,57 @@ func insertLogIdentity(apiKey, apiKeyID, authSubjectID, apiKeyName, model, sourc
 		return
 	}
 
-	result, err := tx.Exec(
-		`INSERT INTO request_logs
-			(timestamp, api_key, api_key_id, auth_subject_id, api_key_name, model, source, channel_name, auth_index,
-			 failed, streaming, latency_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		timestamp.UTC().Format(time.RFC3339Nano),
-		apiKey, apiKeyID, authSubjectID, apiKeyName, model, source, channelName, authIndex,
+	insertSQL := `INSERT INTO request_logs
+		(tenant_id, timestamp, api_key, api_key_id, auth_subject_id, api_key_name, model, upstream_model, vision_fallback_model, source, channel_name, auth_index,
+		 failed, streaming, latency_ms, first_token_ms, input_tokens, output_tokens, reasoning_tokens, cached_tokens, total_tokens, cost)
+	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	insertArgs := []any{
+		tenantID, timestamp.UTC().Format(time.RFC3339Nano),
+		apiKey, apiKeyID, authSubjectID, apiKeyName, model, upstreamModel, visionFallbackModel, source, channelName, authIndex,
 		failedInt, streamingInt, latencyMs, firstTokenMs,
 		tokens.InputTokens, tokens.OutputTokens, tokens.ReasoningTokens,
 		tokens.CachedTokens, tokens.TotalTokens, cost,
-	)
-	if err != nil {
-		_ = tx.Rollback()
-		log.Errorf("usage: insert log: %v", err)
-		return
 	}
 
-	if requestLogStorage.StoreContent && (inputContent != "" || outputContent != "" || detailContent != "") {
-		logID, errLastID := result.LastInsertId()
-		if errLastID != nil {
-			_ = tx.Rollback()
-			log.Errorf("usage: resolve inserted log id: %v", errLastID)
-			return
+	// Failed requests always keep a compact error payload in output_content so the
+	// management UI error modal can show the upstream failure even when full body
+	// storage is disabled. Successful request/response bodies still follow the
+	// store-content toggle.
+	shouldStoreContent := detailContent != "" ||
+		(RequestLogBodyStorageEnabled() && (inputContent != "" || outputContent != "")) ||
+		(failed && strings.TrimSpace(outputContent) != "")
+	if shouldStoreContent {
+		var logID int64
+		if usageDriver == "postgres" {
+			if err := tx.QueryRow(insertSQL+" RETURNING id", insertArgs...).Scan(&logID); err != nil {
+				_ = tx.Rollback()
+				log.Errorf("usage: insert log: %v", err)
+				return
+			}
+		} else {
+			result, err := tx.Exec(insertSQL, insertArgs...)
+			if err != nil {
+				_ = tx.Rollback()
+				log.Errorf("usage: insert log: %v", err)
+				return
+			}
+			var errLastID error
+			logID, errLastID = result.LastInsertId()
+			if errLastID != nil {
+				_ = tx.Rollback()
+				log.Errorf("usage: resolve inserted log id: %v", errLastID)
+				return
+			}
 		}
-		if errStore := insertLogContentTx(tx, logID, timestamp, inputContent, outputContent, detailContent); errStore != nil {
+		if errStore := insertLogContentTenantTx(tx, tenantID, logID, timestamp, inputContent, outputContent, detailContent, failed); errStore != nil {
 			_ = tx.Rollback()
 			log.Errorf("usage: insert log content: %v", errStore)
 			return
 		}
+	} else if _, err := tx.Exec(insertSQL, insertArgs...); err != nil {
+		_ = tx.Rollback()
+		log.Errorf("usage: insert log: %v", err)
+		return
 	}
 
 	if errCommit := tx.Commit(); errCommit != nil {
@@ -619,7 +1045,38 @@ func MigrateFromSnapshot(snapshot StatisticsSnapshot) (int64, error) {
 
 // --- internal helpers ---
 
+type storedTime struct {
+	Time  time.Time
+	Valid bool
+}
+
+func (t *storedTime) Scan(value any) error {
+	parsed, ok := parseStoredTimeValue(value)
+	t.Time = parsed
+	t.Valid = ok
+	return nil
+}
+
 func parseStoredTime(value string) (time.Time, bool) {
+	return parseStoredTimeValue(value)
+}
+
+func parseStoredTimeValue(value any) (time.Time, bool) {
+	switch v := value.(type) {
+	case nil:
+		return time.Time{}, false
+	case time.Time:
+		return v.UTC(), true
+	case string:
+		return parseStoredTimeString(v)
+	case []byte:
+		return parseStoredTimeString(string(v))
+	default:
+		return time.Time{}, false
+	}
+}
+
+func parseStoredTimeString(value string) (time.Time, bool) {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return time.Time{}, false
@@ -636,6 +1093,12 @@ func getDB() *sql.DB {
 	usageDBMu.Lock()
 	defer usageDBMu.Unlock()
 	return usageDB
+}
+
+func currentUsageDriver() string {
+	usageDBMu.Lock()
+	defer usageDBMu.Unlock()
+	return usageDriver
 }
 
 // getReadDB returns the dedicated read-only connection pool used by management
@@ -660,9 +1123,70 @@ func getUsageLocation() *time.Location {
 	return usageLoc
 }
 
-// GetDBPath returns the file path of the SQLite database, or empty if not initialised.
+// GetDBPath returns the SQLite database file path, or empty for non-file databases.
 func GetDBPath() string {
 	usageDBMu.Lock()
 	defer usageDBMu.Unlock()
+	if usageDriver != "sqlite" {
+		return ""
+	}
 	return usageDBPath
+}
+
+// GetDatabaseStats returns runtime database engine and size telemetry.
+func GetDatabaseStats() (DatabaseStats, error) {
+	usageDBMu.Lock()
+	driver := usageDriver
+	path := usageDBPath
+	db := usageReadDB
+	if db == nil {
+		db = usageDB
+	}
+	usageDBMu.Unlock()
+
+	stats := DatabaseStats{Driver: driver}
+	switch driver {
+	case "postgres":
+		if db == nil {
+			return stats, nil
+		}
+		var size sql.NullInt64
+		if err := db.QueryRow("SELECT pg_database_size(current_database())").Scan(&size); err != nil {
+			return stats, fmt.Errorf("usage: query postgres database size: %w", err)
+		}
+		if size.Valid {
+			stats.SizeBytes = size.Int64
+		}
+	case "sqlite":
+		size, err := sqliteDatabaseSizeBytes(path)
+		if err != nil {
+			return stats, err
+		}
+		stats.SizeBytes = size
+	}
+	return stats, nil
+}
+
+func sqliteDatabaseSizeBytes(path string) (int64, error) {
+	if strings.TrimSpace(path) == "" {
+		return 0, nil
+	}
+	var size int64
+	for _, candidate := range []string{path, path + "-wal", path + "-shm"} {
+		info, err := os.Stat(candidate)
+		if err == nil {
+			size += info.Size()
+			continue
+		}
+		if !os.IsNotExist(err) {
+			return 0, fmt.Errorf("usage: stat sqlite database file %s: %w", candidate, err)
+		}
+	}
+	return size, nil
+}
+
+// RuntimeDB returns the initialized runtime database handle for internal services
+// that share PostgreSQL as the source of truth.
+func RuntimeDB() *sql.DB {
+	return getDB()
 }

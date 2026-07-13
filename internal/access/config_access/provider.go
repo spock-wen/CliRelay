@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strings"
 
-	apikeysettings "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/apikey"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -37,8 +37,10 @@ func Register(cfg *sdkconfig.SDKConfig) {
 func buildKeyConfigMap(cfg *sdkconfig.SDKConfig) map[string]keyConfig {
 	result := make(map[string]keyConfig)
 
-	// Primary: load from DB-backed management settings service.
-	for _, entry := range apikeysettings.NewService(nil).ListEntries() {
+	// Primary: load every tenant-scoped API key. Keys remain globally unique so
+	// authentication can resolve the trusted tenant without client input.
+	for _, stored := range usage.ListAllAPIKeys() {
+		entry := usage.EffectiveAPIKeyRowForTenant(stored.TenantID, stored)
 		trimmed := strings.TrimSpace(entry.Key)
 		if trimmed == "" || entry.Disabled {
 			continue
@@ -46,18 +48,7 @@ func buildKeyConfigMap(cfg *sdkconfig.SDKConfig) map[string]keyConfig {
 		if _, exists := result[trimmed]; exists {
 			continue
 		}
-		result[trimmed] = keyConfig{
-			allowedModels:        entry.AllowedModels,
-			allowedChannels:      entry.AllowedChannels,
-			allowedChannelGroups: entry.AllowedChannelGroups,
-			dailyLimit:           entry.DailyLimit,
-			totalQuota:           entry.TotalQuota,
-			spendingLimit:        entry.SpendingLimit,
-			concurrencyLimit:     entry.ConcurrencyLimit,
-			rpmLimit:             entry.RPMLimit,
-			tpmLimit:             entry.TPMLimit,
-			systemPrompt:         entry.SystemPrompt,
-		}
+		result[trimmed] = keyConfigFromRow(entry)
 	}
 
 	// Fallback: YAML config (for backward compatibility during migration)
@@ -71,18 +62,7 @@ func buildKeyConfigMap(cfg *sdkconfig.SDKConfig) map[string]keyConfig {
 		if _, exists := result[trimmed]; exists {
 			continue
 		}
-		result[trimmed] = keyConfig{
-			allowedModels:        row.AllowedModels,
-			allowedChannels:      row.AllowedChannels,
-			allowedChannelGroups: row.AllowedChannelGroups,
-			dailyLimit:           row.DailyLimit,
-			totalQuota:           row.TotalQuota,
-			spendingLimit:        row.SpendingLimit,
-			concurrencyLimit:     row.ConcurrencyLimit,
-			rpmLimit:             row.RPMLimit,
-			tpmLimit:             row.TPMLimit,
-			systemPrompt:         row.SystemPrompt,
-		}
+		result[trimmed] = keyConfigFromRow(row)
 	}
 	for _, k := range cfg.APIKeys {
 		trimmed := strings.TrimSpace(k)
@@ -99,16 +79,43 @@ func buildKeyConfigMap(cfg *sdkconfig.SDKConfig) map[string]keyConfig {
 
 // keyConfig holds the per-key configuration extracted from APIKeyEntry.
 type keyConfig struct {
+	tenantID             string
+	apiKeyID             string
+	apiKeyName           string
 	allowedModels        []string
 	allowedChannels      []string
 	allowedChannelGroups []string
 	dailyLimit           int
 	totalQuota           int
 	spendingLimit        float64
+	dailySpendingLimit   float64
 	concurrencyLimit     int
 	rpmLimit             int
 	tpmLimit             int
 	systemPrompt         string
+}
+
+func keyConfigFromRow(row usage.APIKeyRow) keyConfig {
+	tenantID := strings.TrimSpace(row.TenantID)
+	if tenantID == "" {
+		tenantID = identity.SystemTenantID
+	}
+	return keyConfig{
+		tenantID:             tenantID,
+		apiKeyID:             strings.TrimSpace(row.ID),
+		apiKeyName:           strings.TrimSpace(row.Name),
+		allowedModels:        row.AllowedModels,
+		allowedChannels:      row.AllowedChannels,
+		allowedChannelGroups: row.AllowedChannelGroups,
+		dailyLimit:           row.DailyLimit,
+		totalQuota:           row.TotalQuota,
+		spendingLimit:        row.SpendingLimit,
+		dailySpendingLimit:   row.DailySpendingLimit,
+		concurrencyLimit:     row.ConcurrencyLimit,
+		rpmLimit:             row.RPMLimit,
+		tpmLimit:             row.TPMLimit,
+		systemPrompt:         row.SystemPrompt,
+	}
 }
 
 type provider struct {
@@ -199,13 +206,19 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 			if kc.spendingLimit > 0 {
 				metadata["spending-limit"] = fmt.Sprintf("%f", kc.spendingLimit)
 			}
+			if kc.dailySpendingLimit > 0 {
+				metadata["daily-spending-limit"] = fmt.Sprintf("%f", kc.dailySpendingLimit)
+			}
 			if kc.systemPrompt != "" {
 				metadata["system-prompt"] = kc.systemPrompt
 			}
 			return &sdkaccess.Result{
-				Provider:  p.Identifier(),
-				Principal: candidate.value,
-				Metadata:  metadata,
+				Provider:   p.Identifier(),
+				Principal:  candidate.value,
+				TenantID:   kc.tenantID,
+				APIKeyID:   kc.apiKeyID,
+				APIKeyName: kc.apiKeyName,
+				Metadata:   metadata,
 			}, nil
 		}
 	}

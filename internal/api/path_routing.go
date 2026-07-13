@@ -6,6 +6,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/diagnostics"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	internalrouting "github.com/router-for-me/CLIProxyAPI/v6/internal/routing"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -16,12 +18,13 @@ func attachPathRouteContext(c *gin.Context, route *internalrouting.PathRouteCont
 		return
 	}
 	c.Set(internalrouting.GinPathRouteContextKey, route)
+	diagnostics.SetRoute(c, route)
 	if c.Request != nil {
 		c.Request = c.Request.WithContext(internalrouting.WithPathRouteContext(c.Request.Context(), route))
 	}
 }
 
-func resolvePathRouteContext(cfg *config.Config, authManager *cliproxyauth.Manager, rawGroup string) (*internalrouting.PathRouteContext, bool) {
+func resolvePathRouteContext(cfg *config.Config, authManager *cliproxyauth.Manager, tenantID, rawGroup string) (*internalrouting.PathRouteContext, bool) {
 	group := internalrouting.NormalizeGroupName(rawGroup)
 	if group == "" {
 		return nil, false
@@ -30,7 +33,11 @@ func resolvePathRouteContext(cfg *config.Config, authManager *cliproxyauth.Manag
 	if routePath == "" {
 		return nil, false
 	}
-	if row, ok := usage.FindCcSwitchImportConfigByRoutePath(routePath); ok {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		tenantID = identity.SystemTenantID
+	}
+	if row, ok := usage.FindCcSwitchImportConfigByRoutePathForTenant(tenantID, routePath); ok {
 		group := ""
 		if len(row.AllowedChannelGroups) > 0 {
 			group = internalrouting.NormalizeGroupName(row.AllowedChannelGroups[0])
@@ -45,9 +52,13 @@ func resolvePathRouteContext(cfg *config.Config, authManager *cliproxyauth.Manag
 			CcSwitch:  ccSwitchRouteContextFromImportConfig(row),
 		}, true
 	}
-	if cfg != nil {
-		for i := range cfg.Routing.PathRoutes {
-			route := cfg.Routing.PathRoutes[i]
+	routingConfig := usage.GetRoutingConfigForTenant(tenantID)
+	if routingConfig == nil && tenantID == identity.SystemTenantID && cfg != nil {
+		routingConfig = &cfg.Routing
+	}
+	if routingConfig != nil {
+		for i := range routingConfig.PathRoutes {
+			route := routingConfig.PathRoutes[i]
 			if route.Path == routePath {
 				return &internalrouting.PathRouteContext{
 					RoutePath: route.Path,
@@ -58,7 +69,7 @@ func resolvePathRouteContext(cfg *config.Config, authManager *cliproxyauth.Manag
 		}
 	}
 	if authManager != nil {
-		if _, ok := authManager.KnownChannelGroups()[group]; ok {
+		if _, ok := authManager.KnownChannelGroupsForTenant(tenantID)[group]; ok {
 			return &internalrouting.PathRouteContext{
 				RoutePath: routePath,
 				Group:     group,
@@ -89,13 +100,49 @@ func ccSwitchRouteContextFromImportConfig(row usage.CcSwitchImportConfigRow) *in
 	}
 }
 
-func groupRoutingMiddleware(resolve func(string) (*internalrouting.PathRouteContext, bool)) gin.HandlerFunc {
+type pathRouteResolver func(string, string) (*internalrouting.PathRouteContext, bool)
+
+const rewrittenPathRouteGroupKey = "cliproxy.rewritten_path_route_group"
+
+type rewrittenPathRouteContextKey struct{}
+
+func requestTenantID(c *gin.Context) string {
+	if c != nil {
+		if tenantID := strings.TrimSpace(c.GetString("tenantID")); tenantID != "" {
+			return tenantID
+		}
+	}
+	return identity.SystemTenantID
+}
+
+func groupRoutingMiddleware(resolve pathRouteResolver) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if resolve == nil {
 			c.Next()
 			return
 		}
-		route, ok := resolve(c.Param("group"))
+		route, ok := resolve(requestTenantID(c), c.Param("group"))
+		if !ok || route == nil {
+			abortChannelGroupRouteNotFound(c)
+			return
+		}
+		attachPathRouteContext(c, route)
+		c.Next()
+	}
+}
+
+func rewrittenGroupRoutingMiddleware(resolve pathRouteResolver) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		group, ok := c.Request.Context().Value(rewrittenPathRouteContextKey{}).(string)
+		if !ok || strings.TrimSpace(group) == "" {
+			c.Next()
+			return
+		}
+		if resolve == nil {
+			abortChannelGroupRouteNotFound(c)
+			return
+		}
+		route, ok := resolve(requestTenantID(c), group)
 		if !ok || route == nil {
 			abortChannelGroupRouteNotFound(c)
 			return
@@ -109,6 +156,7 @@ func abortChannelGroupRouteNotFound(c *gin.Context) {
 	if c == nil {
 		return
 	}
+	diagnostics.SetLocalError(c, http.StatusNotFound, "local_route", "route_group_unavailable", "invalid_request_error", "channel group route not found")
 	c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
 		"error": map[string]any{
 			"message": "channel group route not found",
@@ -167,6 +215,7 @@ func channelGroupAuthorizationMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		diagnostics.SetLocalError(c, http.StatusForbidden, "local_route", "channel_group_forbidden", "forbidden", "channel group is not allowed for this API key")
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 			"error": map[string]any{
 				"message": "channel group is not allowed for this API key",

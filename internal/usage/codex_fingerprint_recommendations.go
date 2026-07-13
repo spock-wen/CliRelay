@@ -233,7 +233,7 @@ func queryRecentCodexFingerprintDetailRows(db *sql.DB, params CodexFingerprintRe
 	for rows.Next() {
 		var (
 			row         codexFingerprintDetailRow
-			timestamp   string
+			timestamp   storedTime
 			failedInt   int
 			compression string
 			compressed  []byte
@@ -251,8 +251,8 @@ func queryRecentCodexFingerprintDetailRows(db *sql.DB, params CodexFingerprintRe
 		); err != nil {
 			return nil, fmt.Errorf("usage: scan codex fingerprint detail row: %w", err)
 		}
-		if parsed, ok := parseStoredTime(timestamp); ok {
-			row.timestamp = parsed
+		if timestamp.Valid {
+			row.timestamp = timestamp.Time
 		}
 		row.failed = failedInt != 0
 		detail, err := decompressLogContent(compression, compressed)
@@ -358,14 +358,14 @@ func codexFingerprintCandidateFromHeaders(headers http.Header) (codexFingerprint
 		recommended.WebsocketBeta = openAIBeta
 	}
 	if codexBetaFeatures != "" {
-		recommended.CustomHeaders["X-Codex-Beta-Features"] = codexBetaFeatures
+		recommended.BetaFeatures = codexBetaFeatures
 	}
 
 	if !looksLikeCodexHeaders(headers, userAgent, originator, codexBetaFeatures, openAIBeta) {
 		return codexFingerprintParsedCandidate{}, false
 	}
 	if recommended.UserAgent == "" && recommended.Version == "" && recommended.Originator == "" &&
-		recommended.WebsocketBeta == "" && len(recommended.CustomHeaders) == 0 {
+		recommended.WebsocketBeta == "" && recommended.BetaFeatures == "" && len(recommended.CustomHeaders) == 0 {
 		return codexFingerprintParsedCandidate{}, false
 	}
 

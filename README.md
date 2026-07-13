@@ -28,7 +28,9 @@
 
 > **✨ Heavily enhanced fork of the [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) project** — rebuilt with a production-grade management layer, web control panel hosting, and a terminal TUI for day-2 operations.
 
-CliRelay turns AI CLI subscriptions, OAuth credentials, API keys, and compatible upstream services into one managed API layer. It proxies Claude Code, Gemini CLI, OpenAI Codex, Amp CLI, OpenAI-compatible clients, and other AI coding tools through a unified endpoint, then adds routing groups, failover, request logging, quota control, model pricing, image-generation support, API-key self-service, online updates, `/manage` web hosting, and terminal management workflows around that traffic.
+CliRelay turns AI CLI subscriptions, OAuth credentials, API keys, and compatible upstream services into one managed API layer. It proxies Claude Code, Gemini CLI, OpenAI Codex, Qwen, iFlow, Kimi, Antigravity, xAI/Grok, OpenCode Go, ClinePass, Ollama Cloud, Bedrock, Amp, Vertex, OpenAI-compatible clients, and other AI coding tools through a unified endpoint, then adds routing groups, failover, request logging, quota control, model pricing, image-generation support, API-key self-service, online updates, `/manage` web hosting, and terminal management workflows around that traffic.
+
+The current runtime data stack is PostgreSQL 15+, Redis 7+, and Ent ORM. PostgreSQL is the source of truth for runtime data; Redis is used for cache, locks, limits, queues, and rebuildable state. SQLite is legacy-only and is supported as an import source during migration.
 
 ```
 ┌───────────────────────┐         ┌──────────────┐         ┌────────────────────┐
@@ -37,10 +39,10 @@ CliRelay turns AI CLI subscriptions, OAuth credentials, API keys, and compatible
 │  Claude Code          │ ──────▶ │   CliRelay   │ ──────▶ │  OpenAI / Codex    │
 │  Gemini CLI           │         │   :8317      │ ──────▶ │  Anthropic Claude  │
 │  OpenAI Codex         │         │              │ ──────▶ │  Qwen / iFlow      │
-│  Amp CLI / IDE        │         │              │ ──────▶ │  Antigravity       │
-│  Any OAI-compatible   │         └──────────────┘         │  Vertex / OpenAI   │
-└───────────────────────┘                                  │  iFlow / Qwen /    │
-                                                           │  Kimi / Claude     │
+│  Amp CLI / IDE        │         │              │ ──────▶ │  Antigravity/xAI   │
+│  Any OAI-compatible   │         └──────────────┘         │  Vertex / Bedrock  │
+└───────────────────────┘                                  │  OpenCode/Cline    │
+                                                           │  Ollama / Amp      │
                                                            └────────────────────┘
 ```
 
@@ -50,24 +52,24 @@ CliRelay turns AI CLI subscriptions, OAuth credentials, API keys, and compatible
 
 | Feature | Description |
 |:--------|:------------|
-| 🌐 **Unified Endpoint** | One `http://localhost:8317` fronts Gemini, Claude, Codex, Qwen, iFlow, Antigravity, Vertex-compatible endpoints, OpenAI-compatible upstreams, and Amp integration |
+| 🌐 **Unified Endpoint** | One `http://localhost:8317` fronts Gemini, Claude, Codex, Qwen, iFlow, Kimi, Antigravity, xAI/Grok, Vertex, Bedrock, OpenCode Go, ClinePass, Ollama Cloud, OpenAI-compatible upstreams, and Amp integration |
 | ⚖️ **Smart Load Balancing** | Round-robin or fill-first scheduling across multiple API keys for the same provider |
 | 🧭 **Group & Path Routing** | Bind channels into groups, restrict API keys to allowed groups, and expose custom path namespaces for teams or workloads |
 | 🔄 **Auto Failover** | Automatically switches to backup channels when quotas are exhausted or errors occur |
 | 🧠 **Multimodal Support** | Full support for text + image inputs, image-generation routing, function calling (tools), and streaming SSE responses |
 | 🔗 **OpenAI-Compatible** | Works with any upstream that speaks the OpenAI Chat Completions protocol |
 
-### 📊 Request Logging & Monitoring (SQLite)
+### 📊 Request Logging & Monitoring (PostgreSQL)
 
 | Feature | Description |
 |:--------|:------------|
-| 📝 **Full Request Capture** | Every API request is logged to SQLite with timestamp, model, tokens (in/out/reasoning/cache), latency, status, and source channel |
-| 💬 **Message Body Storage** | Full request/response message content captured in compressed SQLite storage, with separate retention for content vs. metadata |
+| 📝 **Full Request Capture** | Every API request is logged to PostgreSQL with timestamp, model, tokens (in/out/reasoning/cache), latency, status, and source channel |
+| 💬 **Message Body Storage** | Full request/response message content captured in compressed PostgreSQL storage, with separate retention for content vs. metadata |
 | 🔍 **Advanced Querying** | Filter logs by API Key, model, status, time range with efficient pagination (LIMIT/OFFSET) |
 | 📈 **Analytics Aggregation** | Pre-computed dashboards: daily trends, model distribution, hourly heatmaps, per-key statistics |
 | 🏥 **Health Score Engine** | Real-time 0–100 health score considering success rate, latency, active channels, and error patterns |
 | 📡 **WebSocket Monitoring** | Live system stats streamed via WebSocket: CPU, memory, goroutines, network I/O, DB size |
-| 🗄️ **No-CGO SQLite** | Uses `modernc.org/sqlite` — pure Go, no CGO dependency, easy cross-compilation |
+| 🗄️ **Ent + PostgreSQL** | Uses PostgreSQL 15+ as the runtime primary database with Ent-generated schema metadata |
 
 ### 🔐 API Key & Access Management
 
@@ -84,7 +86,7 @@ CliRelay turns AI CLI subscriptions, OAuth credentials, API keys, and compatible
 
 | Feature | Description |
 |:--------|:------------|
-| 📋 **Multi-Tab Config** | Manage channels organized by provider type: Gemini, Claude, Codex, Vertex, OpenAI Compatible, Ampcode |
+| 📋 **Multi-Tab Config** | Manage channels organized by provider type: Gemini, Claude, Codex, OpenCode Go, ClinePass, Ollama Cloud, Vertex, Bedrock, OpenAI Compatible, and Ampcode |
 | 🏷️ **Channel Naming** | Each channel can have a custom name, notes, proxy URL, custom headers, and model alias mappings |
 | 🧩 **Reusable Proxy Pool** | Maintain outbound proxy entries once and attach them to OAuth/auth channels when needed |
 | ⏱️ **Latency Tracking** | Average latency (`latency_ms`) tracked per channel with visual indicators |
@@ -97,7 +99,7 @@ CliRelay turns AI CLI subscriptions, OAuth credentials, API keys, and compatible
 
 | Feature | Description |
 |:--------|:------------|
-| 🔐 **OAuth Support** | Native OAuth flows for Gemini, Claude, Codex, Qwen, iFlow, Antigravity, and Kimi, plus device/browser/cookie variants where supported |
+| 🔐 **OAuth Support** | Native OAuth flows for Gemini, Claude, Codex, Qwen, iFlow, Antigravity, Kimi, and xAI/Grok, plus device/browser/cookie variants where supported |
 | 🪪 **Identity Fingerprints** | Centralize upstream identity metadata so providers receive consistent client fingerprints |
 | 🔒 **TLS Handling** | Configurable TLS settings for upstream communication |
 | 🏠 **Panel Isolation** | Management panel access controlled independently with admin password |
@@ -118,10 +120,21 @@ CliRelay turns AI CLI subscriptions, OAuth credentials, API keys, and compatible
 
 | Feature | Description |
 |:--------|:------------|
-| 💾 **SQLite Storage** | All usage data, request logs, and message bodies stored in local SQLite database |
-| 🔄 **Redis Backup** | Optional Redis integration for periodic snapshotting and cross-restart metric preservation |
+| 💾 **PostgreSQL Storage** | Usage data, request logs, message bodies, API keys, routing, proxy pool, model config, and quota state are stored in PostgreSQL |
+| 🔄 **Redis Runtime State** | Redis 7+ handles cache, locks, limits, queues, and rebuildable snapshots; PostgreSQL remains the source of truth |
 | 🗃️ **Pluggable Auth/Config Backends** | Local files by default, with optional PostgreSQL, Git, or S3-compatible object storage backends for config/auth persistence |
 | 📦 **Config Snapshots** | Import/export entire system configuration as JSON for backup and migration |
+
+## 🛠️ Runtime & Tech Stack
+
+| Layer | Technology |
+|:------|:-----------|
+| Runtime | Go 1.26, Gin, Docker Compose |
+| Data | PostgreSQL 15+ via Ent ORM, Redis 7+ for rebuildable runtime state |
+| Auth / Config Storage | Local files, PostgreSQL, Git, or S3-compatible object storage |
+| Proxy Core | OpenAI Chat Completions / Responses, Anthropic Messages, Gemini, provider-specific executors, SSE and WebSocket paths |
+| Operations | Bubble Tea / Lipgloss TUI, `/manage` web panel hosting, updater sidecar |
+| Observability | PostgreSQL request logs, compressed message bodies, live logs, system stats WebSocket |
 
 ## 📸 Management Panel Preview
 
@@ -129,67 +142,55 @@ CliRelay can expose a built-in web control panel at `/manage`. The server can ho
 
 The gallery below uses the latest supplied screenshots, covering the current end-to-end management workflow.
 
-### Dashboard, Locale & Theme
+### Dashboard & Monitoring
 
-| Home overview | Operations overview |
-| :------------ | :------------------ |
-| <img src="docs/images/readme-showcase/home-overview-1.png" width="100%" alt="CliRelay dashboard overview" /> | <img src="docs/images/readme-showcase/home-overview-2.png" width="100%" alt="CliRelay operations dashboard" /> |
+| Dashboard overview | System health |
+| :----------------- | :------------ |
+| <img src="docs/images/readme-showcase/dashboard-overview.png" width="100%" alt="CliRelay dashboard overview" /> | <img src="docs/images/readme-showcase/dashboard-health.png" width="100%" alt="CliRelay health score and system monitor" /> |
 
-| Chinese / English interface | Dark mode |
-| :-------------------------- | :-------- |
-| <img src="docs/images/readme-showcase/home-i18n.png" width="100%" alt="Chinese and English management panel locale" /> | <img src="docs/images/readme-showcase/dark-mode.png" width="100%" alt="Management panel dark mode" /> |
+| Traffic trend | Monitor summary |
+| :------------ | :-------------- |
+| <img src="docs/images/readme-showcase/dashboard-traffic.png" width="100%" alt="CliRelay traffic trend chart" /> | <img src="docs/images/readme-showcase/monitor-summary.png" width="100%" alt="Monitor center summary charts" /> |
 
-### Monitoring, Logs & Self-Service
+| Monitor breakdown | Request logs |
+| :---------------- | :----------- |
+| <img src="docs/images/readme-showcase/monitor-breakdown.png" width="100%" alt="Monitor center model and API key breakdown" /> | <img src="docs/images/readme-showcase/request-logs.png" width="100%" alt="Request log table with filters" /> |
 
-| Monitor center | Request logs |
-| :------------- | :----------- |
-| <img src="docs/images/readme-showcase/monitor-center.png" width="100%" alt="Monitor center charts and request metrics" /> | <img src="docs/images/readme-showcase/request-logs.png" width="100%" alt="Request log table with filters" /> |
+| Request details | Public API key lookup |
+| :-------------- | :-------------------- |
+| <img src="docs/images/readme-showcase/request-details.png" width="100%" alt="Request details viewer" /> | <img src="docs/images/readme-showcase/api-key-lookup.png" width="100%" alt="Public API key lookup page" /> |
 
-| Request details | Log query system |
-| :-------------- | :--------------- |
-| <img src="docs/images/readme-showcase/request-details.png" width="100%" alt="Request details viewer" /> | <img src="docs/images/readme-showcase/log-query-system.png" width="100%" alt="Log query system" /> |
+### Providers, Auth & Access
 
-| API key lookup |
-| :------------- |
-| <img src="docs/images/readme-showcase/api-key-lookup.png" width="100%" alt="Public API key lookup page" /> |
+| OpenCode Go auth files | Claude auth file controls |
+| :--------------------- | :------------------------ |
+| <img src="docs/images/readme-showcase/auth-files-opencode-go.png" width="100%" alt="OpenCode Go auth file management" /> | <img src="docs/images/readme-showcase/auth-files-claude.png" width="100%" alt="Claude auth file management" /> |
 
-### Auth, Identity & Access
+| Claude OAuth health | API keys |
+| :------------------ | :------- |
+| <img src="docs/images/readme-showcase/auth-files-claude-oauth.png" width="100%" alt="Claude OAuth health and account state" /> | <img src="docs/images/readme-showcase/api-keys.png" width="100%" alt="API key management table" /> |
 
-| Unified OAuth management | Identity fingerprints |
-| :----------------------- | :-------------------- |
-| <img src="docs/images/readme-showcase/oauth-management.png" width="100%" alt="Unified OAuth management" /> | <img src="docs/images/readme-showcase/identity-fingerprint-management.png" width="100%" alt="Identity fingerprint management" /> |
+| API key permissions | Proxy pool |
+| :------------------ | :--------- |
+| <img src="docs/images/readme-showcase/api-key-permissions.png" width="100%" alt="API key permission profiles" /> | <img src="docs/images/readme-showcase/proxy-pool.png" width="100%" alt="Reusable proxy pool management" /> |
 
-| Team permissions | OAuth proxy assignment |
-| :--------------- | :--------------------- |
-| <img src="docs/images/readme-showcase/team-permissions.png" width="100%" alt="Team API key assignment and permissions" /> | <img src="docs/images/readme-showcase/proxy-config-for-oauth.png" width="100%" alt="Proxy configuration assigned to OAuth auth records" /> |
+### Routing, Models & Configuration
 
-### Channels, Routing & Configuration
+| CC Switch import | Image generation |
+| :--------------- | :--------------- |
+| <img src="docs/images/readme-showcase/cc-switch-import.png" width="100%" alt="CC Switch import settings" /> | <img src="docs/images/readme-showcase/image-generation.png" width="100%" alt="Image generation channel configuration" /> |
 
-| Multi-channel API setup | Group routing and custom paths |
-| :---------------------- | :----------------------------- |
-| <img src="docs/images/readme-showcase/multi-channel-api-add.png" width="100%" alt="Add multiple API channels" /> | <img src="docs/images/readme-showcase/group-routing-custom-path.png" width="100%" alt="Channel group routing and custom path configuration" /> |
+| Channel groups | Model catalog |
+| :------------- | :------------ |
+| <img src="docs/images/readme-showcase/channel-groups.png" width="100%" alt="Channel group routing and custom path configuration" /> | <img src="docs/images/readme-showcase/models.png" width="100%" alt="Model catalog and pricing management" /> |
 
-| Visual config | Upstream debug passthrough |
-| :------------ | :------------------------- |
-| <img src="docs/images/readme-showcase/visual-config.png" width="100%" alt="Visual configuration editor" /> | <img src="docs/images/readme-showcase/upstream-debug-passthrough.png" width="100%" alt="Debug passthrough content sent to upstream" /> |
+| Runtime config | System information |
+| :------------- | :----------------- |
+| <img src="docs/images/readme-showcase/config.png" width="100%" alt="Runtime configuration editor" /> | <img src="docs/images/readme-showcase/system-info.png" width="100%" alt="System information page" /> |
 
-| CC Switch import |
-| :--------------- |
-| <img src="docs/images/readme-showcase/cc-switch-import.png" width="100%" alt="Configurable CC Switch import" /> |
-
-### Models, Image Generation & Updates
-
-| OpenRouter model sync | Custom model maintenance |
-| :-------------------- | :----------------------- |
-| <img src="docs/images/readme-showcase/model-openrouter-sync.png" width="100%" alt="OpenRouter model ID and pricing sync" /> | <img src="docs/images/readme-showcase/custom-model-maintenance.png" width="100%" alt="Custom model maintenance" /> |
-
-| Image generation config | Online update flow |
-| :---------------------- | :----------------- |
-| <img src="docs/images/readme-showcase/image-generation-config.png" width="100%" alt="Image generation configuration" /> | <img src="docs/images/readme-showcase/online-update.png" width="100%" alt="Online update mechanism" /> |
-
-| System information |
-| :----------------- |
-| <img src="docs/images/readme-showcase/system-info.png" width="100%" alt="System information page" /> |
+| Runtime logs |
+| :----------- |
+| <img src="docs/images/readme-showcase/live-logs.png" width="100%" alt="Runtime logs viewer" /> |
 
 > 🔗 The runtime panel source is configurable via `remote-management.panel-github-repository`. The default repository is [kittors/codeProxy](https://github.com/kittors/codeProxy).
 
@@ -203,8 +204,13 @@ The gallery below uses the latest supplied screenshots, covering the current end
 | Qwen | OAuth | Qwen Code style login flow |
 | iFlow / GLM | OAuth + Cookie | Supports iFlow routing and related model families |
 | Kimi | OAuth | Browser-based login flow |
+| xAI / Grok | OAuth | Grok CLI-compatible OAuth and quota metadata |
 | Antigravity | OAuth | Dedicated OAuth channel with model backfill support |
 | Vertex-compatible endpoints | API Key | Custom base URL, headers, aliases, exclusions |
+| AWS Bedrock | API Key / SigV4 | Region-aware Bedrock Runtime access with Claude model aliases |
+| OpenCode Go | API Key | Fixed OpenCode Go upstream with usage query and vision fallback support |
+| ClinePass | API Key | OpenAI-compatible ClinePass routing with model-access controls |
+| Ollama Cloud | API Key | OpenAI-compatible Ollama Cloud routing with model-access controls |
 | OpenAI-compatible upstreams | API Key | OpenRouter, Grok-compatible endpoints, and custom providers |
 | Amp integration | Upstream API key + mappings | Direct Amp upstream fallback or mapped local routing |
 
@@ -212,16 +218,17 @@ The gallery below uses the latest supplied screenshots, covering the current end
 
 ### 🐳 Install With Docker Compose
 
-Docker Compose is the recommended installation path for CliRelay. The included `docker-compose.yml` uses the published `ghcr.io/kittors/clirelay:latest` image by default and starts both the API service and updater sidecar.
+Docker Compose is the recommended installation path for CliRelay. The included `docker-compose.yml` starts CliRelay, PostgreSQL 15, Redis 7, and the updater sidecar. A `.env` file is optional: the `clirelay-init` service creates it on the first `docker compose up -d`, generates missing secrets such as `CLIRELAY_UPDATER_TOKEN` and `CLIRELAY_POSTGRES_PASSWORD`, preserves existing values, and creates `config.yaml` from `config.example.yaml` if it is missing. For production, pre-create `.env` only when you want to pin your own secrets or bind paths.
 
 ```bash
 git clone https://github.com/kittors/CliRelay.git
 cd CliRelay
-cp config.example.yaml config.yaml
+# Linux bind mounts need write access for the non-root container user:
+# sudo chown -R 10001:10001 auths logs data
 docker compose up -d
 ```
 
-Edit `config.yaml` to add your API keys or OAuth credentials, then restart the service:
+After the first start, edit the generated `config.yaml` to add your API keys or OAuth credentials, then restart the service:
 
 ```bash
 docker compose restart cli-proxy-api
@@ -257,14 +264,60 @@ auto-update:
   channel: dev
 ```
 
-### 🗄️ Enabling Data Persistence
+### 🗄️ Runtime Data Stack
 
-By default, API usage logs are stored in SQLite for persistence. For additional backup:
-1. Ensure you have a Redis server running.
-2. Edit `config.yaml` and set `redis.enable: true` with your Redis address.
-CliRelay will automatically snapshot and restore traffic metrics on every startup!
+CliRelay now uses PostgreSQL 15+, Redis 7+, and Ent ORM exclusively at runtime. PostgreSQL is the only source of truth for business data; Redis is limited to cache, locks, rate limits, queues, and rebuildable state. SQLite is no longer a runtime database and is not part of normal startup, health checks, or OTA updates.
 
-For large installations, tune `request-log-storage` in `config.yaml` to control how full request/response bodies are retained. By default, full bodies are compressed, kept for 30 days, and capped at ~1GB (1024MB); lightweight request metadata remains queryable for longer-term statistics. Set `content-retention-days: 0` to keep full content indefinitely, set `store-content: false` to stop new body storage without deleting existing historical content, and adjust `max-total-size-mb` to cap body storage so the oldest full bodies are pruned before the retention window is reached.
+The standard Docker Compose stack starts `clirelay-init`, PostgreSQL, Redis, the application container, and the updater sidecar. A normal `docker compose up -d` or management-panel update **does not scan for `usage.db`, run SQLite inventory, import SQLite, or expose SQLite migration stages in update progress**. Stack upgrades remove stale `clirelay-migrate` services and `CLIRELAY_SQLITE_AUTO_*` startup settings, while leaving any original SQLite files untouched.
+
+The updater sidecar owns OTA task state and publishes it through SSE. The management panel renders only the updater-provided run ID, actual stage, completed steps, current and target backend/UI versions, target image, latest Release metadata, and final result; it no longer advances a timer-based percentage. If the API container restarts, the page reloads, or SSE disconnects briefly, the panel reconnects and receives the latest updater snapshot. Compose persists that snapshot in `.clirelay-updater-status.json`; if the updater itself restarts during a task, the interrupted task is explicitly marked failed instead of remaining stuck as running. After the application passes its health check, the current updater launches a detached helper from the target image; that helper safely recreates the updater sidecar so later OTA runs use the target updater implementation.
+
+#### Manual SQLite import for legacy users only
+
+The repository and Docker image still include `scripts/migrate-sqlite-to-postgres.sh` solely for manually importing an old SQLite `usage.db` into PostgreSQL. It is an independent migration tool and **is never invoked by CliRelay startup or OTA updates**. Fresh installs, deployments already using PostgreSQL, and users who do not need old SQLite history should not run it.
+
+Before importing:
+
+1. Back up the original `usage.db` and keep a read-only copy. Do not let an old release continue writing to it during migration.
+2. Start PostgreSQL 15+ and Redis 7+, and verify that `CLIRELAY_POSTGRES_DSN` points to the intended target database.
+3. Run the SQLite inventory and PostgreSQL dry-run first, then review tables, row counts, ID/time ranges, checksums, and planned inserts.
+4. Apply only after reviewing the dry-run, and validate PostgreSQL again afterward. The script never deletes, moves, or writes the SQLite file; PostgreSQL import records and an advisory lock protect repeated or concurrent runs.
+
+For a non-Docker deployment:
+
+```bash
+CLIRELAY_BIN=/opt/clirelay2/clirelay2 \
+CLIRELAY_POSTGRES_DSN='postgres://user:pass@127.0.0.1:5432/cliproxy?sslmode=disable' \
+./scripts/migrate-sqlite-to-postgres.sh /path/to/usage.db
+```
+
+For Docker Compose, start PostgreSQL/Redis and mount the old database read-only into a one-off container:
+
+```bash
+docker compose up -d postgres redis
+
+docker compose run --rm --no-deps \
+  -e CLIRELAY_BIN=/CLIProxyAPI/CLIProxyAPI \
+  -v /absolute/path/to/usage.db:/migration/usage.db:ro \
+  cli-proxy-api \
+  /usr/local/bin/migrate-sqlite-to-postgres.sh /migration/usage.db
+```
+
+The script runs read-only SQLite inventory, PostgreSQL import dry-run, and apply in that order. Add `-e CLIRELAY_SQLITE_AUTO_IMPORT=false` to stop after dry-run. The binary commands can also be run separately:
+
+```bash
+./cli-proxy-api -sqlite-dry-run /path/to/usage.db
+
+CLIRELAY_POSTGRES_DSN='postgres://user:pass@127.0.0.1:5432/cliproxy?sslmode=disable' \
+./cli-proxy-api -sqlite-import /path/to/usage.db
+
+CLIRELAY_POSTGRES_DSN='postgres://user:pass@127.0.0.1:5432/cliproxy?sslmode=disable' \
+./cli-proxy-api -sqlite-import /path/to/usage.db -sqlite-import-dry-run=false
+```
+
+If an old Docker deployment still uses a SQLite-only compose file, replace it with the latest `docker-compose.yml`, run `docker compose up -d postgres redis clirelay-updater`, and then import data manually. A sidecar from a release that predates updater SSE must be recreated once with `docker compose up -d --force-recreate clirelay-updater`; subsequent OTA runs can then use real-time progress and reconnect recovery. See [`docs/postgres-redis-migration.md`](docs/postgres-redis-migration.md) for the full migration boundary.
+
+For large installations, tune `request-log-storage` in `config.yaml` to control full request/response body retention. Full body storage is disabled by default. When `store-content` is enabled, bodies are compressed, kept for 30 days, and capped at ~1GB (1024MB), while lightweight request metadata and request details remain available for statistics and troubleshooting. Set `content-retention-days: 0` to keep full bodies indefinitely. Disabling body storage from the management panel also clears historical input and output bodies while preserving request details and request records.
 
 If you need non-local config/auth persistence, the server also supports PostgreSQL, Git-backed, and S3-compatible object-store backends through environment-based bootstrap settings.
 
@@ -309,7 +362,7 @@ CliRelay/
 ├── internal/config/          # Config parsing, defaults, migrations
 ├── internal/store/           # Local, Git, PostgreSQL, object-store auth/config persistence
 ├── internal/tui/             # Terminal management UI
-├── internal/usage/           # SQLite usage DB, retention, analytics
+├── internal/usage/           # PostgreSQL-backed usage data, retention, analytics
 ├── internal/managementasset/ # /manage panel hosting and asset sync
 ├── sdk/                      # Reusable Go SDK, handlers, executors
 ├── auths/                    # Local credential storage
@@ -329,6 +382,7 @@ CliRelay/
 | [SDK Advanced](docs/sdk-advanced.md) | Executors & translators deep-dive |
 | [SDK Access](docs/sdk-access.md) | Authentication in SDK context |
 | [SDK Watcher](docs/sdk-watcher.md) | Credential loading & hot-reload |
+| [PostgreSQL / Redis Migration](docs/postgres-redis-migration.md) | Runtime data-stack setup, SQLite dry-run inventory, and validation |
 
 ## 🤝 Contributing
 
@@ -363,6 +417,6 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 This project is a deeply enhanced fork built upon the excellent core logic of the open-source **[router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** project.
 We want to express our deepest gratitude to the original **CLIProxyAPI** project and all its contributors!
 
-It is thanks to the solid, innovative proxy distribution foundation built by the upstream that we were able to stand on the shoulders of giants. This allowed us to develop unique advanced management features (like API Key tracking & control, full request logging with SQLite, and real-time system monitoring) and rebuild an entirely new frontend dashboard from scratch.
+It is thanks to the solid, innovative proxy distribution foundation built by the upstream that we were able to stand on the shoulders of giants. This allowed us to develop unique advanced management features (like API Key tracking & control, full request logging, and real-time system monitoring) and rebuild an entirely new frontend dashboard from scratch.
 
 A huge salute to the spirit of open source! ❤️

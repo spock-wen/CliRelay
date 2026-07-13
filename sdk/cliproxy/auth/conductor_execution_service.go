@@ -2,8 +2,10 @@ package auth
 
 import (
 	"context"
+	"net/http"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 )
 
 type executionService struct {
@@ -105,6 +107,7 @@ func (s executionService) executeMixedOnce(ctx context.Context, providers []stri
 				return cliproxyexecutor.Response{}, errCtx
 			}
 			result.Error = errorFromExecution(errExec)
+			result.Headers = headersFromError(errExec)
 			if ra := retryAfterFromError(errExec); ra != nil {
 				result.RetryAfter = ra
 			}
@@ -116,6 +119,7 @@ func (s executionService) executeMixedOnce(ctx context.Context, providers []stri
 			continue
 		}
 
+		result.Headers = resp.Headers.Clone()
 		s.manager.MarkResult(candidate.execCtx, result)
 		return resp, nil
 	}
@@ -176,6 +180,7 @@ func (s executionService) executeStreamMixedOnce(ctx context.Context, providers 
 				Success:    false,
 				Error:      rerr,
 				RetryAfter: retryAfterFromError(errStream),
+				Headers:    headersFromError(errStream),
 			}
 			s.manager.MarkResult(candidate.execCtx, result)
 			if isRequestInvalidError(errStream) || scope.singlePickRoute {
@@ -185,7 +190,7 @@ func (s executionService) executeStreamMixedOnce(ctx context.Context, providers 
 			continue
 		}
 
-		return s.wrapStreamResult(candidate.execCtx, candidate.auth, candidate.provider, scope.routeModel, streamResult), nil
+		return s.wrapStreamResult(candidate.execCtx, candidate.auth, candidate.provider, scope.routeModel, scope.opts.SourceFormat, streamResult), nil
 	}
 }
 
@@ -247,23 +252,35 @@ func (s executionService) wrapStreamResult(
 	auth *Auth,
 	provider string,
 	routeModel string,
+	sourceFormat sdktranslator.Format,
 	streamResult *cliproxyexecutor.StreamResult,
 ) *cliproxyexecutor.StreamResult {
 	out := make(chan cliproxyexecutor.StreamChunk)
-	go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk) {
+	streamHeaders := streamResult.Headers.Clone()
+	go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk, headers http.Header) {
 		defer close(out)
 		var failed bool
 		forward := true
+		completionTracker := newResponsesStreamCompletionTracker(sourceFormat)
 		for chunk := range streamChunks {
+			if chunk.Err == nil && completionTracker != nil && len(chunk.Payload) > 0 {
+				completionTracker.Observe(chunk.Payload)
+			}
 			if chunk.Err != nil && !failed {
 				failed = true
 				rerr := errorFromExecution(chunk.Err)
+				chunkHeaders := headersFromError(chunk.Err)
+				if len(chunkHeaders) == 0 {
+					chunkHeaders = headers.Clone()
+				}
 				s.manager.MarkResult(streamCtx, Result{
-					AuthID:   streamAuth.ID,
-					Provider: streamProvider,
-					Model:    routeModel,
-					Success:  false,
-					Error:    rerr,
+					AuthID:     streamAuth.ID,
+					Provider:   streamProvider,
+					Model:      routeModel,
+					Success:    false,
+					Error:      rerr,
+					RetryAfter: retryAfterFromError(chunk.Err),
+					Headers:    chunkHeaders,
 				})
 			}
 			if !forward {
@@ -279,17 +296,44 @@ func (s executionService) wrapStreamResult(
 			case out <- chunk:
 			}
 		}
+		if !failed && completionTracker != nil {
+			if err := completionTracker.ErrIfIncomplete(); err != nil {
+				failed = true
+				rerr := errorFromExecution(err)
+				s.manager.MarkResult(streamCtx, Result{
+					AuthID:     streamAuth.ID,
+					Provider:   streamProvider,
+					Model:      routeModel,
+					Success:    false,
+					Error:      rerr,
+					RetryAfter: retryAfterFromError(err),
+					Headers:    headers.Clone(),
+				})
+				if forward {
+					chunk := cliproxyexecutor.StreamChunk{Err: err}
+					if streamCtx == nil {
+						out <- chunk
+					} else {
+						select {
+						case <-streamCtx.Done():
+						case out <- chunk:
+						}
+					}
+				}
+			}
+		}
 		if !failed {
 			s.manager.MarkResult(streamCtx, Result{
 				AuthID:   streamAuth.ID,
 				Provider: streamProvider,
 				Model:    routeModel,
 				Success:  true,
+				Headers:  headers.Clone(),
 			})
 		}
-	}(execCtx, auth.Clone(), provider, streamResult.Chunks)
+	}(execCtx, auth.Clone(), provider, streamResult.Chunks, streamHeaders)
 	return &cliproxyexecutor.StreamResult{
-		Headers: streamResult.Headers,
+		Headers: streamHeaders.Clone(),
 		Chunks:  out,
 	}
 }
