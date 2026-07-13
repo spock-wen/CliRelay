@@ -53,7 +53,7 @@ func NewOpenCodeGoAnalyzer(baseURL, apiKey, model string) *OpenCodeGoAnalyzer {
 		apiKey:  apiKey,
 		model:   model,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 90 * time.Second,
 			Transport: &http.Transport{
 				MaxIdleConns:       10,
 				IdleConnTimeout:    90 * time.Second,
