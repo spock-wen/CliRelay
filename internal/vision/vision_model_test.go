@@ -8,8 +8,8 @@ func TestSupportsVisionByModelName(t *testing.T) {
 		want  bool
 	}{
 		{"qwen-vl-max", true},
-		{"gpt-4o", false},          // "o" 不是 vl token，"omni" 才算
-		{"glm-4v", false},          // 不含关键词
+		{"gpt-4o", false}, // "o" 不是 vl token，"omni" 才算
+		{"glm-4v", false}, // 不含关键词
 		{"some-model-vision", true},
 		{"some-multimodal-model", true},
 		{"qwen-omni", true},
