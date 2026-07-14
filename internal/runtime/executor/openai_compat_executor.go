@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/openaicompat"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/vision"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
@@ -26,8 +28,10 @@ import (
 // It performs request/response translation and executes against the provider base URL
 // using per-auth credentials (API key) and per-auth HTTP transport (proxy) from context.
 type OpenAICompatExecutor struct {
-	provider string
-	cfg      *config.Config
+	provider          string
+	cfg               *config.Config
+	recogAnalyzer     *vision.OpenCodeGoAnalyzer
+	recogAnalyzerOnce sync.Once
 }
 
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
@@ -86,6 +90,13 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		req = fallback.Request
 	}
 
+	// Vision recognition backfill: analyze images with a configured vision model and inject text summaries when the target model cannot handle images natively.
+	recog := e.recognizeCurrentTurnImages(ctx, req.Payload, req.Model)
+	if recog.Applied {
+		ctx = contextWithVisionFallbackLog(ctx, req.Model, thinking.ParseSuffix(req.Model).ModelName, recog.FallbackModel)
+		req.Payload = recog.Payload
+	}
+
 	to := sdktranslator.FromString("openai")
 	endpoint := "/chat/completions"
 	if opts.Alt == "responses/compact" {
@@ -107,6 +118,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 
 	translated, originalTranslated := execCtx.TranslateRequestPair(req.Payload)
 	translated = execCtx.ApplyPayloadConfig(translated, originalTranslated)
+	translated = normalizeGLMStopToArray(translated)
 	if opts.Alt == "responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
@@ -233,6 +245,13 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		req = fallback.Request
 	}
 
+	// Vision recognition backfill: analyze images with a configured vision model and inject text summaries when the target model cannot handle images natively.
+	recog := e.recognizeCurrentTurnImages(ctx, req.Payload, req.Model)
+	if recog.Applied {
+		ctx = contextWithVisionFallbackLog(ctx, req.Model, thinking.ParseSuffix(req.Model).ModelName, recog.FallbackModel)
+		req.Payload = recog.Payload
+	}
+
 	to := sdktranslator.FromString("openai")
 	execCtx := newExecutionContext(ctx, e.Identifier(), e.cfg, auth, req, opts, ExecutionOptions{
 		TargetFormat:      to,
@@ -249,6 +268,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	translated, originalTranslated := execCtx.TranslateRequestPair(req.Payload)
 	translated = execCtx.ApplyPayloadConfig(translated, originalTranslated)
+	translated = normalizeGLMStopToArray(translated)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, execCtx.SourceFormat.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -545,6 +565,45 @@ func (e *OpenAICompatExecutor) Refresh(ctx context.Context, auth *cliproxyauth.A
 	log.Debugf("openai compat executor: refresh called")
 	_ = ctx
 	return auth, nil
+}
+
+// resolveRecognitionAnalyzer resolves config.VisionRecognitionModel into
+// an analyzer instance. Result is cached via sync.Once to avoid creating
+func (e *OpenAICompatExecutor) resolveRecognitionAnalyzer() *vision.OpenCodeGoAnalyzer {
+	e.recogAnalyzerOnce.Do(func() {
+		if e.cfg == nil {
+			return
+		}
+		target, ok := vision.ResolveRecognitionTarget(e.cfg, e.cfg.VisionRecognitionModel)
+		if !ok || target == nil {
+			return
+		}
+		if target.BaseURL == "" || target.APIKey == "" || target.Model == "" {
+			return
+		}
+		e.recogAnalyzer = vision.NewOpenAICompatAnalyzer(target.BaseURL, target.APIKey, target.Model)
+	})
+	return e.recogAnalyzer
+}
+
+// recognizeCurrentTurnImages performs vision recognition backfill on current-turn images, returning modified payload and whether it was applied.
+func (e *OpenAICompatExecutor) recognizeCurrentTurnImages(ctx context.Context, payload []byte, model string) vision.RecognizeImagesResult {
+	// cline and ollama-cloud have their own vision fallback (model replacement); skip here to avoid double recognition.
+	if e.provider == "cline" || e.provider == "ollama-cloud" {
+		return vision.RecognizeImagesResult{Payload: payload}
+	}
+	analyzer := e.resolveRecognitionAnalyzer()
+	if analyzer == nil {
+		return vision.RecognizeImagesResult{Payload: payload}
+	}
+	result := vision.RecognizeCurrentTurnImages(ctx, analyzer, payload, model)
+	if result.Applied {
+		// analyzer.Name() returns the fixed "opencode-go", but usage logging needs the actual recognition model name.
+		if target, ok := vision.ResolveRecognitionTarget(e.cfg, e.cfg.VisionRecognitionModel); ok && target != nil {
+			result.FallbackModel = target.Model
+		}
+	}
+	return result
 }
 
 func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (baseURL, apiKey string) {

@@ -712,19 +712,7 @@ func opencodeGoVisionModelCandidates(model string) []string {
 }
 
 func opencodeGoModelNameImpliesVision(model string) bool {
-	if strings.Contains(model, "vision") ||
-		strings.Contains(model, "multimodal") ||
-		strings.Contains(model, "omni") {
-		return true
-	}
-	for _, token := range strings.FieldsFunc(model, func(r rune) bool {
-		return r == '-' || r == '_' || r == '.' || r == '/' || r == ':'
-	}) {
-		if token == "vl" {
-			return true
-		}
-	}
-	return false
+	return vision.SupportsVisionByModelName(model)
 }
 
 func opencodeGoDisablesThinkingForVisionFallback(model string) bool {

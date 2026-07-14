@@ -1,0 +1,827 @@
+# Review package: 4e1c334e..3a2be1ef
+
+## Commits
+3a2be1ef docs: 添加 vision-recognition-model 配置示例
+7854e99a feat: OpenAI 兼容 executor 接入 vision 识图回填
+1c0ce25d feat: 新增 vision 识图回填编排 RecognizeCurrentTurnImages
+44d22d97 feat: 新增 vision-recognition-model 配置字段
+84f2944c feat: 新增 NewOpenAICompatAnalyzer 识图器构造别名
+38ed69ad refactor: 抽取 SupportsVisionByModelName 到 vision 包
+
+## Files changed
+ config.example.yaml                                |   8 +
+ internal/config/config.go                          |   4 +
+ internal/config/config_test.go                     |  12 ++
+ .../runtime/executor/openai_compat_executor.go     |  40 +++++
+ .../runtime/executor/openai_compat_vision_test.go  | 108 ++++++++++++++
+ internal/runtime/executor/opencode_go_executor.go  |  14 +-
+ internal/vision/analyzer.go                        |   6 +
+ internal/vision/analyzer_alias_test.go             |  13 ++
+ internal/vision/recognizer.go                      | 122 +++++++++++++++
+ internal/vision/recognizer_test.go                 | 166 +++++++++++++++++++++
+ internal/vision/vision_model.go                    |  26 ++++
+ internal/vision/vision_model_test.go               |  29 ++++
+ 12 files changed, 535 insertions(+), 13 deletions(-)
+
+## Diff
+diff --git a/config.example.yaml b/config.example.yaml
+index 8a0b62b8..027b02d9 100644
+--- a/config.example.yaml
++++ b/config.example.yaml
+@@ -315,20 +315,28 @@ streaming:
+ #     headers:
+ #       X-Custom-Header: "custom-value"
+ #     api-key-entries:
+ #       - api-key: "sk-or-v1-...b780"
+ #         proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
+ #       - api-key: "sk-or-v1-...b781" # without proxy-url
+ #     models: # The models supported by the provider.
+ #       - name: "moonshotai/kimi-k2:free" # The actual model name.
+ #         alias: "kimi-k2" # The alias used in the API.
+ 
++# Vision recognition model for OpenAI-compatible providers.
++# When a user sends an image to a text-only model via an openai-compatibility
++# provider, the image is sent to this vision model for recognition, and the
++# resulting text summary is fed back to the original text model.
++# Format: "<provider-name>/<model-name>" where provider-name matches an
++# openai-compatibility entry below.
++# vision-recognition-model: "openrouter/gpt-4o"
++
+ # Vertex API keys (Vertex-compatible endpoints, use API key + base URL)
+ # vertex-api-key:
+ #   - api-key: "vk-123..."                        # x-goog-api-key header
+ #     prefix: "test"                              # optional: require calls like "test/vertex-pro" to target this credential
+ #     base-url: "https://example.com/api"         # e.g. https://zenmux.ai/api
+ #     proxy-url: "socks5://proxy.example.com:1080" # optional per-key proxy override
+ #     headers:
+ #       X-Custom-Header: "custom-value"
+ #     models:                                     # optional: map aliases to upstream model names
+ #       - name: "gemini-2.5-flash"                # upstream model name
+diff --git a/internal/config/config.go b/internal/config/config.go
+index cbb4d390..7313d0b6 100644
+--- a/internal/config/config.go
++++ b/internal/config/config.go
+@@ -160,20 +160,24 @@ type Config struct {
+ 	OAuthExcludedModels map[string][]string `yaml:"oauth-excluded-models,omitempty" json:"oauth-excluded-models,omitempty"`
+ 
+ 	// OAuthModelAlias defines global model name aliases for OAuth/file-backed auth channels.
+ 	// These aliases affect both model listing and model routing for supported channels:
+ 	// gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow.
+ 	//
+ 	// NOTE: This does not apply to existing per-credential model alias features under:
+ 	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
+ 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
+ 
++	// VisionRecognitionModel sets the model identifier used for image recognition (vision)
++	// requests routed through the openai-compatibility provider.
++	VisionRecognitionModel string `yaml:"vision-recognition-model,omitempty" json:"vision-recognition-model,omitempty"`
++
+ 	// Payload defines default and override rules for provider payload parameters.
+ 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+ 
+ 	legacyMigrationPending bool `yaml:"-" json:"-"`
+ }
+ 
+ func (cfg *Config) MainAPIReadTimeout() time.Duration {
+ 	if cfg == nil || cfg.MainAPIReadTimeoutSeconds <= 0 {
+ 		return DefaultMainAPIReadTimeout
+ 	}
+diff --git a/internal/config/config_test.go b/internal/config/config_test.go
+index b8c644ae..707384d3 100644
+--- a/internal/config/config_test.go
++++ b/internal/config/config_test.go
+@@ -1,13 +1,14 @@
+ package config
+ 
+ import (
++	"gopkg.in/yaml.v3"
+ 	"os"
+ 	"path/filepath"
+ 	"strings"
+ 	"testing"
+ 	"time"
+ )
+ 
+ func TestLoadConfigDefaultsDisableControlPanel(t *testing.T) {
+ 	t.Parallel()
+ 
+@@ -336,10 +337,21 @@ func TestSaveConfigPreserveCommentsKeepsDisableControlPanelTrue(t *testing.T) {
+ 	data, err := os.ReadFile(configPath)
+ 	if err != nil {
+ 		t.Fatalf("read config: %v", err)
+ 	}
+ 
+ 	rendered := string(data)
+ 	if !strings.Contains(rendered, "disable-control-panel: true") {
+ 		t.Fatalf("saved config missing explicit true override:\n%s", rendered)
+ 	}
+ }
++
++func TestVisionRecognitionModelConfig(t *testing.T) {
++	raw := []byte("vision-recognition-model: openai-official/gpt-4o\n")
++	var cfg Config
++	if err := yaml.Unmarshal(raw, &cfg); err != nil {
++		t.Fatalf("unmarshal: %v", err)
++	}
++	if cfg.VisionRecognitionModel != "openai-official/gpt-4o" {
++		t.Errorf("VisionRecognitionModel = %q, want %q", cfg.VisionRecognitionModel, "openai-official/gpt-4o")
++	}
++}
+diff --git a/internal/runtime/executor/openai_compat_executor.go b/internal/runtime/executor/openai_compat_executor.go
+index 6e1403ee..f8272c44 100644
+--- a/internal/runtime/executor/openai_compat_executor.go
++++ b/internal/runtime/executor/openai_compat_executor.go
+@@ -5,20 +5,21 @@ import (
+ 	"bytes"
+ 	"context"
+ 	"fmt"
+ 	"net/http"
+ 	"strings"
+ 	"time"
+ 
+ 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+ 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+ 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
++	"github.com/router-for-me/CLIProxyAPI/v6/internal/vision"
+ 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+ 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+ 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+ 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+ 	log "github.com/sirupsen/logrus"
+ 	"github.com/tidwall/gjson"
+ 	"github.com/tidwall/sjson"
+ )
+ 
+ // OpenAICompatExecutor implements a stateless executor for OpenAI-compatible providers.
+@@ -75,20 +76,27 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
+ 	if e.provider == "cline" {
+ 		originalRequestedModel := payloadRequestedModel(opts, req.Model)
+ 		originalUpstreamModel := thinking.ParseSuffix(req.Model).ModelName
+ 		fallback = applyVisionFallback(req, opts, clineVisionFallbackModel(e.cfg, auth))
+ 		if fallback.Applied {
+ 			ctx = contextWithVisionFallbackLog(ctx, originalRequestedModel, originalUpstreamModel, fallback.FallbackModel)
+ 		}
+ 		req = fallback.Request
+ 	}
+ 
++	// OpenAI 兼容识图回填：文本模型发图时，用配置的视觉模型识图并回填文本。
++	recog := e.recognizeCurrentTurnImages(ctx, req.Payload, req.Model)
++	if recog.Applied {
++		ctx = contextWithVisionFallbackLog(ctx, req.Model, thinking.ParseSuffix(req.Model).ModelName, recog.FallbackModel)
++		req.Payload = recog.Payload
++	}
++
+ 	to := sdktranslator.FromString("openai")
+ 	endpoint := "/chat/completions"
+ 	if opts.Alt == "responses/compact" {
+ 		to = sdktranslator.FromString("openai-response")
+ 		endpoint = "/responses/compact"
+ 	}
+ 	execCtx := newExecutionContext(ctx, e.Identifier(), e.cfg, auth, req, opts, ExecutionOptions{
+ 		TargetFormat:      to,
+ 		TranslateAsStream: false,
+ 	})
+@@ -218,20 +226,27 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
+ 	if e.provider == "cline" {
+ 		originalRequestedModel := payloadRequestedModel(opts, req.Model)
+ 		originalUpstreamModel := thinking.ParseSuffix(req.Model).ModelName
+ 		fallback = applyVisionFallback(req, opts, clineVisionFallbackModel(e.cfg, auth))
+ 		if fallback.Applied {
+ 			ctx = contextWithVisionFallbackLog(ctx, originalRequestedModel, originalUpstreamModel, fallback.FallbackModel)
+ 		}
+ 		req = fallback.Request
+ 	}
+ 
++	// OpenAI 兼容识图回填：文本模型发图时，用配置的视觉模型识图并回填文本。
++	recog := e.recognizeCurrentTurnImages(ctx, req.Payload, req.Model)
++	if recog.Applied {
++		ctx = contextWithVisionFallbackLog(ctx, req.Model, thinking.ParseSuffix(req.Model).ModelName, recog.FallbackModel)
++		req.Payload = recog.Payload
++	}
++
+ 	to := sdktranslator.FromString("openai")
+ 	execCtx := newExecutionContext(ctx, e.Identifier(), e.cfg, auth, req, opts, ExecutionOptions{
+ 		TargetFormat:      to,
+ 		TranslateAsStream: true,
+ 	})
+ 	reporter := execCtx.Reporter()
+ 	defer reporter.trackFailure(execCtx.Context, &err)
+ 
+ 	baseURL, apiKey := e.resolveCredentials(auth)
+ 	if baseURL == "" {
+@@ -505,20 +520,45 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
+ 	return cliproxyexecutor.Response{Payload: []byte(translatedUsage)}, nil
+ }
+ 
+ // Refresh is a no-op for API-key based compatibility providers.
+ func (e *OpenAICompatExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+ 	log.Debugf("openai compat executor: refresh called")
+ 	_ = ctx
+ 	return auth, nil
+ }
+ 
++// resolveRecognitionAnalyzer 根据 config.VisionRecognitionModel 解析识图模型，
++// 成功则构造 analyzer，失败返回 nil。
++func (e *OpenAICompatExecutor) resolveRecognitionAnalyzer() *vision.OpenCodeGoAnalyzer {
++	if e.cfg == nil {
++		return nil
++	}
++	target, ok := vision.ResolveRecognitionTarget(e.cfg, e.cfg.VisionRecognitionModel)
++	if !ok || target == nil {
++		return nil
++	}
++	if target.BaseURL == "" || target.APIKey == "" || target.Model == "" {
++		return nil
++	}
++	return vision.NewOpenAICompatAnalyzer(target.BaseURL, target.APIKey, target.Model)
++}
++
++// recognizeCurrentTurnImages 对当前轮图片做识图回填，返回处理后的 payload 与是否应用。
++func (e *OpenAICompatExecutor) recognizeCurrentTurnImages(ctx context.Context, payload []byte, model string) vision.RecognizeImagesResult {
++	analyzer := e.resolveRecognitionAnalyzer()
++	if analyzer == nil {
++		return vision.RecognizeImagesResult{Payload: payload}
++	}
++	return vision.RecognizeCurrentTurnImages(ctx, analyzer, payload, model)
++}
++
+ func (e *OpenAICompatExecutor) resolveCredentials(auth *cliproxyauth.Auth) (baseURL, apiKey string) {
+ 	if auth == nil {
+ 		return "", ""
+ 	}
+ 	if auth.Attributes != nil {
+ 		baseURL = strings.TrimSpace(auth.Attributes["base_url"])
+ 		apiKey = strings.TrimSpace(auth.Attributes["api_key"])
+ 	}
+ 	return
+ }
+diff --git a/internal/runtime/executor/openai_compat_vision_test.go b/internal/runtime/executor/openai_compat_vision_test.go
+new file mode 100644
+index 00000000..f7d65f1d
+--- /dev/null
++++ b/internal/runtime/executor/openai_compat_vision_test.go
+@@ -0,0 +1,108 @@
++package executor
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
++	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
++	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
++)
++
++func TestResolveRecognitionTargetFromConfig(t *testing.T) {
++	cfg := &config.Config{
++		VisionRecognitionModel: "openai-official/gpt-4o",
++		OpenAICompatibility: []config.OpenAICompatibility{
++			{
++				Name:    "openai-official",
++				BaseURL: "http://example",
++				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
++					{APIKey: "sk-test"},
++				},
++			},
++		},
++	}
++	e := &OpenAICompatExecutor{provider: "openai-official", cfg: cfg}
++	a := e.resolveRecognitionAnalyzer()
++	if a == nil {
++		t.Fatal("expected non-nil analyzer")
++	}
++}
++
++func TestExecuteVisionRecognitionEndToEnd(t *testing.T) {
++	// 1. 视觉识图 mock 端点
++	visionSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		w.WriteHeader(http.StatusOK)
++		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"SUMMARY: a red box\nOCR: hello"}}]}`))
++	}))
++	defer visionSrv.Close()
++
++	// 2. 上游文本模型 mock 端点，记录收到的 payload
++	var upstreamBody string
++	upstreamSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		b, _ := io.ReadAll(r.Body)
++		upstreamBody = string(b)
++		w.Header().Set("Content-Type", "application/json")
++		w.WriteHeader(http.StatusOK)
++		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
++	}))
++	defer upstreamSrv.Close()
++
++	cfg := &config.Config{
++		VisionRecognitionModel: "vision-provider/gpt-4o",
++		OpenAICompatibility: []config.OpenAICompatibility{
++			{
++				Name:    "vision-provider",
++				BaseURL: visionSrv.URL,
++				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
++					{APIKey: "sk-vision"},
++				},
++			},
++			{
++				Name:    "text-provider",
++				BaseURL: upstreamSrv.URL,
++				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
++					{APIKey: "sk-text"},
++				},
++			},
++		},
++	}
++
++	e := &OpenAICompatExecutor{provider: "text-provider", cfg: cfg}
++	auth := &cliproxyauth.Auth{
++		Provider: "text-provider",
++		Attributes: map[string]string{
++			"base_url": upstreamSrv.URL,
++			"api_key":  "sk-text",
++		},
++	}
++
++	payload := []byte(`{
++		"model": "deepseek-v4",
++		"messages": [
++			{"role": "user", "content": [
++				{"type": "text", "text": "看图"},
++				{"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
++			]}
++		]
++	}`)
++	req := cliproxyexecutor.Request{Model: "deepseek-v4", Payload: payload}
++	resp, err := e.Execute(context.Background(), auth, req, cliproxyexecutor.Options{})
++	if err != nil {
++		t.Fatalf("Execute failed: %v", err)
++	}
++	if !strings.Contains(upstreamBody, "a red box") {
++		t.Errorf("upstream should receive summary, got: %s", upstreamBody)
++	}
++	if strings.Contains(upstreamBody, "image_url") {
++		t.Errorf("upstream should not receive image_url, got: %s", upstreamBody)
++	}
++	if len(resp.Payload) == 0 {
++		t.Error("expected non-empty response")
++	}
++}
+diff --git a/internal/runtime/executor/opencode_go_executor.go b/internal/runtime/executor/opencode_go_executor.go
+index b9edb9a0..81978f30 100644
+--- a/internal/runtime/executor/opencode_go_executor.go
++++ b/internal/runtime/executor/opencode_go_executor.go
+@@ -672,33 +672,21 @@ func opencodeGoVisionModelCandidates(model string) []string {
+ 	if model == "" {
+ 		return nil
+ 	}
+ 	if idx := strings.LastIndex(model, "/"); idx >= 0 && idx+1 < len(model) {
+ 		return []string{model, model[idx+1:]}
+ 	}
+ 	return []string{model}
+ }
+ 
+ func opencodeGoModelNameImpliesVision(model string) bool {
+-	if strings.Contains(model, "vision") ||
+-		strings.Contains(model, "multimodal") ||
+-		strings.Contains(model, "omni") {
+-		return true
+-	}
+-	for _, token := range strings.FieldsFunc(model, func(r rune) bool {
+-		return r == '-' || r == '_' || r == '.' || r == '/' || r == ':'
+-	}) {
+-		if token == "vl" {
+-			return true
+-		}
+-	}
+-	return false
++	return vision.SupportsVisionByModelName(model)
+ }
+ 
+ func opencodeGoDisablesThinkingForVisionFallback(model string) bool {
+ 	baseModel := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(model).ModelName))
+ 	for _, candidate := range opencodeGoVisionModelCandidates(baseModel) {
+ 		if strings.HasPrefix(candidate, "qwen") {
+ 			return true
+ 		}
+ 	}
+ 	return false
+diff --git a/internal/vision/analyzer.go b/internal/vision/analyzer.go
+index 313d896d..d649a8e4 100644
+--- a/internal/vision/analyzer.go
++++ b/internal/vision/analyzer.go
+@@ -56,20 +56,26 @@ func NewOpenCodeGoAnalyzer(baseURL, apiKey, model string) *OpenCodeGoAnalyzer {
+ 			Timeout: 30 * time.Second,
+ 			Transport: &http.Transport{
+ 				MaxIdleConns:       10,
+ 				IdleConnTimeout:    90 * time.Second,
+ 				DisableCompression: false,
+ 			},
+ 		},
+ 	}
+ }
+ 
++// NewOpenAICompatAnalyzer 构造一个指向 OpenAI 兼容视觉模型的识图器。
++// 复用 OpenCodeGoAnalyzer 的 prompt 与 HTTP 逻辑，仅语义上区分调用目标。
++func NewOpenAICompatAnalyzer(baseURL, apiKey, model string) *OpenCodeGoAnalyzer {
++	return NewOpenCodeGoAnalyzer(baseURL, apiKey, model)
++}
++
+ func (a *OpenCodeGoAnalyzer) Name() string { return "opencode-go" }
+ 
+ func (a *OpenCodeGoAnalyzer) Analyze(ctx context.Context, req AnalyzeRequest) (AnalyzeResponse, error) {
+ 	var prompt string
+ 	if req.IsFollowUp {
+ 		prompt = a.buildFollowUpPrompt(req)
+ 	} else {
+ 		prompt = a.buildInitialPrompt()
+ 	}
+ 
+diff --git a/internal/vision/analyzer_alias_test.go b/internal/vision/analyzer_alias_test.go
+new file mode 100644
+index 00000000..d227a2c5
+--- /dev/null
++++ b/internal/vision/analyzer_alias_test.go
+@@ -0,0 +1,13 @@
++package vision
++
++import "testing"
++
++func TestNewOpenAICompatAnalyzer(t *testing.T) {
++	a := NewOpenAICompatAnalyzer("https://api.openai.com/v1", "sk-test", "gpt-4o")
++	if a == nil {
++		t.Fatal("expected non-nil analyzer")
++	}
++	if a.Name() == "" {
++		t.Fatal("expected analyzer to have a name")
++	}
++}
+diff --git a/internal/vision/recognizer.go b/internal/vision/recognizer.go
+new file mode 100644
+index 00000000..3cb08b78
+--- /dev/null
++++ b/internal/vision/recognizer.go
+@@ -0,0 +1,122 @@
++package vision
++
++import (
++	"context"
++	"strings"
++
++	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
++	log "github.com/sirupsen/logrus"
++)
++
++// RecognitionTarget is the parsed recognition model call parameters.
++type RecognitionTarget struct {
++	BaseURL string
++	APIKey  string
++	Model   string
++}
++
++// ResolveRecognitionTarget parses "provider-name/model-name" into callable recognition target.
++// Provider name matches config.OpenAICompatibility[i].Name (case-insensitive).
++// APIKey takes the first non-empty APIKeyEntries entry.
++// Returns ok=false on parse failure.
++func ResolveRecognitionTarget(cfg *config.Config, spec string) (*RecognitionTarget, bool) {
++	spec = strings.TrimSpace(spec)
++	if spec == "" || cfg == nil {
++		return nil, false
++	}
++	idx := strings.IndexByte(spec, '/')
++	if idx <= 0 || idx >= len(spec)-1 {
++		return nil, false
++	}
++	providerName := strings.TrimSpace(spec[:idx])
++	model := strings.TrimSpace(spec[idx+1:])
++	if providerName == "" || model == "" {
++		return nil, false
++	}
++	for i := range cfg.OpenAICompatibility {
++		compat := &cfg.OpenAICompatibility[i]
++		if !strings.EqualFold(strings.TrimSpace(compat.Name), providerName) {
++			continue
++		}
++		apiKey := ""
++		for _, entry := range compat.APIKeyEntries {
++			if strings.TrimSpace(entry.APIKey) != "" {
++				apiKey = strings.TrimSpace(entry.APIKey)
++				break
++			}
++		}
++		if apiKey == "" {
++			return nil, false
++		}
++		return &RecognitionTarget{
++			BaseURL: strings.TrimSpace(compat.BaseURL),
++			APIKey:  apiKey,
++			Model:   model,
++		}, true
++	}
++	return nil, false
++}
++
++// RecognizeImagesResult is the outcome of image recognition backfill.
++type RecognizeImagesResult struct {
++	Payload       []byte
++	Applied       bool
++	FallbackModel string // recognition model name for usage logging
++}
++
++// RecognizeCurrentTurnImages performs recognition backfill on current-turn images.
++//   - Skips if analyzer is nil, no current-turn image, or current model supports native vision.
++//   - Walks payload, calls analyzer.Analyze for each current-turn image,
++//     replaces image part with summary text (or "[图片识别失败]" on error).
++//   - Returns modified payload with Applied=true and FallbackModel=analyzer.Name().
++func RecognizeCurrentTurnImages(ctx context.Context, analyzer ImageAnalyzer, payload []byte, currentModel string) RecognizeImagesResult {
++	result := RecognizeImagesResult{Payload: payload}
++	if analyzer == nil {
++		return result
++	}
++	if !CurrentTurnHasImages(payload) {
++		return result
++	}
++	if SupportsVisionByModelName(currentModel) {
++		return result
++	}
++
++	walk := WalkPayload(payload)
++	for _, ip := range walk.Parts {
++		if !ip.IsCurrent {
++			continue
++		}
++		placeholder := recognizeOneImage(ctx, analyzer, ip)
++		newPayload, err := ReplaceImagePartEx(payload, ip, placeholder, ip.ArrayName)
++		if err != nil {
++			log.Errorf("vision: replace image part failed: %v", err)
++			continue
++		}
++		payload = newPayload
++	}
++
++	result.Payload = payload
++	result.Applied = true
++	result.FallbackModel = analyzer.Name()
++	return result
++}
++
++func recognizeOneImage(ctx context.Context, analyzer ImageAnalyzer, ip ImagePart) string {
++	req := AnalyzeRequest{
++		ImageData:  ip.Data,
++		ImageURL:   ip.RemoteURL,
++		MIMEType:   ip.MIMEType,
++		SourceKind: ImageSourceUserUpload,
++		TurnIndex:  0,
++	}
++	resp, err := analyzer.Analyze(ctx, req)
++	if err != nil {
++		log.Errorf("vision: analyze image failed: %v", err)
++		return "[图片识别失败]"
++	}
++	text := RenderSummary(resp.Summary)
++	if strings.TrimSpace(text) == "" {
++		return "[图片识别失败]"
++	}
++	return "[图片内容] " + text
++}
+diff --git a/internal/vision/recognizer_test.go b/internal/vision/recognizer_test.go
+new file mode 100644
+index 00000000..889983e4
+--- /dev/null
++++ b/internal/vision/recognizer_test.go
+@@ -0,0 +1,166 @@
++package vision
++
++import (
++	"context"
++	"fmt"
++	"strings"
++	"testing"
++
++	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
++)
++
++func TestResolveRecognitionTarget(t *testing.T) {
++	cfg := &config.Config{
++		OpenAICompatibility: []config.OpenAICompatibility{
++			{
++				Name:    "openai-official",
++				BaseURL: "https://api.openai.com/v1",
++				APIKeyEntries: []config.OpenAICompatibilityAPIKey{
++					{APIKey: "sk-aaa"},
++				},
++			},
++		},
++	}
++
++	t.Run("valid spec", func(t *testing.T) {
++		got, ok := ResolveRecognitionTarget(cfg, "openai-official/gpt-4o")
++		if !ok {
++			t.Fatal("expected ok=true")
++		}
++		if got.BaseURL != "https://api.openai.com/v1" {
++			t.Errorf("BaseURL = %q", got.BaseURL)
++		}
++		if got.APIKey != "sk-aaa" {
++			t.Errorf("APIKey = %q", got.APIKey)
++		}
++		if got.Model != "gpt-4o" {
++			t.Errorf("Model = %q", got.Model)
++		}
++	})
++
++	t.Run("unknown provider", func(t *testing.T) {
++		_, ok := ResolveRecognitionTarget(cfg, "nope/gpt-4o")
++		if ok {
++			t.Fatal("expected ok=false for unknown provider")
++		}
++	})
++
++	t.Run("no slash", func(t *testing.T) {
++		_, ok := ResolveRecognitionTarget(cfg, "gpt-4o")
++		if ok {
++			t.Fatal("expected ok=false for spec without slash")
++		}
++	})
++
++	t.Run("empty spec", func(t *testing.T) {
++		_, ok := ResolveRecognitionTarget(cfg, "")
++		if ok {
++			t.Fatal("expected ok=false for empty spec")
++		}
++	})
++
++	t.Run("nil cfg", func(t *testing.T) {
++		_, ok := ResolveRecognitionTarget(nil, "openai-official/gpt-4o")
++		if ok {
++			t.Fatal("expected ok=false for nil cfg")
++		}
++	})
++
++	t.Run("no usable api key", func(t *testing.T) {
++		cfg2 := &config.Config{
++			OpenAICompatibility: []config.OpenAICompatibility{
++				{Name: "x", BaseURL: "https://x", APIKeyEntries: nil},
++			},
++		}
++		_, ok := ResolveRecognitionTarget(cfg2, "x/m")
++		if ok {
++			t.Fatal("expected ok=false when no api key")
++		}
++	})
++}
++
++// mockAnalyzer is a test double for ImageAnalyzer.
++type mockAnalyzer struct {
++	name  string
++	sum   ImageSummary
++	err   error
++	calls int
++}
++
++func (m *mockAnalyzer) Name() string { return m.name }
++func (m *mockAnalyzer) Analyze(ctx context.Context, req AnalyzeRequest) (AnalyzeResponse, error) {
++	m.calls++
++	if m.err != nil {
++		return AnalyzeResponse{}, m.err
++	}
++	return AnalyzeResponse{Summary: m.sum}, nil
++}
++
++func TestRecognizeCurrentTurnImages(t *testing.T) {
++	// A Chat Completions payload with one base64 image in the current turn.
++	payload := []byte(`{
++		"model": "deepseek-v4",
++		"messages": [
++			{"role": "user", "content": [
++				{"type": "text", "text": "看图"},
++				{"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
++			]}
++		]
++	}`)
++
++	t.Run("replaces image with summary", func(t *testing.T) {
++		a := &mockAnalyzer{name: "gpt-4o", sum: ImageSummary{Summary: "a red box", OCRHints: []string{"hello"}}}
++		res := RecognizeCurrentTurnImages(context.Background(), a, payload, "deepseek-v4")
++		if !res.Applied {
++			t.Fatal("expected Applied=true")
++		}
++		s := string(res.Payload)
++		if !strings.Contains(s, "a red box") {
++			t.Errorf("payload missing summary, got: %s", s)
++		}
++		if strings.Contains(s, "image_url") {
++			t.Errorf("payload still contains image_url: %s", s)
++		}
++		if a.calls != 1 {
++			t.Errorf("analyzer calls = %d, want 1", a.calls)
++		}
++	})
++
++	t.Run("skips when current model is vision", func(t *testing.T) {
++		a := &mockAnalyzer{name: "gpt-4o"}
++		res := RecognizeCurrentTurnImages(context.Background(), a, payload, "qwen-vl-max")
++		if res.Applied {
++			t.Fatal("expected Applied=false for vision model")
++		}
++		if a.calls != 0 {
++			t.Errorf("analyzer should not be called, calls=%d", a.calls)
++		}
++	})
++
++	t.Run("skips when no image", func(t *testing.T) {
++		noImg := []byte(`{"model":"deepseek-v4","messages":[{"role":"user","content":"hi"}]}`)
++		a := &mockAnalyzer{name: "gpt-4o"}
++		res := RecognizeCurrentTurnImages(context.Background(), a, noImg, "deepseek-v4")
++		if res.Applied {
++			t.Fatal("expected Applied=false when no image")
++		}
++	})
++
++	t.Run("nil analyzer skips", func(t *testing.T) {
++		res := RecognizeCurrentTurnImages(context.Background(), nil, payload, "deepseek-v4")
++		if res.Applied {
++			t.Fatal("expected Applied=false for nil analyzer")
++		}
++	})
++
++	t.Run("analyze failure degrades to placeholder", func(t *testing.T) {
++		a := &mockAnalyzer{name: "gpt-4o", err: fmt.Errorf("boom")}
++		res := RecognizeCurrentTurnImages(context.Background(), a, payload, "deepseek-v4")
++		if !res.Applied {
++			t.Fatal("expected Applied=true even on analyze error")
++		}
++		if !strings.Contains(string(res.Payload), "图片识别失败") {
++			t.Errorf("expected failure placeholder, got: %s", string(res.Payload))
++		}
++	})
++}
+diff --git a/internal/vision/vision_model.go b/internal/vision/vision_model.go
+new file mode 100644
+index 00000000..07dad775
+--- /dev/null
++++ b/internal/vision/vision_model.go
+@@ -0,0 +1,26 @@
++package vision
++
++import "strings"
++
++// SupportsVisionByModelName 用名字启发式判断模型是否支持原生视觉。
++// 规则：模型名（已转小写）包含 vision/multimodal/omni，或按分隔符切出的
++// token 之一为 "vl"，视为视觉模型。
++func SupportsVisionByModelName(model string) bool {
++	model = strings.ToLower(strings.TrimSpace(model))
++	if model == "" {
++		return false
++	}
++	if strings.Contains(model, "vision") ||
++		strings.Contains(model, "multimodal") ||
++		strings.Contains(model, "omni") {
++		return true
++	}
++	for _, token := range strings.FieldsFunc(model, func(r rune) bool {
++		return r == '-' || r == '_' || r == '.' || r == '/' || r == ':'
++	}) {
++		if token == "vl" {
++			return true
++		}
++	}
++	return false
++}
+diff --git a/internal/vision/vision_model_test.go b/internal/vision/vision_model_test.go
+new file mode 100644
+index 00000000..0edb61c4
+--- /dev/null
++++ b/internal/vision/vision_model_test.go
+@@ -0,0 +1,29 @@
++package vision
++
++import "testing"
++
++func TestSupportsVisionByModelName(t *testing.T) {
++	tests := []struct {
++		model string
++		want  bool
++	}{
++		{"qwen-vl-max", true},
++		{"gpt-4o", false},          // "o" 不是 vl token，"omni" 才算
++		{"glm-4v", false},          // 不含关键词
++		{"some-model-vision", true},
++		{"some-multimodal-model", true},
++		{"qwen-omni", true},
++		{"deepseek-v4", false},
++		{"kimi-k2", false},
++		{"my-org/vl", true},
++		{"prefix/vl-suffix", true},
++		{"", false},
++		{"claude-sonnet-4", false},
++	}
++	for _, tt := range tests {
++		got := SupportsVisionByModelName(tt.model)
++		if got != tt.want {
++			t.Errorf("SupportsVisionByModelName(%q) = %v, want %v", tt.model, got, tt.want)
++		}
++	}
++}
