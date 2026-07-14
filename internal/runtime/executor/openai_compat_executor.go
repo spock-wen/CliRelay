@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -27,8 +28,10 @@ import (
 // It performs request/response translation and executes against the provider base URL
 // using per-auth credentials (API key) and per-auth HTTP transport (proxy) from context.
 type OpenAICompatExecutor struct {
-	provider string
-	cfg      *config.Config
+	provider          string
+	cfg               *config.Config
+	recogAnalyzer     *vision.OpenCodeGoAnalyzer
+	recogAnalyzerOnce sync.Once
 }
 
 // NewOpenAICompatExecutor creates an executor bound to a provider key (e.g., "openrouter").
@@ -87,7 +90,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		req = fallback.Request
 	}
 
-	// OpenAI 兼容识图回填：文本模型发图时，用配置的视觉模型识图并回填文本。
+	// Vision recognition backfill: analyze images with a configured vision model and inject text summaries when the target model cannot handle images natively.
 	recog := e.recognizeCurrentTurnImages(ctx, req.Payload, req.Model)
 	if recog.Applied {
 		ctx = contextWithVisionFallbackLog(ctx, req.Model, thinking.ParseSuffix(req.Model).ModelName, recog.FallbackModel)
@@ -242,7 +245,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		req = fallback.Request
 	}
 
-	// OpenAI 兼容识图回填：文本模型发图时，用配置的视觉模型识图并回填文本。
+	// Vision recognition backfill: analyze images with a configured vision model and inject text summaries when the target model cannot handle images natively.
 	recog := e.recognizeCurrentTurnImages(ctx, req.Payload, req.Model)
 	if recog.Applied {
 		ctx = contextWithVisionFallbackLog(ctx, req.Model, thinking.ParseSuffix(req.Model).ModelName, recog.FallbackModel)
@@ -564,26 +567,29 @@ func (e *OpenAICompatExecutor) Refresh(ctx context.Context, auth *cliproxyauth.A
 	return auth, nil
 }
 
-// resolveRecognitionAnalyzer 根据 config.VisionRecognitionModel 解析识图模型，
-// 成功则构造 analyzer，失败返回 nil。
+// resolveRecognitionAnalyzer resolves config.VisionRecognitionModel into
+// an analyzer instance. Result is cached via sync.Once to avoid creating
 func (e *OpenAICompatExecutor) resolveRecognitionAnalyzer() *vision.OpenCodeGoAnalyzer {
-	if e.cfg == nil {
-		return nil
-	}
-	target, ok := vision.ResolveRecognitionTarget(e.cfg, e.cfg.VisionRecognitionModel)
-	if !ok || target == nil {
-		return nil
-	}
-	if target.BaseURL == "" || target.APIKey == "" || target.Model == "" {
-		return nil
-	}
-	return vision.NewOpenAICompatAnalyzer(target.BaseURL, target.APIKey, target.Model)
+	e.recogAnalyzerOnce.Do(func() {
+		if e.cfg == nil {
+			return
+		}
+		target, ok := vision.ResolveRecognitionTarget(e.cfg, e.cfg.VisionRecognitionModel)
+		if !ok || target == nil {
+			return
+		}
+		if target.BaseURL == "" || target.APIKey == "" || target.Model == "" {
+			return
+		}
+		e.recogAnalyzer = vision.NewOpenAICompatAnalyzer(target.BaseURL, target.APIKey, target.Model)
+	})
+	return e.recogAnalyzer
 }
 
-// recognizeCurrentTurnImages 对当前轮图片做识图回填，返回处理后的 payload 与是否应用。
+// recognizeCurrentTurnImages performs vision recognition backfill on current-turn images, returning modified payload and whether it was applied.
 func (e *OpenAICompatExecutor) recognizeCurrentTurnImages(ctx context.Context, payload []byte, model string) vision.RecognizeImagesResult {
-	// cline 已经有自己的 vision fallback（模型替换），不在此重复处理，避免双重识图。
-	if e.provider == "cline" {
+	// cline and ollama-cloud have their own vision fallback (model replacement); skip here to avoid double recognition.
+	if e.provider == "cline" || e.provider == "ollama-cloud" {
 		return vision.RecognizeImagesResult{Payload: payload}
 	}
 	analyzer := e.resolveRecognitionAnalyzer()
@@ -592,7 +598,7 @@ func (e *OpenAICompatExecutor) recognizeCurrentTurnImages(ctx context.Context, p
 	}
 	result := vision.RecognizeCurrentTurnImages(ctx, analyzer, payload, model)
 	if result.Applied {
-		// analyzer.Name() 返回固定的 "opencode-go"，但 usage 记录需要真实的识图模型名。
+		// analyzer.Name() returns the fixed "opencode-go", but usage logging needs the actual recognition model name.
 		if target, ok := vision.ResolveRecognitionTarget(e.cfg, e.cfg.VisionRecognitionModel); ok && target != nil {
 			result.FallbackModel = target.Model
 		}

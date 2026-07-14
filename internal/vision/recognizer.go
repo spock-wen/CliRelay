@@ -78,6 +78,7 @@ type cacheEntry struct {
 var (
 	imageAnalysisCache sync.Map     // string(hash) → cacheEntry
 	cacheEntryCount    atomic.Int64 // approximate count
+	evictMu            sync.Mutex   // serializes evictOldest to prevent concurrent eviction races
 )
 
 func cacheLoad(key string) (string, bool) {
@@ -93,7 +94,12 @@ func cacheStore(key, value string) {
 	_, existed := imageAnalysisCache.Swap(key, cacheEntry{text: value, storedAt: now})
 	if !existed {
 		if cacheEntryCount.Add(1) > maxCacheEntries {
-			evictOldest(keepCacheEntries)
+			evictMu.Lock()
+			// Double-check: another goroutine may have already evicted while we waited.
+			if cacheEntryCount.Load() > maxCacheEntries {
+				evictOldest(keepCacheEntries)
+			}
+			evictMu.Unlock()
 		}
 	}
 }
@@ -133,7 +139,8 @@ type RecognizeImagesResult struct {
 // never receive image content parts.
 //   - Skips if analyzer is nil, no images at all, or current model supports native vision.
 //   - Current-turn images: calls analyzer.Analyze, replaces with text summary.
-//   - Historical images: replaces with "[图片内容]" placeholder with no analyzer call.
+//   - Historical images: tries cache first, then real-time analysis if data available,
+//     finally falls back to PlaceholderHistoricalImageUnrecognizable.
 //   - Returns modified payload with Applied=true and FallbackModel=analyzer.Name().
 func RecognizeCurrentTurnImages(ctx context.Context, analyzer ImageAnalyzer, payload []byte, currentModel string) RecognizeImagesResult {
 	result := RecognizeImagesResult{Payload: payload}
@@ -153,11 +160,14 @@ func RecognizeCurrentTurnImages(ctx context.Context, analyzer ImageAnalyzer, pay
 		if ip.IsCurrent {
 			placeholder = recognizeOneImage(ctx, analyzer, ip)
 		} else {
+			// Historical image: cache → real-time analysis → placeholder
 			hash := ComputeHash(ip.Data)
 			if cached, ok := cacheLoad(string(hash)); ok {
 				placeholder = cached
+			} else if ip.Data != "" {
+				placeholder = recognizeOneImage(ctx, analyzer, ip)
 			} else {
-				placeholder = "[图片内容]"
+				placeholder = PlaceholderHistoricalImageUnrecognizable
 			}
 		}
 		newPayload, err := ReplaceImagePartEx(payload, ip, placeholder, ip.ArrayName)
@@ -185,13 +195,13 @@ func recognizeOneImage(ctx context.Context, analyzer ImageAnalyzer, ip ImagePart
 	resp, err := analyzer.Analyze(ctx, req)
 	if err != nil {
 		log.Errorf("vision: analyze image failed: %v", err)
-		return "[图片识别失败]"
+		return PlaceholderImageRecognitionFailed
 	}
 	text := RenderSummary(resp.Summary)
 	if strings.TrimSpace(text) == "" {
-		return "[图片识别失败]"
+		return PlaceholderImageRecognitionFailed
 	}
-	placeholder := "[图片内容] " + text
+	placeholder := PlaceholderImageContent + text
 	if ip.Data != "" {
 		hash := ComputeHash(ip.Data)
 		cacheStore(string(hash), placeholder)

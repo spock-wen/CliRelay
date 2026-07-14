@@ -159,7 +159,7 @@ func TestRecognizeCurrentTurnImages(t *testing.T) {
 		if !res.Applied {
 			t.Fatal("expected Applied=true even on analyze error")
 		}
-		if !strings.Contains(string(res.Payload), "图片识别失败") {
+		if !strings.Contains(string(res.Payload), PlaceholderImageRecognitionFailed) {
 			t.Errorf("expected failure placeholder, got: %s", string(res.Payload))
 		}
 	})
