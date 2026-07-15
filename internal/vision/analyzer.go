@@ -53,7 +53,7 @@ func NewOpenCodeGoAnalyzer(baseURL, apiKey, model string) *OpenCodeGoAnalyzer {
 		apiKey:  apiKey,
 		model:   model,
 		httpClient: &http.Client{
-			Timeout: 90 * time.Second,
+			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
 				MaxIdleConns:       10,
 				IdleConnTimeout:    90 * time.Second,
@@ -61,12 +61,6 @@ func NewOpenCodeGoAnalyzer(baseURL, apiKey, model string) *OpenCodeGoAnalyzer {
 			},
 		},
 	}
-}
-
-// NewOpenAICompatAnalyzer 构造一个指向 OpenAI 兼容视觉模型的识图器。
-// 复用 OpenCodeGoAnalyzer 的 prompt 与 HTTP 逻辑，仅语义上区分调用目标。
-func NewOpenAICompatAnalyzer(baseURL, apiKey, model string) *OpenCodeGoAnalyzer {
-	return NewOpenCodeGoAnalyzer(baseURL, apiKey, model)
 }
 
 func (a *OpenCodeGoAnalyzer) Name() string { return "opencode-go" }

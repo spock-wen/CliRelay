@@ -1,7 +1,6 @@
 package config
 
 import (
-	"gopkg.in/yaml.v3"
 	"os"
 	"path/filepath"
 	"strings"
@@ -425,16 +424,5 @@ func TestSaveConfigPreserveCommentsKeepsDisableControlPanelTrue(t *testing.T) {
 	rendered := string(data)
 	if !strings.Contains(rendered, "disable-control-panel: true") {
 		t.Fatalf("saved config missing explicit true override:\n%s", rendered)
-	}
-}
-
-func TestVisionRecognitionModelConfig(t *testing.T) {
-	raw := []byte("vision-recognition-model: openai-official/gpt-4o\n")
-	var cfg Config
-	if err := yaml.Unmarshal(raw, &cfg); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if cfg.VisionRecognitionModel != "openai-official/gpt-4o" {
-		t.Errorf("VisionRecognitionModel = %q, want %q", cfg.VisionRecognitionModel, "openai-official/gpt-4o")
 	}
 }

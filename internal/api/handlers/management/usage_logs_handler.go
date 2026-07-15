@@ -225,7 +225,7 @@ func (h *UsageLogsHandler) GetUsageChartData(c *gin.Context) {
 
 // GetUsageExportSummary returns aggregated usage data grouped by API key.
 func (h *UsageLogsHandler) GetUsageExportSummary(c *gin.Context) {
-	payload, err := h.service(c).UsageExportSummary(
+	payload, err := h.service().UsageExportSummary(
 		strings.TrimSpace(c.Query("api_key")),
 		intQueryDefault(c, "days", 1),
 	)

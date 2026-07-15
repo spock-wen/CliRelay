@@ -369,10 +369,8 @@ func (h *Handler) GetUsers(c *gin.Context) {
 func (h *Handler) PostUser(c *gin.Context) {
 	principal, _ := principalFromContext(c)
 	var body struct {
-		Username    string   `json:"username"`
-		DisplayName string   `json:"display_name"`
-		Password    string   `json:"password"`
-		RoleIDs     []string `json:"role_ids"`
+		Username, DisplayName, Password string
+		RoleIDs                         []string `json:"role_ids"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
