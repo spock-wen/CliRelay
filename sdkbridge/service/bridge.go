@@ -71,8 +71,12 @@ func NewDefaultAuthManager() *sdkAuth.Manager {
 	return internalserviceapp.NewDefaultAuthManager()
 }
 
-func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int, int, int) {
+func BuildAPIKeyClients(cfg *config.Config) (int, int, int, int, int, int, int, int) {
 	return internalserviceapp.BuildAPIKeyClients(cfg)
+}
+
+func ApplyTenantRuntimeConfigs(cfg *config.Config, manager *coreauth.Manager) {
+	internalserviceapp.ApplyTenantRuntimeConfigs(cfg, manager)
 }
 
 func NewDefaultRoundTripperProvider() coreauth.RoundTripperProvider {
@@ -93,6 +97,10 @@ func SyncConfigDerivedAuths(cfg *config.Config, coreManager *coreauth.Manager) {
 
 func FetchAntigravityModels(ctx context.Context, auth *coreauth.Auth, cfg *config.Config) []*sdkmodelcatalog.ModelInfo {
 	return internalserviceapp.FetchAntigravityModels(ctx, auth, cfg)
+}
+
+func FetchXAIModels(ctx context.Context, auth *coreauth.Auth, cfg *config.Config) []*sdkmodelcatalog.ModelInfo {
+	return internalserviceapp.FetchXAIModels(ctx, auth, cfg)
 }
 
 func RegisterExecutorForAuth(coreManager *coreauth.Manager, cfg *config.Config, auth *coreauth.Auth, forceReplace bool, gateway WebsocketGateway) {

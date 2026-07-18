@@ -11,18 +11,31 @@ func TestSyncOpenRouterModelsAddsNewModelsWithLocalModelIDPricingAndOwner(t *tes
 
 	result, err := SyncOpenRouterModelList(context.Background(), []OpenRouterRemoteModel{
 		{
-			ID:          "openai/gpt-openrouter-test",
-			Name:        "OpenAI: GPT OpenRouter Test",
-			Description: "Agentic test model",
+			ID:                  "openai/gpt-openrouter-test",
+			Name:                "OpenAI: GPT OpenRouter Test",
+			Description:         "Agentic test model",
+			ContextLength:       200000,
+			KnowledgeCutoff:     "2025-01-01",
+			SupportedParameters: []string{"tools", "reasoning"},
 			Architecture: OpenRouterRemoteArchitecture{
 				Modality:         "text+image->text",
 				InputModalities:  []string{"text", "image"},
 				OutputModalities: []string{"text"},
 			},
 			Pricing: OpenRouterRemotePricing{
-				Prompt:         "0.00000175",
-				Completion:     "0.000014",
-				InputCacheRead: "0.000000175",
+				Prompt:          "0.00000175",
+				Completion:      "0.000014",
+				InputCacheRead:  "0.000000175",
+				InputCacheWrite: "0.0000025",
+			},
+			TopProvider: OpenRouterRemoteTopProvider{
+				ContextLength:       200000,
+				MaxCompletionTokens: 64000,
+			},
+			Reasoning: &OpenRouterRemoteReasoning{
+				DefaultEnabled:   true,
+				SupportedEfforts: []string{"low", "medium", "high"},
+				DefaultEffort:    "medium",
 			},
 		},
 	})
@@ -48,6 +61,24 @@ func TestSyncOpenRouterModelsAddsNewModelsWithLocalModelIDPricingAndOwner(t *tes
 	}
 	if strings.Join(model.InputModalities, ",") != "text,image" || strings.Join(model.OutputModalities, ",") != "text" {
 		t.Fatalf("unexpected imported model modalities: %+v -> %+v", model.InputModalities, model.OutputModalities)
+	}
+	if model.DisplayName != "GPT OpenRouter Test" {
+		t.Fatalf("unexpected display name: %q", model.DisplayName)
+	}
+	if model.ContextLength != 200000 || model.MaxCompletionTokens != 64000 {
+		t.Fatalf("unexpected context metadata: %+v", model)
+	}
+	if strings.Join(model.SupportedParameters, ",") != "tools,reasoning" {
+		t.Fatalf("unexpected supported parameters: %+v", model.SupportedParameters)
+	}
+	if model.KnowledgeCutoff != "2025-01-01" {
+		t.Fatalf("unexpected knowledge cutoff: %q", model.KnowledgeCutoff)
+	}
+	if model.Reasoning == "" || !strings.Contains(model.Reasoning, "supported_efforts") {
+		t.Fatalf("unexpected reasoning metadata: %q", model.Reasoning)
+	}
+	if model.CacheWritePricePerMillion != 2.5 {
+		t.Fatalf("unexpected cache write price: %v", model.CacheWritePricePerMillion)
 	}
 	if _, ok := GetModelOwnerPreset("openai"); !ok {
 		t.Fatal("expected openai owner preset to exist")
@@ -103,6 +134,173 @@ func TestSyncOpenRouterModelsUpdatesExistingUserModelPricingOnly(t *testing.T) {
 	}
 	if strings.Join(model.InputModalities, ",") != "text,image" || strings.Join(model.OutputModalities, ",") != "text" {
 		t.Fatalf("existing user model modalities should be synced: %+v -> %+v", model.InputModalities, model.OutputModalities)
+	}
+}
+
+func TestSyncOpenRouterModelsPreservesImageGenerationCallPricingAndOutputModality(t *testing.T) {
+	initModelConfigTestDB(t)
+
+	before, ok := GetModelConfig("gpt-image-2")
+	if !ok {
+		t.Fatal("expected gpt-image-2 seed config")
+	}
+	if before.PricingMode != "call" || before.PricePerCall <= 0 {
+		t.Fatalf("expected seeded gpt-image-2 call pricing, got %+v", before)
+	}
+
+	result, err := SyncOpenRouterModelList(context.Background(), []OpenRouterRemoteModel{
+		{
+			ID:          "openai/gpt-image-2",
+			Description: "Remote image model description",
+			Architecture: OpenRouterRemoteArchitecture{
+				Modality:         "text->text",
+				InputModalities:  []string{"text"},
+				OutputModalities: []string{"text"},
+			},
+			Pricing: OpenRouterRemotePricing{
+				Prompt:     "0.000005",
+				Completion: "0.000020",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SyncOpenRouterModelList() error = %v", err)
+	}
+	if result.Seen != 1 || result.Added != 0 || result.Updated != 1 || result.Skipped != 0 {
+		t.Fatalf("unexpected sync result: %+v", result)
+	}
+
+	after, ok := GetModelConfig("gpt-image-2")
+	if !ok {
+		t.Fatal("expected gpt-image-2 to remain configured")
+	}
+	if after.PricingMode != "call" || after.PricePerCall != before.PricePerCall {
+		t.Fatalf("image generation pricing should remain per-call, before=%+v after=%+v", before, after)
+	}
+	if after.InputPricePerMillion != 0 || after.OutputPricePerMillion != 0 || after.CachedPricePerMillion != 0 {
+		t.Fatalf("image generation model should not be converted to token pricing: %+v", after)
+	}
+	if !containsModality(after.OutputModalities, "image") {
+		t.Fatalf("image generation model should keep image output modality: %+v", after.OutputModalities)
+	}
+	if containsModality(after.OutputModalities, "text") {
+		t.Fatalf("image generation model should not inherit misleading text output modality: %+v", after.OutputModalities)
+	}
+	if cost := CalculateCost("gpt-image-2", 1_000_000, 1_000_000, 0); cost != before.PricePerCall {
+		t.Fatalf("expected CalculateCost to use per-call pricing %v, got %v", before.PricePerCall, cost)
+	}
+}
+
+func TestSyncOpenRouterModelsBackfillsImageGenerationDefaultCallPrice(t *testing.T) {
+	initModelConfigTestDB(t)
+
+	if err := UpsertModelConfig(ModelConfigRow{
+		ModelID:               "gpt-image-2",
+		OwnedBy:               "codex",
+		Description:           "Previously corrupted image model",
+		Enabled:               true,
+		PricingMode:           "token",
+		InputPricePerMillion:  5,
+		OutputPricePerMillion: 20,
+		PricePerCall:          0,
+		Source:                "seed",
+		InputModalities:       []string{"text"},
+		OutputModalities:      []string{"text"},
+	}); err != nil {
+		t.Fatalf("UpsertModelConfig() error = %v", err)
+	}
+
+	_, err := SyncOpenRouterModelList(context.Background(), []OpenRouterRemoteModel{
+		{
+			ID:          "openai/gpt-image-2",
+			Description: "Remote image model description",
+			Architecture: OpenRouterRemoteArchitecture{
+				InputModalities:  []string{"text"},
+				OutputModalities: []string{"text"},
+			},
+			Pricing: OpenRouterRemotePricing{
+				Prompt:     "0.000005",
+				Completion: "0.000020",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SyncOpenRouterModelList() error = %v", err)
+	}
+
+	model, ok := GetModelConfig("gpt-image-2")
+	if !ok {
+		t.Fatal("expected gpt-image-2 config")
+	}
+	if model.PricingMode != "call" || model.PricePerCall != 0.04 {
+		t.Fatalf("expected gpt-image-2 default call pricing to be backfilled, got %+v", model)
+	}
+	if model.InputPricePerMillion != 0 || model.OutputPricePerMillion != 0 {
+		t.Fatalf("expected token pricing to be cleared, got %+v", model)
+	}
+	if !containsModality(model.OutputModalities, "image") || containsModality(model.OutputModalities, "text") {
+		t.Fatalf("expected image-only output modality, got %+v", model.OutputModalities)
+	}
+}
+
+func TestSyncOpenRouterModelsUpdatesExistingClinePassWrapperFromCanonicalModel(t *testing.T) {
+	initModelConfigTestDB(t)
+
+	if err := UpsertModelConfig(ModelConfigRow{
+		ModelID:     "cline-pass/deepseek-v4-flash",
+		OwnedBy:     "cline",
+		Description: "",
+		Enabled:     true,
+		PricingMode: "token",
+		Source:      "seed",
+		InputModalities: []string{
+			"text",
+		},
+		OutputModalities: []string{
+			"text",
+		},
+	}); err != nil {
+		t.Fatalf("UpsertModelConfig() error = %v", err)
+	}
+
+	result, err := SyncOpenRouterModelList(context.Background(), []OpenRouterRemoteModel{
+		{
+			ID:          "deepseek/deepseek-v4-flash",
+			Description: "DeepSeek V4 Flash from OpenRouter",
+			Architecture: OpenRouterRemoteArchitecture{
+				Modality:         "text+image->text",
+				InputModalities:  []string{"text", "image"},
+				OutputModalities: []string{"text"},
+			},
+			Pricing: OpenRouterRemotePricing{
+				Prompt:         "0.0000003",
+				Completion:     "0.0000012",
+				InputCacheRead: "0.00000003",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SyncOpenRouterModelList() error = %v", err)
+	}
+	if result.Seen != 1 || result.Skipped != 0 {
+		t.Fatalf("unexpected sync result: %+v", result)
+	}
+
+	model, ok := GetModelConfig("cline-pass/deepseek-v4-flash")
+	if !ok {
+		t.Fatal("expected existing cline-pass wrapper to remain configured")
+	}
+	if model.OwnedBy != "cline" || model.Source != "seed" {
+		t.Fatalf("cline wrapper identity should be preserved: %+v", model)
+	}
+	if model.Description != "DeepSeek V4 Flash from OpenRouter" {
+		t.Fatalf("cline wrapper should inherit remote description, got %q", model.Description)
+	}
+	if model.InputPricePerMillion != 0.3 || model.OutputPricePerMillion != 1.2 || model.CachedPricePerMillion != 0.03 {
+		t.Fatalf("cline wrapper should inherit canonical pricing: %+v", model)
+	}
+	if strings.Join(model.InputModalities, ",") != "text,image" || strings.Join(model.OutputModalities, ",") != "text" {
+		t.Fatalf("cline wrapper should inherit canonical modalities: %+v -> %+v", model.InputModalities, model.OutputModalities)
 	}
 }
 
@@ -1022,5 +1220,107 @@ func TestUnionModalities(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func containsModality(modalities []string, expected string) bool {
+	for _, modality := range modalities {
+		if strings.EqualFold(strings.TrimSpace(modality), expected) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestOpenRouterModelSyncIsTenantScoped(t *testing.T) {
+	initModelConfigTestDB(t)
+
+	const tenantA = "00000000-0000-0000-0000-00000000000a"
+	const tenantB = "00000000-0000-0000-0000-00000000000b"
+	const modelID = "gpt-openrouter-tenant-isolation"
+	models := []OpenRouterRemoteModel{{
+		ID:           "openai/" + modelID,
+		Name:         "Tenant isolated model",
+		Architecture: OpenRouterRemoteArchitecture{Modality: "text->text"},
+		Pricing:      OpenRouterRemotePricing{Prompt: "0.000001", Completion: "0.000002"},
+	}}
+
+	if _, err := SyncOpenRouterModelListForTenant(context.Background(), tenantA, models); err != nil {
+		t.Fatalf("SyncOpenRouterModelListForTenant: %v", err)
+	}
+	if _, ok := GetModelConfigForTenant(tenantA, modelID); !ok {
+		t.Fatal("tenant A synced model missing")
+	}
+	if _, ok := GetModelConfigForTenant(tenantB, modelID); ok {
+		t.Fatal("tenant B can see tenant A synced model")
+	}
+
+	if _, err := UpdateOpenRouterModelSyncSettingsForTenant(tenantA, true, 120); err != nil {
+		t.Fatalf("UpdateOpenRouterModelSyncSettingsForTenant: %v", err)
+	}
+	if state := GetOpenRouterModelSyncStateForTenant(tenantA); !state.Enabled || state.IntervalMinutes != 120 {
+		t.Fatalf("tenant A state = %+v", state)
+	}
+	if state := GetOpenRouterModelSyncStateForTenant(tenantB); state.Enabled {
+		t.Fatalf("tenant B inherited tenant A state: %+v", state)
+	}
+}
+
+func TestSyncOpenRouterModelsFillsMissingMetadataOnExistingRows(t *testing.T) {
+	initModelConfigTestDB(t)
+
+	if err := UpsertModelConfig(ModelConfigRow{
+		ModelID:     "gpt-openrouter-meta",
+		OwnedBy:     "openai",
+		Description: "old",
+		Enabled:     true,
+		PricingMode: "token",
+		Source:      "openrouter",
+	}); err != nil {
+		t.Fatalf("UpsertModelConfig() error = %v", err)
+	}
+
+	_, err := SyncOpenRouterModelList(context.Background(), []OpenRouterRemoteModel{
+		{
+			ID:                  "openai/gpt-openrouter-meta",
+			Name:                "OpenAI: Meta Model",
+			Description:         "fresh description",
+			ContextLength:       128000,
+			KnowledgeCutoff:     "2024-10-01",
+			SupportedParameters: []string{"tools", "temperature"},
+			Architecture: OpenRouterRemoteArchitecture{
+				InputModalities:  []string{"text"},
+				OutputModalities: []string{"text"},
+			},
+			Pricing: OpenRouterRemotePricing{
+				Prompt:     "0.000001",
+				Completion: "0.000002",
+			},
+			TopProvider: OpenRouterRemoteTopProvider{MaxCompletionTokens: 8192},
+			Reasoning: &OpenRouterRemoteReasoning{
+				SupportedEfforts: []string{"low", "high"},
+				DefaultEffort:    "low",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("SyncOpenRouterModelList() error = %v", err)
+	}
+
+	model, ok := GetModelConfig("gpt-openrouter-meta")
+	if !ok {
+		t.Fatal("expected model")
+	}
+	if model.DisplayName != "Meta Model" || model.ContextLength != 128000 || model.MaxCompletionTokens != 8192 {
+		t.Fatalf("metadata not filled: %+v", model)
+	}
+	if strings.Join(model.SupportedParameters, ",") != "tools,temperature" {
+		t.Fatalf("parameters not filled: %+v", model.SupportedParameters)
+	}
+	if model.KnowledgeCutoff != "2024-10-01" || model.Reasoning == "" {
+		t.Fatalf("cutoff/reasoning not filled: %+v", model)
+	}
+	if model.Description != "fresh description" {
+		t.Fatalf("description not refreshed for openrouter source: %q", model.Description)
 	}
 }

@@ -2,10 +2,16 @@ name: Build & Push Docker Image
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
+    tags:
+      - 'v*'
   schedule:
     - cron: '17 3 * * *'
   workflow_dispatch:
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 env:
   REGISTRY: ghcr.io
@@ -38,8 +44,8 @@ jobs:
             exit 1
           fi
           FRONTEND_SHORT="${FRONTEND_COMMIT:0:7}"
-          echo "VERSION=${REF_NAME}-${BACKEND_SHORT}" >> "$GITHUB_ENV"
-          echo "UI_VERSION=panel-${FRONTEND_REF}-${FRONTEND_SHORT}" >> "$GITHUB_ENV"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "UI_VERSION=panel-${UI_VERSION_REF}-${FRONTEND_SHORT}" >> "$GITHUB_ENV"
           echo "FRONTEND_REF=${FRONTEND_REF}" >> "$GITHUB_ENV"
           echo "FRONTEND_COMMIT=${FRONTEND_COMMIT}" >> "$GITHUB_ENV"
           echo "backend_short=${BACKEND_SHORT}" >> "$GITHUB_OUTPUT"
@@ -65,9 +71,10 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest,enable=${{ github.ref_name == 'main' }}
+            type=raw,value=latest,enable=${{ github.ref_name == 'main' || github.ref_type == 'tag' }}
             type=raw,value=main,enable=${{ github.ref_name == 'main' }}
             type=raw,value=dev,enable=${{ github.ref_name == 'dev' }}
+            type=ref,event=tag
             type=raw,value=${{ github.ref_name }}-${{ steps.build_meta.outputs.backend_short }}
             type=sha,prefix=
             type=raw,value={{date 'YYYYMMDD'}}

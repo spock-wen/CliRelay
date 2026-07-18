@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"git stash push -m \\\"temp: Dockerfile local build changes\\\" -- Dockerfile && git merge origin/main --no-edit 2>&1\",\"timeout\":60000,\"description\":\"Stash Dockerfile changes and merge origin/m...",
+  "error": "Exit code 1\n保存工作目录和索引状态 On internal_main: temp: Dockerfile local build changes\n冲突（修改/删除）：.github/workflows/docker-image.yml 在 origin/main 中被删除，在 HEAD 中被修改。.github/workflows/docker-image.yml 的 HEAD 版本在树中被保留。\n自动合并 .github/workflows/docker-publish.yml\n冲突（内容）：合并冲突于 .github/workflows/docker-publish.yml\n自动合并 Dockerfile\n自动合并 README.md\n冲突（内容）：合并冲突于 README.md\n自动合并 README_CN.md\n冲突（内容）：合并冲突于 README_CN.md\n自动合并 cmd/updater/main_test.go\n自动合并 config.example.yaml\n自动合并 docker-compose.yml\n自动合并 install.sh\n自动合并 int...",
+  "timestamp": "2026-07-18T09:02:40.603Z",
+  "retry_count": 3
+}

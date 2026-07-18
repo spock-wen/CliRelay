@@ -5,12 +5,13 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // ConfigSynthesizer generates Auth entries from configuration API keys.
-// It handles Gemini, Claude, Bedrock, Codex, OpenCode Go, OpenAI-compat, and Vertex-compat providers.
+// It handles Gemini, Claude, Bedrock, Codex, OpenCode Go, Cline, Ollama Cloud, OpenAI-compat, and Vertex-compat providers.
 type ConfigSynthesizer struct{}
 
 // NewConfigSynthesizer creates a new ConfigSynthesizer instance.
@@ -35,6 +36,10 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeCodexKeys(ctx)...)
 	// OpenCode Go API Keys
 	out = append(out, s.synthesizeOpenCodeGoKeys(ctx)...)
+	// Cline API Keys
+	out = append(out, s.synthesizeClineKeys(ctx)...)
+	// Ollama Cloud API Keys
+	out = append(out, s.synthesizeOllamaCloudKeys(ctx)...)
 	// OpenAI-compat
 	out = append(out, s.synthesizeOpenAICompat(ctx)...)
 	// Vertex-compat
@@ -328,6 +333,9 @@ func (s *ConfigSynthesizer) synthesizeOpenCodeGoKeys(ctx *SynthesisContext) []*c
 		if entry.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(entry.Priority)
 		}
+		if hash := diff.ComputeOpenCodeGoModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
 		if visionFallbackModel := strings.TrimSpace(entry.VisionFallbackModel); visionFallbackModel != "" {
 			attrs["vision_fallback_model"] = visionFallbackModel
 		}
@@ -349,7 +357,131 @@ func (s *ConfigSynthesizer) synthesizeOpenCodeGoKeys(ctx *SynthesisContext) []*c
 			UpdatedAt:  now,
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
-		ApplyDisableAllModelsState(a, entry.ExcludedModels)
+		ApplyConfigDisabledState(a, entry.Disabled)
+		out = append(out, a)
+	}
+	return out
+}
+
+// synthesizeClineKeys creates Auth entries for ClinePass API keys.
+func (s *ConfigSynthesizer) synthesizeClineKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.ClineKey))
+	for i := range cfg.ClineKey {
+		entry := cfg.ClineKey[i]
+		key := strings.TrimSpace(entry.APIKey)
+		if key == "" {
+			continue
+		}
+		prefix := strings.TrimSpace(entry.Prefix)
+		base := strings.TrimSpace(entry.BaseURL)
+		if base == "" {
+			base = config.DefaultClineBaseURL
+		}
+		base = strings.TrimSuffix(base, "/")
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		proxyID := strings.TrimSpace(entry.ProxyID)
+		id, token := idGen.Next("cline:apikey", key, base, proxyURL)
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:cline[%s]", token),
+			"api_key":      key,
+			"base_url":     base,
+			"compat_name":  "ClinePass",
+			"provider_key": "cline",
+		}
+		if entry.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+		if hash := diff.ComputeClineModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		if visionFallbackModel := strings.TrimSpace(entry.VisionFallbackModel); visionFallbackModel != "" {
+			attrs["vision_fallback_model"] = visionFallbackModel
+		}
+		addConfigHeadersToAttrs(entry.Headers, attrs)
+		label := strings.TrimSpace(entry.Name)
+		if label == "" {
+			label = "cline-apikey"
+		}
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   "cline",
+			Label:      label,
+			Prefix:     prefix,
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			ProxyID:    proxyID,
+			Attributes: attrs,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
+		ApplyConfigDisabledState(a, entry.Disabled)
+		out = append(out, a)
+	}
+	return out
+}
+
+// synthesizeOllamaCloudKeys creates Auth entries for Ollama Cloud API keys.
+func (s *ConfigSynthesizer) synthesizeOllamaCloudKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.OllamaCloudKey))
+	for i := range cfg.OllamaCloudKey {
+		entry := cfg.OllamaCloudKey[i]
+		key := strings.TrimSpace(entry.APIKey)
+		if key == "" {
+			continue
+		}
+		prefix := strings.TrimSpace(entry.Prefix)
+		base := strings.TrimSpace(entry.BaseURL)
+		if base == "" {
+			base = config.DefaultOllamaCloudBaseURL
+		}
+		base = strings.TrimSuffix(base, "/")
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		proxyID := strings.TrimSpace(entry.ProxyID)
+		id, token := idGen.Next("ollama-cloud:apikey", key, base, proxyURL)
+		attrs := map[string]string{
+			"source":       fmt.Sprintf("config:ollama-cloud[%s]", token),
+			"api_key":      key,
+			"base_url":     base,
+			"compat_name":  "Ollama Cloud",
+			"provider_key": "ollama-cloud",
+		}
+		if entry.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+		if hash := diff.ComputeOllamaCloudModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		if visionFallbackModel := strings.TrimSpace(entry.VisionFallbackModel); visionFallbackModel != "" {
+			attrs["vision_fallback_model"] = visionFallbackModel
+		}
+		addConfigHeadersToAttrs(entry.Headers, attrs)
+		label := strings.TrimSpace(entry.Name)
+		if label == "" {
+			label = "ollama-cloud-apikey"
+		}
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   "ollama-cloud",
+			Label:      label,
+			Prefix:     prefix,
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			ProxyID:    proxyID,
+			Attributes: attrs,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
+		ApplyConfigDisabledState(a, entry.Disabled)
 		out = append(out, a)
 	}
 	return out

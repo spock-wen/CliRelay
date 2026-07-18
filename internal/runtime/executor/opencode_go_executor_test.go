@@ -110,6 +110,51 @@ func TestOpenCodeGoExecutorUsesVisionFallbackForImageRequests(t *testing.T) {
 	}
 }
 
+func TestOpenCodeGoExecutorUsesVisionFallbackForResponsesFunctionCallOutputImage(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_tool_vision","object":"chat.completion","created":1,"model":"qwen3.5-plus","choices":[{"index":0,"message":{"role":"assistant","content":"tool vision ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`))
+	}))
+	defer server.Close()
+
+	oldBaseURL := opencodeGoBaseURL
+	opencodeGoBaseURL = server.URL + "/zen/go/v1"
+	t.Cleanup(func() { opencodeGoBaseURL = oldBaseURL })
+
+	exec := NewOpenCodeGoExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"api_key":               "test-key",
+			"vision_fallback_model": "qwen3.5-plus",
+		},
+	}
+	payload := []byte(`{"model":"deepseek-v4-flash","input":[{"role":"user","content":[{"type":"input_text","text":"inspect this screenshot"}]},{"type":"function_call","call_id":"call_1","name":"get_app_state","arguments":"{}"},{"type":"function_call_output","call_id":"call_1","output":[{"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}]}]}`)
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "deepseek-v4-flash",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Metadata: map[string]any{
+			cliproxyexecutor.SessionStickyMetadataKey: "header:x-session-id:opencode-session",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if gotModel := gjson.GetBytes(gotBody, "model").String(); gotModel != "qwen3.5-plus" {
+		t.Fatalf("upstream model = %q, want qwen3.5-plus; body=%s", gotModel, string(gotBody))
+	}
+	if gotModel := gjson.GetBytes(resp.Payload, "model").String(); gotModel != "deepseek-v4-flash" {
+		t.Fatalf("response model = %q, want deepseek-v4-flash; payload=%s", gotModel, string(resp.Payload))
+	}
+	if gotText := gjson.GetBytes(resp.Payload, "output.0.content.0.text").String(); gotText != "tool vision ok" {
+		t.Fatalf("response text = %q, want tool vision ok; payload=%s", gotText, string(resp.Payload))
+	}
+}
+
 func TestOpenCodeGoExecutorUsesConfiguredNonQwenVisionFallback(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -162,7 +207,7 @@ func TestOpenCodeGoExecutorUsesConfiguredNonQwenVisionFallback(t *testing.T) {
 	}
 }
 
-func TestOpenCodeGoExecutorIgnoresConfiguredTextOnlyFallbackModel(t *testing.T) {
+func TestOpenCodeGoExecutorAppliesConfiguredFallbackModel(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -173,7 +218,8 @@ func TestOpenCodeGoExecutorIgnoresConfiguredTextOnlyFallbackModel(t *testing.T) 
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"a description"}}]}`))
 			return
 		}
-		// Actual execution call — text-only model, stays on original model
+		// Actual execution call uses the configured fallback model. Cross-provider
+		// aliases are allowed here; the router resolves them later for the selected auth.
 		gotBody = body
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"chatcmpl_text_only_fallback","object":"chat.completion","created":1,"model":"deepseek-v4-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
@@ -199,8 +245,8 @@ func TestOpenCodeGoExecutorIgnoresConfiguredTextOnlyFallbackModel(t *testing.T) 
 		t.Fatalf("Execute returned error: %v", err)
 	}
 
-	if gotModel := gjson.GetBytes(gotBody, "model").String(); gotModel != "deepseek-v4-flash" {
-		t.Fatalf("upstream model = %q, want deepseek-v4-flash; body=%s", gotModel, string(gotBody))
+	if gotModel := gjson.GetBytes(gotBody, "model").String(); gotModel != "deepseek-v4-pro" {
+		t.Fatalf("upstream model = %q, want deepseek-v4-pro; body=%s", gotModel, string(gotBody))
 	}
 }
 
@@ -464,6 +510,92 @@ func TestOpenCodeGoExecutorRoutesMiniMaxModelsToMessages(t *testing.T) {
 	}
 }
 
+func TestOpenCodeGoExecutorRoutesGLM52ClaudeToChatCompletionsWithCacheControl(t *testing.T) {
+	var gotPath, gotAuth string
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_glm","object":"chat.completion","created":1,"model":"glm-5.2","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":101,"completion_tokens":2,"total_tokens":103,"prompt_tokens_details":{"cached_tokens":10}}}`))
+	}))
+	defer server.Close()
+
+	oldBaseURL := opencodeGoBaseURL
+	opencodeGoBaseURL = server.URL + "/zen/go/v1"
+	t.Cleanup(func() { opencodeGoBaseURL = oldBaseURL })
+
+	exec := NewOpenCodeGoExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key"}}
+	payload := []byte(`{"model":"glm-5.2","max_tokens":32,"system":[{"type":"text","text":"system prompt","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":[{"type":"text","text":"cached context","cache_control":{"type":"ephemeral"}},{"type":"text","text":"hi"}]}]}`)
+	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "glm-5.2",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if gotPath != "/zen/go/v1/chat/completions" {
+		t.Fatalf("path = %q, want /zen/go/v1/chat/completions", gotPath)
+	}
+	if gotAuth != "Bearer test-key" {
+		t.Fatalf("Authorization = %q, want bearer key", gotAuth)
+	}
+	if gotModel := gjson.GetBytes(gotBody, "model").String(); gotModel != "glm-5.2" {
+		t.Fatalf("upstream model = %q, want glm-5.2; body=%s", gotModel, string(gotBody))
+	}
+	if count := strings.Count(string(gotBody), `"cache_control"`); count != 2 {
+		t.Fatalf("cache_control count = %d, want 2; body=%s", count, string(gotBody))
+	}
+	if count := strings.Count(string(gotBody), `"ephemeral"`); count != 2 {
+		t.Fatalf("ephemeral count = %d, want 2; body=%s", count, string(gotBody))
+	}
+	if gotText := gjson.GetBytes(resp.Payload, "content.0.text").String(); gotText != "ok" {
+		t.Fatalf("response text = %q, want ok; payload=%s", gotText, string(resp.Payload))
+	}
+}
+
+func TestOpenCodeGoExecutorPreservesGLM52ToolResultCacheControl(t *testing.T) {
+	var gotBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_glm","object":"chat.completion","created":1,"model":"glm-5.2","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":101,"completion_tokens":2,"total_tokens":103,"prompt_tokens_details":{"cached_tokens":10}}}`))
+	}))
+	defer server.Close()
+
+	oldBaseURL := opencodeGoBaseURL
+	opencodeGoBaseURL = server.URL + "/zen/go/v1"
+	t.Cleanup(func() { opencodeGoBaseURL = oldBaseURL })
+
+	exec := NewOpenCodeGoExecutor(&config.Config{})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "test-key"}}
+	payload := []byte(`{"model":"glm-5.2","max_tokens":32,"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"call_1","name":"Read","input":{"file_path":"README.md"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"file contents","cache_control":{"type":"ephemeral"}}]}]}`)
+	_, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "glm-5.2",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude})
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	messages := gjson.GetBytes(gotBody, "messages").Array()
+	if len(messages) != 2 {
+		t.Fatalf("messages len = %d, want 2; body=%s", len(messages), gotBody)
+	}
+	if got := messages[1].Get("role").String(); got != "tool" {
+		t.Fatalf("messages[1].role = %q, want tool; body=%s", got, gotBody)
+	}
+	if got := messages[1].Get("content.0.text").String(); got != "file contents" {
+		t.Fatalf("tool content text = %q, want file contents; body=%s", got, gotBody)
+	}
+	if got := messages[1].Get("content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("tool cache_control = %q, want ephemeral; body=%s", got, gotBody)
+	}
+}
+
 func TestOpenCodeGoExecutorSupportsResponsesAPIForOpenAIModels(t *testing.T) {
 	var gotPath string
 	var gotBody []byte
@@ -485,7 +617,12 @@ func TestOpenCodeGoExecutorSupportsResponsesAPIForOpenAIModels(t *testing.T) {
 	resp, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
 		Model:   "deepseek-v4-flash",
 		Payload: payload,
-	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse})
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAIResponse,
+		Metadata: map[string]any{
+			cliproxyexecutor.SessionStickyMetadataKey: "header:x-session-id:opencode-session",
+		},
+	})
 	if err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
@@ -495,6 +632,9 @@ func TestOpenCodeGoExecutorSupportsResponsesAPIForOpenAIModels(t *testing.T) {
 	}
 	if !gjson.GetBytes(gotBody, "messages").Exists() || gjson.GetBytes(gotBody, "input").Exists() {
 		t.Fatalf("expected upstream chat-completions body, got %s", string(gotBody))
+	}
+	if got := gjson.GetBytes(gotBody, "prompt_cache_key").String(); got == "" || strings.Contains(got, "opencode-session") {
+		t.Fatalf("prompt_cache_key = %q, want scoped non-empty key; body=%s", got, gotBody)
 	}
 	if gotObject := gjson.GetBytes(resp.Payload, "object").String(); gotObject != "response" {
 		t.Fatalf("response object = %q, want response; payload=%s", gotObject, string(resp.Payload))

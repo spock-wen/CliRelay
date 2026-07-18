@@ -696,7 +696,7 @@ func GetAIStudioModels() []*ModelInfo {
 
 // GetOpenAIModels returns the standard OpenAI model definitions
 func GetOpenAIModels() []*ModelInfo {
-	return []*ModelInfo{
+	return append([]*ModelInfo{
 		{
 			ID:                  "gpt-5",
 			Object:              "model",
@@ -916,6 +916,124 @@ func GetOpenAIModels() []*ModelInfo {
 			DisplayName:         "GPT Image 2",
 			Description:         "Text-to-image generation model.",
 			SupportedParameters: []string{"prompt", "size", "n", "response_format"},
+		},
+	}, getGPT56ModelDefinitions()...)
+}
+
+func GetXAIModels() []*ModelInfo {
+	return []*ModelInfo{
+		{
+			ID:                  "grok-build-0.1",
+			Object:              "model",
+			Created:             1779321600,
+			OwnedBy:             "xai",
+			Type:                "xai",
+			DisplayName:         "Grok Build 0.1",
+			Name:                "grok-build-0.1",
+			Description:         "Grok Build 0.1 is xAI's fast coding model trained specifically for agentic software engineering workflows.",
+			ContextLength:       256000,
+			MaxCompletionTokens: 256000,
+		},
+		{
+			ID:                  "grok-4.5",
+			Object:              "model",
+			Created:             1783526400,
+			OwnedBy:             "xai",
+			Type:                "xai",
+			DisplayName:         "Grok 4.5",
+			Name:                "grok-4.5",
+			Description:         "SpaceXAI's intelligent coding model for agentic software, engineering, and workflow tasks.",
+			ContextLength:       500000,
+			MaxCompletionTokens: 65536,
+			Thinking:            &ThinkingSupport{ZeroAllowed: true, Levels: []string{"low", "medium", "high"}},
+		},
+		{
+			ID:                  "grok-4.3",
+			Object:              "model",
+			Created:             1775606400,
+			OwnedBy:             "xai",
+			Type:                "xai",
+			DisplayName:         "Grok 4.3",
+			Name:                "grok-4.3",
+			Description:         "xAI Grok 4.3 model for the Responses API.",
+			ContextLength:       1000000,
+			MaxCompletionTokens: 65536,
+			Thinking:            &ThinkingSupport{ZeroAllowed: true, Levels: []string{"none", "low", "medium", "high"}},
+		},
+		{
+			ID:                  "grok-4.20-0309-reasoning",
+			Object:              "model",
+			Created:             1773014400,
+			OwnedBy:             "xai",
+			Type:                "xai",
+			DisplayName:         "Grok 4.20 0309 Reasoning",
+			Name:                "grok-4.20-0309-reasoning",
+			Description:         "xAI Grok 4.20 0309 reasoning model for the Responses API.",
+			ContextLength:       2000000,
+			MaxCompletionTokens: 65536,
+		},
+		{
+			ID:                  "grok-4.20-0309-non-reasoning",
+			Object:              "model",
+			Created:             1773014400,
+			OwnedBy:             "xai",
+			Type:                "xai",
+			DisplayName:         "Grok 4.20 0309 Non Reasoning",
+			Name:                "grok-4.20-0309-non-reasoning",
+			Description:         "xAI Grok 4.20 0309 non-reasoning model for the Responses API.",
+			ContextLength:       2000000,
+			MaxCompletionTokens: 65536,
+		},
+		{
+			ID:                  "grok-4.20-multi-agent-0309",
+			Object:              "model",
+			Created:             1773014400,
+			OwnedBy:             "xai",
+			Type:                "xai",
+			DisplayName:         "Grok 4.20 Multi Agent 0309",
+			Name:                "grok-4.20-multi-agent-0309",
+			Description:         "xAI Grok 4.20 multi-agent model for the Responses API.",
+			ContextLength:       2000000,
+			MaxCompletionTokens: 65536,
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		},
+		{
+			ID:                  "grok-3-mini",
+			Object:              "model",
+			Created:             1740960000,
+			OwnedBy:             "xai",
+			Type:                "xai",
+			DisplayName:         "Grok 3 Mini",
+			Name:                "grok-3-mini",
+			Description:         "xAI Grok 3 Mini model for the Responses API.",
+			ContextLength:       131072,
+			MaxCompletionTokens: 32768,
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		},
+		{
+			ID:                  "grok-3-mini-fast",
+			Object:              "model",
+			Created:             1740960000,
+			OwnedBy:             "xai",
+			Type:                "xai",
+			DisplayName:         "Grok 3 Mini Fast",
+			Name:                "grok-3-mini-fast",
+			Description:         "xAI Grok 3 Mini Fast model for the Responses API.",
+			ContextLength:       131072,
+			MaxCompletionTokens: 32768,
+			Thinking:            &ThinkingSupport{Levels: []string{"low", "medium", "high"}},
+		},
+		{
+			ID:                  "grok-composer-2.5-fast",
+			Object:              "model",
+			Created:             1740960000,
+			OwnedBy:             "xai",
+			Type:                "xai",
+			DisplayName:         "Composer 2.5 Fast",
+			Name:                "grok-composer-2.5-fast",
+			Description:         "xAI Composer 2.5 Fast model for the Responses API.",
+			ContextLength:       200000,
+			MaxCompletionTokens: 32768,
 		},
 	}
 }
@@ -1154,4 +1272,50 @@ func GetOpenCodeGoModels() []*ModelInfo {
 		})
 	}
 	return models
+}
+
+// GetClineModels returns the ClinePass model definitions documented by Cline.
+func GetClineModels() []*ModelInfo {
+	definitions := []struct {
+		id          string
+		displayName string
+	}{
+		{"cline-pass/glm-5.2", "GLM 5.2"},
+		{"cline-pass/kimi-k2.7-code", "Kimi K2.7 Code"},
+		{"cline-pass/kimi-k2.6", "Kimi K2.6"},
+		{"cline-pass/deepseek-v4-pro", "DeepSeek V4 Pro"},
+		{"cline-pass/deepseek-v4-flash", "DeepSeek V4 Flash"},
+		{"cline-pass/mimo-v2.5", "MiMo V2.5"},
+		{"cline-pass/mimo-v2.5-pro", "MiMo V2.5 Pro"},
+		{"cline-pass/minimax-m3", "MiniMax M3"},
+		{"cline-pass/qwen3.7-max", "Qwen3.7 Max"},
+		{"cline-pass/qwen3.7-plus", "Qwen3.7 Plus"},
+	}
+
+	models := make([]*ModelInfo, 0, len(definitions))
+	for _, definition := range definitions {
+		models = append(models, &ModelInfo{
+			ID:          definition.id,
+			Object:      "model",
+			Created:     1781751220,
+			OwnedBy:     "cline",
+			Type:        "cline",
+			DisplayName: definition.displayName,
+		})
+	}
+	return models
+}
+
+// GetOllamaCloudModels returns Ollama Cloud model definitions documented by Ollama.
+func GetOllamaCloudModels() []*ModelInfo {
+	return []*ModelInfo{
+		{
+			ID:          "gpt-oss:120b",
+			Object:      "model",
+			Created:     1781751220,
+			OwnedBy:     "ollama",
+			Type:        "ollama-cloud",
+			DisplayName: "GPT OSS 120B",
+		},
+	}
 }

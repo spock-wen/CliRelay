@@ -32,6 +32,23 @@ func TestLoadConfigDefaultsDisableControlPanel(t *testing.T) {
 	}
 }
 
+func TestLoadConfigDefaultsRequestLogBodyStorageDisabled(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8317\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.RequestLogStorage.StoreContent {
+		t.Fatal("RequestLogStorage.StoreContent = true, want false by default")
+	}
+}
+
 func TestLoadConfigReadsMainAPIReadTimeoutOverride(t *testing.T) {
 	t.Parallel()
 
@@ -194,6 +211,55 @@ func TestLoadConfigAllowsAuthPathEnvOverride(t *testing.T) {
 	}
 }
 
+func TestLoadConfigAllowsPortEnvOverride(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8318\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv(EnvPort, "8319")
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+
+	if cfg.Port != 8319 {
+		t.Fatalf("Port = %d, want CLIRELAY_PORT override", cfg.Port)
+	}
+}
+
+func TestLoadConfigAllowsDataStackEnvOverrides(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(`
+postgres:
+  dsn: postgres://old/cliproxy
+redis:
+  enable: false
+  addr: 127.0.0.1:6379
+  password: old
+  db: 0
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Setenv(EnvPostgresDSN, "postgres://cliproxy:cliproxy@postgres:5432/cliproxy?sslmode=disable")
+	t.Setenv(EnvRedisEnable, "true")
+	t.Setenv(EnvRedisAddr, "redis:6379")
+	t.Setenv(EnvRedisPassword, "secret")
+	t.Setenv(EnvRedisDB, "2")
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+
+	if cfg.Postgres.DSN != "postgres://cliproxy:cliproxy@postgres:5432/cliproxy?sslmode=disable" {
+		t.Fatalf("Postgres.DSN = %q", cfg.Postgres.DSN)
+	}
+	if !cfg.Redis.Enable || cfg.Redis.Addr != "redis:6379" || cfg.Redis.Password != "secret" || cfg.Redis.DB != 2 {
+		t.Fatalf("Redis override = %+v", cfg.Redis)
+	}
+}
+
 func TestLoadConfigDefaultsAutoUpdateEnabled(t *testing.T) {
 	t.Parallel()
 
@@ -221,6 +287,12 @@ func TestLoadConfigDefaultsAutoUpdateEnabled(t *testing.T) {
 	}
 	if cfg.AutoUpdate.UpdaterURL != DefaultAutoUpdateUpdaterURL {
 		t.Fatalf("AutoUpdate.UpdaterURL = %q, want %q", cfg.AutoUpdate.UpdaterURL, DefaultAutoUpdateUpdaterURL)
+	}
+	if !cfg.IdentityFingerprint.Codex.Enabled ||
+		!cfg.IdentityFingerprint.Claude.Enabled ||
+		!cfg.IdentityFingerprint.Gemini.Enabled ||
+		!cfg.IdentityFingerprint.XAI.Enabled {
+		t.Fatalf("IdentityFingerprint = %#v, want all providers enabled by default", cfg.IdentityFingerprint)
 	}
 }
 
@@ -259,6 +331,34 @@ auto-update:
 	}
 	if cfg.AutoUpdate.UpdaterURL != "http://updater.local:8320" {
 		t.Fatalf("AutoUpdate.UpdaterURL = %q, want http://updater.local:8320", cfg.AutoUpdate.UpdaterURL)
+	}
+}
+
+func TestLoadConfigIdentityFingerprintDefaultsAndExplicitDisabled(t *testing.T) {
+	t.Parallel()
+
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	content := []byte(`port: 8317
+identity-fingerprint:
+  xai:
+    enabled: false
+`)
+	if err := os.WriteFile(configPath, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+
+	if !cfg.IdentityFingerprint.Codex.Enabled ||
+		!cfg.IdentityFingerprint.Claude.Enabled ||
+		!cfg.IdentityFingerprint.Gemini.Enabled {
+		t.Fatalf("IdentityFingerprint = %#v, want omitted providers enabled by default", cfg.IdentityFingerprint)
+	}
+	if cfg.IdentityFingerprint.XAI.Enabled {
+		t.Fatalf("XAI.Enabled = true, want explicit false from config")
 	}
 }
 

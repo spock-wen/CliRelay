@@ -15,11 +15,14 @@ const (
 	RuntimeSettingClaudeKeys           = runtimeconfig.RuntimeSettingClaudeKeys
 	RuntimeSettingBedrockKeys          = runtimeconfig.RuntimeSettingBedrockKeys
 	RuntimeSettingOpenCodeGoKeys       = runtimeconfig.RuntimeSettingOpenCodeGoKeys
+	RuntimeSettingClineKeys            = runtimeconfig.RuntimeSettingClineKeys
+	RuntimeSettingOllamaCloudKeys      = runtimeconfig.RuntimeSettingOllamaCloudKeys
 	RuntimeSettingOpenAICompatibility  = runtimeconfig.RuntimeSettingOpenAICompatibility
 	RuntimeSettingVertexCompatKeys     = runtimeconfig.RuntimeSettingVertexCompatKeys
 	RuntimeSettingClaudeHeaderDefaults = runtimeconfig.RuntimeSettingClaudeHeaderDefaults
 	RuntimeSettingKimiHeaderDefaults   = runtimeconfig.RuntimeSettingKimiHeaderDefaults
 	RuntimeSettingIdentityFingerprint  = runtimeconfig.RuntimeSettingIdentityFingerprint
+	RuntimeSettingCodexOAuthAdmission  = runtimeconfig.RuntimeSettingCodexOAuthAdmission
 	RuntimeSettingOAuthExcludedModels  = runtimeconfig.RuntimeSettingOAuthExcludedModels
 	RuntimeSettingOAuthModelAlias      = runtimeconfig.RuntimeSettingOAuthModelAlias
 	RuntimeSettingPayload              = runtimeconfig.RuntimeSettingPayload
@@ -55,7 +58,11 @@ func GetRuntimeSettingPayload(key string) (json.RawMessage, bool) {
 }
 
 func LoadImageSizePresetsSetting() []string {
-	payload, ok := GetRuntimeSettingPayload(RuntimeSettingImageSizePresets)
+	return LoadImageSizePresetsSettingForTenant("")
+}
+
+func LoadImageSizePresetsSettingForTenant(tenantID string) []string {
+	payload, ok := usage.GetRuntimeSettingPayloadForTenant(tenantID, RuntimeSettingImageSizePresets)
 	if !ok {
 		return nil
 	}
@@ -71,7 +78,11 @@ func LoadImageSizePresetsSetting() []string {
 }
 
 func StoreImageSizePresetsSetting(sizes []string) error {
-	return UpsertRuntimeSetting(RuntimeSettingImageSizePresets, ImageSizePresetsSetting{
+	return StoreImageSizePresetsSettingForTenant("", sizes)
+}
+
+func StoreImageSizePresetsSettingForTenant(tenantID string, sizes []string) error {
+	return usage.UpsertRuntimeSettingForTenant(tenantID, RuntimeSettingImageSizePresets, ImageSizePresetsSetting{
 		Sizes: append([]string(nil), sizes...),
 	})
 }

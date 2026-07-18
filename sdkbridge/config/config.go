@@ -30,6 +30,10 @@ type BedrockKey = internalconfig.BedrockKey
 type BedrockModel = internalconfig.BedrockModel
 type OpenCodeGoKey = internalconfig.OpenCodeGoKey
 type OpenCodeGoModel = internalconfig.OpenCodeGoModel
+type ClineKey = internalconfig.ClineKey
+type ClineModel = internalconfig.ClineModel
+type OllamaCloudKey = internalconfig.OllamaCloudKey
+type OllamaCloudModel = internalconfig.OllamaCloudModel
 type VertexCompatKey = internalconfig.VertexCompatKey
 type VertexCompatModel = internalconfig.VertexCompatModel
 type OpenAICompatibility = internalconfig.OpenAICompatibility
@@ -41,6 +45,8 @@ type TLS = internalconfig.TLSConfig
 const (
 	DefaultPanelGitHubRepository = internalconfig.DefaultPanelGitHubRepository
 	DefaultBedrockRegion         = internalconfig.DefaultBedrockRegion
+	DefaultClineBaseURL          = internalconfig.DefaultClineBaseURL
+	DefaultOllamaCloudBaseURL    = internalconfig.DefaultOllamaCloudBaseURL
 	DefaultPprofAddr             = internalconfig.DefaultPprofAddr
 )
 

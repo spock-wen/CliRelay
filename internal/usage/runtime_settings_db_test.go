@@ -25,6 +25,9 @@ identity-fingerprint:
     enabled: true
     cli-version: 2.1.88
     entrypoint: cli
+codex-oauth-admission:
+  allowed-clients:
+    - claude_code
 oauth-model-alias:
   antigravity:
     - name: rev19-uic3-1p
@@ -47,15 +50,17 @@ debug: true
 		OAuthModelAlias: map[string][]config.OAuthModelAlias{
 			"antigravity": {{Name: "rev19-uic3-1p", Alias: "gemini-2.5-computer-use-preview-10-2025"}},
 		},
+		CodexOAuthAdmission: config.CodexOAuthAdmissionConfig{AllowedClientPresets: []string{"claude_code"}},
 	}
 
-	if migrated := MigrateRuntimeSettingsFromConfig(cfg, configPath); migrated != 3 {
-		t.Fatalf("MigrateRuntimeSettingsFromConfig = %d, want 3", migrated)
+	if migrated := MigrateRuntimeSettingsFromConfig(cfg, configPath); migrated != 4 {
+		t.Fatalf("MigrateRuntimeSettingsFromConfig = %d, want 4", migrated)
 	}
 
 	cfg.KimiHeaderDefaults = config.KimiHeaderDefaults{}
 	cfg.IdentityFingerprint = config.IdentityFingerprintConfig{}
 	cfg.OAuthModelAlias = nil
+	cfg.CodexOAuthAdmission = config.CodexOAuthAdmissionConfig{}
 	if !ApplyStoredRuntimeSettings(cfg) {
 		t.Fatal("ApplyStoredRuntimeSettings returned false")
 	}
@@ -65,18 +70,23 @@ debug: true
 	if !cfg.IdentityFingerprint.Codex.Enabled || cfg.IdentityFingerprint.Codex.UserAgent != "codex_cli_rs/0.125.0" {
 		t.Fatalf("IdentityFingerprint.Codex = %#v", cfg.IdentityFingerprint.Codex)
 	}
-	if !cfg.IdentityFingerprint.Claude.Enabled || cfg.IdentityFingerprint.Claude.UserAgent != "claude-cli/2.1.88 (external, cli)" {
+	if !cfg.IdentityFingerprint.Claude.Enabled || cfg.IdentityFingerprint.Claude.UserAgent != "" ||
+		cfg.IdentityFingerprint.Claude.CLIVersion != "2.1.88" ||
+		cfg.IdentityFingerprint.Claude.Entrypoint != "cli" {
 		t.Fatalf("IdentityFingerprint.Claude = %#v", cfg.IdentityFingerprint.Claude)
 	}
 	if got := cfg.OAuthModelAlias["antigravity"]; len(got) != 1 || got[0].Alias != "gemini-2.5-computer-use-preview-10-2025" {
 		t.Fatalf("OAuthModelAlias = %#v", cfg.OAuthModelAlias)
+	}
+	if got := cfg.CodexOAuthAdmission.AllowedClientPresets; len(got) != 1 || got[0] != "claude_code" {
+		t.Fatalf("CodexOAuthAdmission = %#v, want [claude_code]", cfg.CodexOAuthAdmission)
 	}
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("read config: %v", err)
 	}
-	for _, forbidden := range []string{"kimi-header-defaults:", "identity-fingerprint:", "oauth-model-alias:"} {
+	for _, forbidden := range []string{"kimi-header-defaults:", "identity-fingerprint:", "codex-oauth-admission:", "oauth-model-alias:"} {
 		if strings.Contains(string(data), forbidden) {
 			t.Fatalf("%s should be removed from YAML after migration:\n%s", forbidden, string(data))
 		}
@@ -100,6 +110,23 @@ claude-api-key:
   - api-key: sk-claude-test
     name: claude-primary
     base-url: https://claude.example.com
+opencode-go-api-key:
+  - api-key: sk-opencode-test
+    models:
+      - name: deepseek-v4-flash
+        alias: deepseek-v4-flash
+cline-api-key:
+  - api-key: sk-cline-test
+    name: cline-primary
+    base-url: https://api.cline.bot/api/v1
+    models:
+      - name: cline-pass/qwen3.7-max
+        alias: qwen3.7-max
+ollama-cloud-api-key:
+  - api-key: sk-ollama-test
+    base-url: https://ollama.com
+    models:
+      - name: gpt-oss:120b
 debug: true
 `
 	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
@@ -112,14 +139,26 @@ debug: true
 		ClaudeKey: []config.ClaudeKey{
 			{APIKey: "sk-claude-test", Name: "claude-primary", BaseURL: "https://claude.example.com"},
 		},
+		OpenCodeGoKey: []config.OpenCodeGoKey{
+			{APIKey: "sk-opencode-test", Models: []config.OpenCodeGoModel{{Name: "deepseek-v4-flash", Alias: "deepseek-v4-flash"}}},
+		},
+		ClineKey: []config.ClineKey{
+			{APIKey: "sk-cline-test", Name: "cline-primary", BaseURL: "https://api.cline.bot/api/v1", Models: []config.ClineModel{{Name: "cline-pass/qwen3.7-max", Alias: "qwen3.7-max"}}},
+		},
+		OllamaCloudKey: []config.OllamaCloudKey{
+			{APIKey: "sk-ollama-test", BaseURL: "https://ollama.com", Models: []config.OllamaCloudModel{{Name: "gpt-oss:120b"}}},
+		},
 	}
 
-	if migrated := MigrateRuntimeSettingsFromConfig(cfg, configPath); migrated != 2 {
-		t.Fatalf("MigrateRuntimeSettingsFromConfig = %d, want 2", migrated)
+	if migrated := MigrateRuntimeSettingsFromConfig(cfg, configPath); migrated != 5 {
+		t.Fatalf("MigrateRuntimeSettingsFromConfig = %d, want 5", migrated)
 	}
 
 	cfg.CodexKey = nil
 	cfg.ClaudeKey = nil
+	cfg.OpenCodeGoKey = nil
+	cfg.ClineKey = nil
+	cfg.OllamaCloudKey = nil
 	if !ApplyStoredRuntimeSettings(cfg) {
 		t.Fatal("ApplyStoredRuntimeSettings returned false")
 	}
@@ -129,12 +168,21 @@ debug: true
 	if len(cfg.ClaudeKey) != 1 || cfg.ClaudeKey[0].APIKey != "sk-claude-test" || cfg.ClaudeKey[0].Name != "claude-primary" {
 		t.Fatalf("ClaudeKey after DB apply = %#v", cfg.ClaudeKey)
 	}
+	if len(cfg.OpenCodeGoKey) != 1 || cfg.OpenCodeGoKey[0].APIKey != "sk-opencode-test" || cfg.OpenCodeGoKey[0].Models[0].Name != "deepseek-v4-flash" {
+		t.Fatalf("OpenCodeGoKey after DB apply = %#v", cfg.OpenCodeGoKey)
+	}
+	if len(cfg.ClineKey) != 1 || cfg.ClineKey[0].APIKey != "sk-cline-test" || cfg.ClineKey[0].Models[0].Alias != "qwen3.7-max" {
+		t.Fatalf("ClineKey after DB apply = %#v", cfg.ClineKey)
+	}
+	if len(cfg.OllamaCloudKey) != 1 || cfg.OllamaCloudKey[0].APIKey != "sk-ollama-test" || cfg.OllamaCloudKey[0].Models[0].Name != "gpt-oss:120b" {
+		t.Fatalf("OllamaCloudKey after DB apply = %#v", cfg.OllamaCloudKey)
+	}
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatalf("read config: %v", err)
 	}
-	for _, forbidden := range []string{"codex-api-key:", "claude-api-key:"} {
+	for _, forbidden := range []string{"codex-api-key:", "claude-api-key:", "opencode-go-api-key:", "cline-api-key:", "ollama-cloud-api-key:"} {
 		if strings.Contains(string(data), forbidden) {
 			t.Fatalf("%s should be removed from YAML after migration:\n%s", forbidden, string(data))
 		}
@@ -177,5 +225,28 @@ func TestRuntimeSettingsSQLiteWinsOverStaleYAML(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "logging-to-file: true") {
 		t.Fatalf("ordinary config should remain in YAML:\n%s", string(data))
+	}
+}
+
+func TestBuildTenantRuntimeConfigDoesNotInheritSystemCredentials(t *testing.T) {
+	cleanup := setupConfigMigrationTestDB(t)
+	defer cleanup()
+
+	base := &config.Config{
+		GeminiKey: []config.GeminiKey{{APIKey: "system-gemini"}},
+		CodexKey:  []config.CodexKey{{APIKey: "system-codex"}},
+	}
+	const tenantID = "00000000-0000-0000-0000-00000000000a"
+	got := BuildTenantRuntimeConfig(base, tenantID)
+	if len(got.GeminiKey) != 0 || len(got.CodexKey) != 0 {
+		t.Fatalf("tenant inherited system credentials: gemini=%v codex=%v", got.GeminiKey, got.CodexKey)
+	}
+
+	if err := UpsertRuntimeSettingForTenant(tenantID, RuntimeSettingGeminiKeys, []config.GeminiKey{{APIKey: "tenant-gemini"}}); err != nil {
+		t.Fatalf("UpsertRuntimeSettingForTenant: %v", err)
+	}
+	got = BuildTenantRuntimeConfig(base, tenantID)
+	if len(got.GeminiKey) != 1 || got.GeminiKey[0].APIKey != "tenant-gemini" || len(got.CodexKey) != 0 {
+		t.Fatalf("tenant runtime config = %+v", got)
 	}
 }

@@ -1,0 +1,239 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1784365245843,
+  "projectRoot": "/ext/yan_peng/ypworkspace/CliRelay/CliRelay",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Go",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "go.mod"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "go",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "examples",
+      "scripts",
+      "test"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "auths": {
+      "path": "auths",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1784365245840,
+      "keyFiles": []
+    },
+    "cmd": {
+      "path": "cmd",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1784365245840,
+      "keyFiles": []
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 13,
+      "lastAccessed": 1784365245840,
+      "keyFiles": [
+        "database-backend-migration-design_CN.md",
+        "model-id-path-display-requirements_CN.md",
+        "model-path-display-test-plan_CN.md",
+        "reverse-proxy_CN.md",
+        "scheduler-quota-review_CN.md"
+      ]
+    },
+    "examples": {
+      "path": "examples",
+      "purpose": "Example code",
+      "fileCount": 0,
+      "lastAccessed": 1784365245840,
+      "keyFiles": []
+    },
+    "internal": {
+      "path": "internal",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1784365245841,
+      "keyFiles": []
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 3,
+      "lastAccessed": 1784365245841,
+      "keyFiles": [
+        "check-backend-structure.py",
+        "ensure-no-vendored-panel-assets.sh",
+        "issue_triage_agent.py"
+      ]
+    },
+    "sdk": {
+      "path": "sdk",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1784365245841,
+      "keyFiles": []
+    },
+    "sdkbridge": {
+      "path": "sdkbridge",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1784365245841,
+      "keyFiles": []
+    },
+    "test": {
+      "path": "test",
+      "purpose": "Test files",
+      "fileCount": 4,
+      "lastAccessed": 1784365245841,
+      "keyFiles": [
+        "amp_management_test.go",
+        "builtin_tools_translation_test.go",
+        "openai_claude_empty_tool_chain_test.go",
+        "thinking_conversion_test.go"
+      ]
+    },
+    "internal/api": {
+      "path": "internal/api",
+      "purpose": "API routes",
+      "fileCount": 30,
+      "lastAccessed": 1784365245842,
+      "keyFiles": [
+        "auth_middleware.go",
+        "auth_middleware_test.go",
+        "options.go"
+      ]
+    },
+    "internal/app": {
+      "path": "internal/app",
+      "purpose": "Application code",
+      "fileCount": 0,
+      "lastAccessed": 1784365245842,
+      "keyFiles": []
+    },
+    "internal/config": {
+      "path": "internal/config",
+      "purpose": "Configuration files",
+      "fileCount": 26,
+      "lastAccessed": 1784365245842,
+      "keyFiles": [
+        "bedrock.go",
+        "bedrock_test.go",
+        "config.go"
+      ]
+    },
+    "sdk/api": {
+      "path": "sdk/api",
+      "purpose": "API routes",
+      "fileCount": 2,
+      "lastAccessed": 1784365245843,
+      "keyFiles": [
+        "management.go",
+        "options.go"
+      ]
+    },
+    "sdk/config": {
+      "path": "sdk/config",
+      "purpose": "Configuration files",
+      "fileCount": 1,
+      "lastAccessed": 1784365245843,
+      "keyFiles": [
+        "config.go"
+      ]
+    },
+    "sdkbridge/api": {
+      "path": "sdkbridge/api",
+      "purpose": "API routes",
+      "fileCount": 1,
+      "lastAccessed": 1784365245843,
+      "keyFiles": [
+        "bridge.go"
+      ]
+    },
+    "sdkbridge/config": {
+      "path": "sdkbridge/config",
+      "purpose": "Configuration files",
+      "fileCount": 1,
+      "lastAccessed": 1784365245843,
+      "keyFiles": [
+        "config.go"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "Dockerfile",
+      "accessCount": 15,
+      "lastAccessed": 1783243072877,
+      "type": "file"
+    },
+    {
+      "path": "internal/config/defaults.go",
+      "accessCount": 2,
+      "lastAccessed": 1783051027362,
+      "type": "file"
+    },
+    {
+      "path": "docker-compose.yml",
+      "accessCount": 1,
+      "lastAccessed": 1783051200636,
+      "type": "file"
+    },
+    {
+      "path": "frontend_static_asset_guard_test.go",
+      "accessCount": 1,
+      "lastAccessed": 1783051569475,
+      "type": "file"
+    },
+    {
+      "path": "Dockerfile.backend-only",
+      "accessCount": 1,
+      "lastAccessed": 1783051729250,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 1,
+      "lastAccessed": 1784365417223,
+      "type": "file"
+    },
+    {
+      "path": "README_CN.md",
+      "accessCount": 1,
+      "lastAccessed": 1784365417278,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

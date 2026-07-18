@@ -28,7 +28,9 @@
 
 > **✨ 基于 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的深度增强版** — 补强了生产级管理层、Web 控制面板托管能力，以及面向日常运维的终端 TUI。
 
-CliRelay 会把 AI CLI 订阅、OAuth 凭据、API Key 以及兼容上游服务整合成一个可管理的 API 层。它可以让 Claude Code、Gemini CLI、OpenAI Codex、Amp CLI、OpenAI 兼容客户端等工具通过统一端点访问多类上游，同时围绕流量提供分组路由、故障转移、请求日志、配额管控、模型价格、生图配置、API Key 自助查询、在线更新、`/manage` Web 面板托管和终端管理流程。
+CliRelay 会把 AI CLI 订阅、OAuth 凭据、API Key 以及兼容上游服务整合成一个可管理的 API 层。它可以让 Claude Code、Gemini CLI、OpenAI Codex、Qwen、iFlow、Kimi、Antigravity、xAI/Grok、OpenCode Go、ClinePass、Ollama Cloud、Bedrock、Amp、Vertex、OpenAI 兼容客户端等工具通过统一端点访问多类上游，同时围绕流量提供分组路由、故障转移、请求日志、配额管控、模型价格、生图配置、API Key 自助查询、在线更新、`/manage` Web 面板托管和终端管理流程。
+
+当前运行时数据栈是 PostgreSQL 15+、Redis 7+ 和 Ent ORM。PostgreSQL 是运行时数据事实源；Redis 只承担缓存、锁、限流、队列和可重建状态。SQLite 已经是旧版本数据源，只在迁移导入时保留支持。
 
 ```
 ┌───────────────────────┐         ┌──────────────┐         ┌────────────────────┐
@@ -37,10 +39,10 @@ CliRelay 会把 AI CLI 订阅、OAuth 凭据、API Key 以及兼容上游服务�
 │  Claude Code          │ ──────▶ │   CliRelay   │ ──────▶ │  OpenAI / Codex    │
 │  Gemini CLI           │         │   :8317      │ ──────▶ │  Anthropic Claude  │
 │  OpenAI Codex         │         │              │ ──────▶ │  Qwen / iFlow      │
-│  Amp CLI / IDE        │         │              │ ──────▶ │  Antigravity       │
-│  任意 OAI 兼容客户端   │         └──────────────┘         │  Vertex / OpenAI   │
-└───────────────────────┘                                  │  iFlow / Qwen /    │
-                                                           │  Kimi / Claude     │
+│  Amp CLI / IDE        │         │              │ ──────▶ │  Antigravity/xAI   │
+│  任意 OAI 兼容客户端   │         └──────────────┘         │  Vertex / Bedrock  │
+└───────────────────────┘                                  │  OpenCode/Cline    │
+                                                           │  Ollama / Amp      │
                                                            └────────────────────┘
 ```
 
@@ -50,24 +52,24 @@ CliRelay 会把 AI CLI 订阅、OAuth 凭据、API Key 以及兼容上游服务�
 
 | 特性 | 说明 |
 |:-----|:-----|
-| 🌐 **统一端点** | 一个 `http://localhost:8317` 统一承接 Gemini、Claude、Codex、Qwen、iFlow、Antigravity、Vertex 兼容端点、OpenAI 兼容上游以及 Amp 集成 |
+| 🌐 **统一端点** | 一个 `http://localhost:8317` 统一承接 Gemini、Claude、Codex、Qwen、iFlow、Kimi、Antigravity、xAI/Grok、Vertex、Bedrock、OpenCode Go、ClinePass、Ollama Cloud、OpenAI 兼容上游以及 Amp 集成 |
 | ⚖️ **智能负载均衡** | 跨多个 API Key 的轮询或填充优先调度策略 |
 | 🧭 **分组与路径路由** | 将渠道绑定到分组，按 API Key 限制可用分组，并为团队或业务暴露自定义路径命名空间 |
 | 🔄 **自动故障转移** | 配额耗尽或发生错误时自动切换到备用渠道 |
 | 🧠 **多模态支持** | 完整支持文本 + 图片输入、生图路由、Function Calling（工具调用）和 SSE 流式响应 |
 | 🔗 **OpenAI 兼容** | 支持任何兼容 OpenAI Chat Completions 协议的上游服务 |
 
-### 📊 请求日志与监控（SQLite）
+### 📊 请求日志与监控（PostgreSQL）
 
 | 特性 | 说明 |
 |:-----|:-----|
-| 📝 **完整请求捕获** | 每个 API 请求记录到 SQLite：时间戳、模型、Token（输入/输出/推理/缓存）、延迟、状态、来源渠道 |
-| 💬 **消息体存储** | 完整的请求/响应消息内容以压缩形式存入 SQLite，并支持将正文保留策略与元数据保留策略分离 |
+| 📝 **完整请求捕获** | 每个 API 请求记录到 PostgreSQL：时间戳、模型、Token（输入/输出/推理/缓存）、延迟、状态、来源渠道 |
+| 💬 **消息体存储** | 完整的请求/响应消息内容以压缩形式存入 PostgreSQL，并支持将正文保留策略与元数据保留策略分离 |
 | 🔍 **高级查询** | 按 API Key、模型、状态、时间范围过滤日志，高效分页（LIMIT/OFFSET） |
 | 📈 **分析聚合** | 预计算仪表盘：每日趋势、模型分布、每小时热力图、单 Key 统计 |
 | 🏥 **健康评分引擎** | 实时 0–100 健康评分，综合考虑成功率、延迟、活跃渠道和错误模式 |
 | 📡 **WebSocket 监控** | 通过 WebSocket 实时推送系统状态：CPU、内存、goroutines、网络 I/O、数据库大小 |
-| 🗄️ **No-CGO SQLite** | 使用 `modernc.org/sqlite` — 纯 Go 实现，无 CGO 依赖，易于交叉编译 |
+| 🗄️ **Ent + PostgreSQL** | 使用 PostgreSQL 15+ 作为运行时主数据库，并保留 Ent 生成的 schema 元数据 |
 
 ### 🔐 API Key 与权限管理
 
@@ -84,7 +86,7 @@ CliRelay 会把 AI CLI 订阅、OAuth 凭据、API Key 以及兼容上游服务�
 
 | 特性 | 说明 |
 |:-----|:-----|
-| 📋 **多标签页配置** | 按服务商类型组织渠道管理：Gemini、Claude、Codex、Vertex、OpenAI 兼容、Ampcode |
+| 📋 **多标签页配置** | 按服务商类型组织渠道管理：Gemini、Claude、Codex、OpenCode Go、ClinePass、Ollama Cloud、Vertex、Bedrock、OpenAI 兼容、Ampcode |
 | 🏷️ **渠道命名** | 每个渠道支持自定义名称、备注、代理 URL、自定义 Headers 和模型别名映射 |
 | 🧩 **可复用代理池** | 统一维护出站代理配置，并按需分配给 OAuth / auth 渠道 |
 | ⏱️ **延迟追踪** | 每渠道平均延迟（`latency_ms`）追踪，带可视化指标 |
@@ -97,7 +99,7 @@ CliRelay 会把 AI CLI 订阅、OAuth 凭据、API Key 以及兼容上游服务�
 
 | 特性 | 说明 |
 |:-----|:-----|
-| 🔐 **OAuth 支持** | 原生 OAuth 流程覆盖 Gemini、Claude、Codex、Qwen、iFlow、Antigravity、Kimi，并在支持的渠道中提供设备码 / 浏览器 / Cookie 变体 |
+| 🔐 **OAuth 支持** | 原生 OAuth 流程覆盖 Gemini、Claude、Codex、Qwen、iFlow、Antigravity、Kimi、xAI/Grok，并在支持的渠道中提供设备码 / 浏览器 / Cookie 变体 |
 | 🪪 **身份指纹维护** | 集中维护上游身份信息，让请求在不同 provider 侧保持一致的客户端指纹 |
 | 🔒 **TLS 处理** | 可配置的上游通信 TLS 设置 |
 | 🏠 **面板隔离** | 管理面板访问由管理员密码独立控制 |
@@ -118,10 +120,21 @@ CliRelay 会把 AI CLI 订阅、OAuth 凭据、API Key 以及兼容上游服务�
 
 | 特性 | 说明 |
 |:-----|:-----|
-| 💾 **SQLite 存储** | 所有使用数据、请求日志和消息体存储在本地 SQLite 数据库 |
-| 🔄 **Redis 备份** | 可选 Redis 集成，定期快照和跨重启指标保留 |
+| 💾 **PostgreSQL 存储** | 用量、请求日志、消息正文、API Key、路由、代理池、模型配置和配额状态都存入 PostgreSQL |
+| 🔄 **Redis 运行时状态** | Redis 7+ 负责缓存、锁、限流、队列和可重建快照；PostgreSQL 始终是事实源 |
 | 🗃️ **可插拔认证/配置后端** | 默认使用本地文件，也支持通过 PostgreSQL、Git 或 S3 兼容对象存储持久化配置和认证信息 |
 | 📦 **配置快照** | 导入/导出整个系统配置为 JSON，便于备份和迁移 |
+
+## 🛠️ 运行时与技术栈
+
+| 层级 | 技术 |
+|:-----|:-----|
+| 运行时 | Go 1.26、Gin、Docker Compose |
+| 数据 | PostgreSQL 15+ / Ent ORM，Redis 7+ 承担可重建运行时状态 |
+| 认证 / 配置存储 | 本地文件、PostgreSQL、Git 或 S3 兼容对象存储 |
+| 代理核心 | OpenAI Chat Completions / Responses、Anthropic Messages、Gemini、服务商专用执行器、SSE 与 WebSocket 链路 |
+| 运维 | Bubble Tea / Lipgloss TUI、`/manage` Web 面板托管、updater sidecar |
+| 可观测性 | PostgreSQL 请求日志、压缩消息正文、实时日志、系统状态 WebSocket |
 
 ## 📸 管理面板预览
 
@@ -129,67 +142,55 @@ CliRelay 可以在 `/manage` 暴露内置 Web 控制面板。服务端既可以�
 
 下面这组 gallery 使用了最新提供的截图素材，覆盖当前管理面板的完整工作流。
 
-### 首页、语言与主题
+### 仪表盘与监控
 
-| 首页概览 | 运维概览 |
-| :------- | :------- |
-| <img src="docs/images/readme-showcase/home-overview-1.png" width="100%" alt="CliRelay 首页概览" /> | <img src="docs/images/readme-showcase/home-overview-2.png" width="100%" alt="CliRelay 运维概览" /> |
-
-| 中英文界面 | 暗色模式 |
+| 仪表盘概览 | 系统健康 |
 | :--------- | :------- |
-| <img src="docs/images/readme-showcase/home-i18n.png" width="100%" alt="管理面板中英文界面" /> | <img src="docs/images/readme-showcase/dark-mode.png" width="100%" alt="管理面板暗色模式" /> |
+| <img src="docs/images/readme-showcase/dashboard-overview.png" width="100%" alt="CliRelay 仪表盘概览" /> | <img src="docs/images/readme-showcase/dashboard-health.png" width="100%" alt="CliRelay 健康分与系统监控" /> |
 
-### 监控、日志与自助查询
-
-| 监控中心 | 请求日志 |
+| 流量趋势 | 监控汇总 |
 | :------- | :------- |
-| <img src="docs/images/readme-showcase/monitor-center.png" width="100%" alt="监控中心图表与请求指标" /> | <img src="docs/images/readme-showcase/request-logs.png" width="100%" alt="请求日志表格与过滤器" /> |
+| <img src="docs/images/readme-showcase/dashboard-traffic.png" width="100%" alt="CliRelay 流量趋势图" /> | <img src="docs/images/readme-showcase/monitor-summary.png" width="100%" alt="监控中心汇总图表" /> |
 
-| 请求详情 | 日志查询系统 |
-| :------- | :----------- |
-| <img src="docs/images/readme-showcase/request-details.png" width="100%" alt="请求详情查看器" /> | <img src="docs/images/readme-showcase/log-query-system.png" width="100%" alt="日志查询系统" /> |
+| 监控拆分 | 请求日志 |
+| :------- | :------- |
+| <img src="docs/images/readme-showcase/monitor-breakdown.png" width="100%" alt="监控中心模型与 API Key 拆分" /> | <img src="docs/images/readme-showcase/request-logs.png" width="100%" alt="请求日志表格与过滤器" /> |
 
-| API Key 独立查询页 |
-| :----------------- |
-| <img src="docs/images/readme-showcase/api-key-lookup.png" width="100%" alt="API Key 独立查询页面" /> |
+| 请求详情 | API Key 独立查询页 |
+| :------- | :----------------- |
+| <img src="docs/images/readme-showcase/request-details.png" width="100%" alt="请求详情查看器" /> | <img src="docs/images/readme-showcase/api-key-lookup.png" width="100%" alt="API Key 独立查询页面" /> |
 
-### 认证、身份与权限
+### 服务商、认证与权限
 
-| 统一 OAuth 管理 | 身份指纹维护 |
-| :-------------- | :----------- |
-| <img src="docs/images/readme-showcase/oauth-management.png" width="100%" alt="统一 OAuth 管理" /> | <img src="docs/images/readme-showcase/identity-fingerprint-management.png" width="100%" alt="身份指纹统一维护" /> |
+| OpenCode Go 认证文件 | Claude 认证控制 |
+| :------------------- | :-------------- |
+| <img src="docs/images/readme-showcase/auth-files-opencode-go.png" width="100%" alt="OpenCode Go 认证文件管理" /> | <img src="docs/images/readme-showcase/auth-files-claude.png" width="100%" alt="Claude 认证文件管理" /> |
 
-| 多人权限划分 | OAuth 代理分配 |
-| :----------- | :------------- |
-| <img src="docs/images/readme-showcase/team-permissions.png" width="100%" alt="API Key 多人分配与权限划分" /> | <img src="docs/images/readme-showcase/proxy-config-for-oauth.png" width="100%" alt="可分配给 OAuth 认证的代理配置" /> |
+| Claude OAuth 健康 | API Keys |
+| :---------------- | :------- |
+| <img src="docs/images/readme-showcase/auth-files-claude-oauth.png" width="100%" alt="Claude OAuth 健康与账号状态" /> | <img src="docs/images/readme-showcase/api-keys.png" width="100%" alt="API Key 管理表格" /> |
 
-### 渠道、路由与配置
+| API Key 权限配置 | 代理池 |
+| :--------------- | :----- |
+| <img src="docs/images/readme-showcase/api-key-permissions.png" width="100%" alt="API Key 权限配置" /> | <img src="docs/images/readme-showcase/proxy-pool.png" width="100%" alt="可复用代理池管理" /> |
 
-| 多渠道 API 添加 | 分组路由与自定义路径 |
-| :-------------- | :------------------- |
-| <img src="docs/images/readme-showcase/multi-channel-api-add.png" width="100%" alt="多渠道 API 添加功能" /> | <img src="docs/images/readme-showcase/group-routing-custom-path.png" width="100%" alt="配置分组调用策略与自定义调用路径" /> |
+### 路由、模型与配置
 
-| 可视化配置 | 上游 Debug 透传 |
-| :--------- | :-------------- |
-| <img src="docs/images/readme-showcase/visual-config.png" width="100%" alt="可视化配置编辑器" /> | <img src="docs/images/readme-showcase/upstream-debug-passthrough.png" width="100%" alt="方便 debug 透传给上游内容" /> |
+| CC Switch 导入 | 生图配置 |
+| :------------- | :------- |
+| <img src="docs/images/readme-showcase/cc-switch-import.png" width="100%" alt="CC Switch 导入设置" /> | <img src="docs/images/readme-showcase/image-generation.png" width="100%" alt="生图渠道配置" /> |
 
-| CC Switch 导入 |
-| :------------- |
-| <img src="docs/images/readme-showcase/cc-switch-import.png" width="100%" alt="cc switch 导入可配置" /> |
+| 渠道分组 | 模型目录 |
+| :------- | :------- |
+| <img src="docs/images/readme-showcase/channel-groups.png" width="100%" alt="配置分组调用策略与自定义调用路径" /> | <img src="docs/images/readme-showcase/models.png" width="100%" alt="模型目录与价格管理" /> |
 
-### 模型、生图与更新
+| 运行时配置 | 系统信息 |
+| :--------- | :------- |
+| <img src="docs/images/readme-showcase/config.png" width="100%" alt="运行时配置编辑器" /> | <img src="docs/images/readme-showcase/system-info.png" width="100%" alt="系统信息页面" /> |
 
-| OpenRouter 模型同步 | 自定义模型维护 |
-| :------------------ | :------------- |
-| <img src="docs/images/readme-showcase/model-openrouter-sync.png" width="100%" alt="从 OpenRouter 同步模型 ID 和价格" /> | <img src="docs/images/readme-showcase/custom-model-maintenance.png" width="100%" alt="支持高度自定义的模型维护" /> |
-
-| 生图配置 | 在线更新机制 |
-| :------- | :----------- |
-| <img src="docs/images/readme-showcase/image-generation-config.png" width="100%" alt="生图配置" /> | <img src="docs/images/readme-showcase/online-update.png" width="100%" alt="在线更新机制" /> |
-
-| 系统信息 |
-| :------- |
-| <img src="docs/images/readme-showcase/system-info.png" width="100%" alt="系统信息页面" /> |
+| 运行时日志 |
+| :--------- |
+| <img src="docs/images/readme-showcase/live-logs.png" width="100%" alt="运行时日志查看器" /> |
 
 > 🔗 面板资源仓库可通过 `remote-management.panel-github-repository` 配置，默认仓库为 [spock-wen/codeProxy](https://github.com/spock-wen/codeProxy)。
 
@@ -203,8 +204,13 @@ CliRelay 可以在 `/manage` 暴露内置 Web 控制面板。服务端既可以�
 | Qwen | OAuth | 通义千问 Qwen Code 风格登录流程 |
 | iFlow / GLM | OAuth + Cookie | 支持 iFlow 路由及相关模型族 |
 | Kimi | OAuth | 浏览器登录流程 |
+| xAI / Grok | OAuth | Grok CLI 兼容 OAuth 与配额元数据 |
 | Antigravity | OAuth | 独立 OAuth 通道，支持模型回填 |
 | Vertex 兼容端点 | API Key | 支持自定义 base URL、Header、别名与排除规则 |
+| AWS Bedrock | API Key / SigV4 | 支持按区域访问 Bedrock Runtime 和 Claude 模型别名 |
+| OpenCode Go | API Key | 固定 OpenCode Go 上游，支持用量查询和视觉模型 fallback |
+| ClinePass | API Key | OpenAI 兼容 ClinePass 路由和模型访问控制 |
+| Ollama Cloud | API Key | OpenAI 兼容 Ollama Cloud 路由和模型访问控制 |
 | OpenAI 兼容上游 | API Key | OpenRouter、Grok 兼容端点及自定义 provider |
 | Amp 集成 | 上游 API Key + 映射 | 可直接回退到 Amp 上游，也可映射到本地可用模型 |
 
@@ -217,11 +223,10 @@ Docker Compose 是 CliRelay 推荐的安装方式。仓库内的 `docker-compose
 ```bash
 git clone https://github.com/spock-wen/CliRelay.git
 cd CliRelay
-cp config.example.yaml config.yaml
 docker compose up -d
 ```
 
-编辑 `config.yaml` 添加你的 API 密钥或 OAuth 凭据，然后重启服务：
+首次启动后，编辑自动生成的 `config.yaml` 添加你的 API 密钥或 OAuth 凭据，然后重启服务：
 
 ```bash
 docker compose restart cli-proxy-api
@@ -257,14 +262,60 @@ auto-update:
   channel: dev
 ```
 
-### 🗄️ 开启数据持久化
+### 🗄️ 运行时数据栈
 
-默认情况下，API 使用日志存储在 SQLite 中以实现持久化。如需额外备份：
-1. 准备一个可用的 Redis 数据库。
-2. 编辑 `config.yaml`，将 `redis.enable` 设为 `true` 并填入 Redis 地址。
-配置完成后，CliRelay 每次启动都会自动完成快照恢复！
+CliRelay 当前运行时数据栈已经完全统一为 PostgreSQL 15+、Redis 7+ 和 Ent ORM：PostgreSQL 是业务数据唯一事实源，Redis 只负责缓存、锁、限流、队列和可重建状态。SQLite 不再作为运行时数据库，也不参与正常启动、健康检查或 OTA 在线更新。
 
-如果你的请求量较大，可以在 `config.yaml` 中调整 `request-log-storage`。默认情况下，全文请求/响应正文会以压缩形式保留 30 天，并默认做了约 1GB（1024MB）的总量上限；而轻量级请求元数据可继续用于长期统计与筛选。将 `content-retention-days: 0` 设为永久保留全文；将 `store-content: false` 设为停止写入新的正文，同时保留已有历史全文；调整 `max-total-size-mb` 可设置正文存储体积上限，这样即使 retention 周期还没到，也会提前裁剪最老的全文正文。
+标准 Docker Compose 部署会启动 `clirelay-init`、PostgreSQL、Redis、业务容器和 updater sidecar。正常执行 `docker compose up -d` 或在管理面板中在线更新时，系统**不会扫描 `usage.db`、不会执行 SQLite inventory、不会自动导入 SQLite，也不会在更新进度中出现 SQLite 迁移阶段**。旧 compose 中残留的 `clirelay-migrate` 服务和 `CLIRELAY_SQLITE_AUTO_*` 启动配置会在部署栈升级时移除，但原始 SQLite 文件不会被删除或修改。
+
+OTA 更新状态由 updater sidecar 持有，并通过 SSE 实时发送。管理面板只展示 updater 返回的任务 ID、实际执行阶段、已完成步骤、当前/目标版本、管理面板版本、目标镜像、最新 Release 信息和最终结果，不再通过前端计时器模拟百分比。更新期间即使业务容器重启、页面刷新或 SSE 短暂断开，前端也会重新连接并读取 updater 的最新快照。Compose 默认把快照保存到 `.clirelay-updater-status.json`；更新器异常重启时，未完成任务会被明确标记为失败，不会继续显示为运行中。 业务容器通过健康检查后，当前 updater 会启动一个基于目标镜像的临时 helper，由 helper 安全重建 updater sidecar，使后续 OTA 继续使用目标版本的更新逻辑。
+
+#### 仅旧版本用户需要的 SQLite 手工迁移
+
+仓库和 Docker 镜像仍保留 `scripts/migrate-sqlite-to-postgres.sh`，只用于从旧版 SQLite `usage.db` 手工导入 PostgreSQL。该脚本是独立迁移工具，**不会被 CliRelay 启动流程或 OTA 自动调用**。全新安装、已经使用 PostgreSQL 的部署，以及不需要保留旧 SQLite 历史数据的用户都不应执行它。
+
+迁移前必须：
+
+1. 备份原始 `usage.db`，并保留只读副本；不要在迁移过程中让旧版本继续写入该文件。
+2. 先准备并启动 PostgreSQL 15+ 和 Redis 7+，确认 `CLIRELAY_POSTGRES_DSN` 指向正确的目标库。
+3. 先运行 inventory 和 PostgreSQL dry-run，检查表、行数、ID/时间范围、checksum 与计划写入数量。
+4. 只有核对 dry-run 后才执行 apply；完成后再次校验 PostgreSQL 数据。脚本不会删除、移动或写入 SQLite 文件，重复导入由 PostgreSQL 中的导入记录和 advisory lock 保护。
+
+非 Docker 部署可以直接执行：
+
+```bash
+CLIRELAY_BIN=/opt/clirelay2/clirelay2 \
+CLIRELAY_POSTGRES_DSN='postgres://user:pass@127.0.0.1:5432/cliproxy?sslmode=disable' \
+./scripts/migrate-sqlite-to-postgres.sh /path/to/usage.db
+```
+
+Docker Compose 部署先确保 PostgreSQL/Redis 已启动，再把旧库只读挂载到一次性容器中：
+
+```bash
+docker compose up -d postgres redis
+
+docker compose run --rm --no-deps \
+  -e CLIRELAY_BIN=/CLIProxyAPI/CLIProxyAPI \
+  -v /absolute/path/to/usage.db:/migration/usage.db:ro \
+  cli-proxy-api \
+  /usr/local/bin/migrate-sqlite-to-postgres.sh /migration/usage.db
+```
+
+脚本默认依次执行 SQLite 只读 inventory、PostgreSQL 导入 dry-run 和实际 apply。若只想检查而不写入 PostgreSQL，增加 `-e CLIRELAY_SQLITE_AUTO_IMPORT=false`。也可以分步使用二进制命令：
+
+```bash
+./cli-proxy-api -sqlite-dry-run /path/to/usage.db
+
+CLIRELAY_POSTGRES_DSN='postgres://user:pass@127.0.0.1:5432/cliproxy?sslmode=disable' \
+./cli-proxy-api -sqlite-import /path/to/usage.db
+
+CLIRELAY_POSTGRES_DSN='postgres://user:pass@127.0.0.1:5432/cliproxy?sslmode=disable' \
+./cli-proxy-api -sqlite-import /path/to/usage.db -sqlite-import-dry-run=false
+```
+
+如果旧 Docker 部署仍是 SQLite-only compose，应先替换为仓库最新版 `docker-compose.yml` 并执行 `docker compose up -d postgres redis clirelay-updater`，再手工迁移数据。对于不支持 updater SSE 的旧 sidecar，需要额外执行一次 `docker compose up -d --force-recreate clirelay-updater`，之后的 OTA 才能使用新的实时进度与断线恢复协议。完整迁移边界见 [`docs/postgres-redis-migration.md`](docs/postgres-redis-migration.md)。
+
+如果你的请求量较大，可以在 `config.yaml` 中调整 `request-log-storage`。全文请求/响应正文默认不保存；开启 `store-content` 后，正文会以压缩形式保留 30 天，并默认做约 1GB（1024MB）的总量上限，而轻量级请求元数据和请求详情仍可用于统计、筛选与排查。将 `content-retention-days: 0` 设为永久保留全文；在管理面板关闭正文存储时会同时清理已有输入与输出正文，但保留请求详情和请求记录；调整 `max-total-size-mb` 可让最老的全文在 retention 周期结束前提前裁剪。
 
 如果你需要非本地磁盘的配置/认证持久化，服务端还支持通过环境变量启用 PostgreSQL、Git 和 S3 兼容对象存储后端。
 
@@ -309,7 +360,7 @@ CliRelay/
 ├── internal/config/          # 配置解析、默认值、迁移
 ├── internal/store/           # 本地、Git、PostgreSQL、对象存储配置/认证持久化
 ├── internal/tui/             # 终端管理 UI
-├── internal/usage/           # SQLite 用量数据库、保留策略、分析聚合
+├── internal/usage/           # PostgreSQL 支撑的用量数据、保留策略、分析聚合
 ├── internal/managementasset/ # /manage 面板托管与资源同步
 ├── sdk/                      # 可复用 Go SDK、handlers、executors
 ├── auths/                    # 本地凭据存储
@@ -329,6 +380,7 @@ CliRelay/
 | [SDK 进阶](docs/sdk-advanced.md) | 执行器与翻译器深入解析 |
 | [SDK 认证](docs/sdk-access.md) | SDK 认证上下文 |
 | [SDK Watcher](docs/sdk-watcher.md) | 凭据加载与热重载 |
+| [PostgreSQL / Redis 迁移](docs/postgres-redis-migration.md) | 运行时数据栈配置、SQLite dry-run 清单与验证命令 |
 
 ## 🤝 贡献
 
@@ -363,6 +415,6 @@ git push origin feature/amazing-feature
 本项目是基于优秀的开源项目 **[router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)** 核心逻辑深度开发而来。
 在此，我们想要对原上游项目 **CLIProxyAPI** 以及全体贡献者表达最诚挚的感谢！
 
-正是由于上游构建的坚实且极具创新的代理分发底座，我们才能站在巨人的肩膀上，衍生出独特的高级管理功能（如 API Key 追踪管控、完整的 SQLite 请求日志、实时系统监控），并完全重构了前端管理面板。
+正是由于上游构建的坚实且极具创新的代理分发底座，我们才能站在巨人的肩膀上，衍生出独特的高级管理功能（如 API Key 追踪管控、完整请求日志、实时系统监控），并完全重构了前端管理面板。
 
 饮水思源，向开源精神致敬！❤️

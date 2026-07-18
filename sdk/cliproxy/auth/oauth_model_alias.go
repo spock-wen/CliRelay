@@ -19,6 +19,8 @@ type oauthModelAliasTable struct {
 const (
 	codexAutoReviewModel         = "codex-auto-review"
 	codexAutoReviewUpstreamModel = "gpt-5.5"
+	xaiGrokBuildModel            = "grok-build"
+	xaiGrokBuildUpstreamModel    = "grok-build-0.1"
 )
 
 func compileOAuthModelAliasTable(aliases map[string][]sdkconfig.OAuthModelAlias) *oauthModelAliasTable {
@@ -63,15 +65,23 @@ func compileOAuthModelAliasTable(aliases map[string][]sdkconfig.OAuthModelAlias)
 // The alias is applied per-auth channel to resolve the upstream model name while keeping the
 // client-visible model name unchanged for translation/response formatting.
 func (m *Manager) SetOAuthModelAlias(aliases map[string][]sdkconfig.OAuthModelAlias) {
+	m.SetOAuthModelAliasForTenant(defaultTenantID, aliases)
+}
+
+func (m *Manager) SetOAuthModelAliasForTenant(tenantID string, aliases map[string][]sdkconfig.OAuthModelAlias) {
 	if m == nil {
 		return
 	}
-	table := compileOAuthModelAliasTable(aliases)
-	// atomic.Value requires non-nil store values.
-	if table == nil {
-		table = &oauthModelAliasTable{}
+	tenantID = normalizedTenantID(tenantID)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, _ := m.oauthModelAlias.Load().(map[string]*oauthModelAliasTable)
+	next := make(map[string]*oauthModelAliasTable, len(current)+1)
+	for id, table := range current {
+		next[id] = table
 	}
-	m.oauthModelAlias.Store(table)
+	next[tenantID] = compileOAuthModelAliasTable(aliases)
+	m.oauthModelAlias.Store(next)
 }
 
 // applyOAuthModelAlias resolves the upstream model from OAuth model alias.
@@ -81,6 +91,9 @@ func (m *Manager) applyOAuthModelAlias(auth *Auth, requestedModel string) string
 	if upstreamModel == "" {
 		if modelAliasChannel(auth) != "" {
 			if builtIn := resolveBuiltInCodexModelAlias(auth, requestedModel); builtIn != "" {
+				return builtIn
+			}
+			if builtIn := resolveBuiltInXAIModelAlias(auth, requestedModel); builtIn != "" {
 				return builtIn
 			}
 		}
@@ -105,6 +118,24 @@ func resolveBuiltInCodexModelAlias(auth *Auth, requestedModel string) string {
 		return codexAutoReviewUpstreamModel + "(" + parsed.RawSuffix + ")"
 	}
 	return codexAutoReviewUpstreamModel
+}
+
+func resolveBuiltInXAIModelAlias(auth *Auth, requestedModel string) string {
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "xai") {
+		return ""
+	}
+	requestedModel = strings.TrimSpace(requestedModel)
+	if requestedModel == "" {
+		return ""
+	}
+	parsed := parseModelSuffix(requestedModel)
+	if !strings.EqualFold(strings.TrimSpace(parsed.ModelName), xaiGrokBuildModel) {
+		return ""
+	}
+	if parsed.HasSuffix && parsed.RawSuffix != "" {
+		return xaiGrokBuildUpstreamModel + "(" + parsed.RawSuffix + ")"
+	}
+	return xaiGrokBuildUpstreamModel
 }
 
 func resolveModelAliasFromConfigModels(requestedModel string, models []modelAliasEntry) string {
@@ -185,8 +216,8 @@ func resolveUpstreamModelFromAliasTable(m *Manager, auth *Auth, requestedModel, 
 		candidates = append(candidates, requestedModel)
 	}
 
-	raw := m.oauthModelAlias.Load()
-	table, _ := raw.(*oauthModelAliasTable)
+	tables, _ := m.oauthModelAlias.Load().(map[string]*oauthModelAliasTable)
+	table := tables[normalizedTenantID(auth.TenantID)]
 	if table == nil || table.reverse == nil {
 		return ""
 	}
@@ -244,7 +275,7 @@ func modelAliasChannel(auth *Auth) string {
 // and auth kind. Returns empty string if the provider/authKind combination doesn't support
 // OAuth model alias (e.g., API key authentication).
 //
-// Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kimi.
+// Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, xai, iflow, kimi.
 func OAuthModelAliasChannel(provider, authKind string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	authKind = strings.ToLower(strings.TrimSpace(authKind))
@@ -268,7 +299,7 @@ func OAuthModelAliasChannel(provider, authKind string) string {
 			return ""
 		}
 		return "codex"
-	case "gemini-cli", "aistudio", "antigravity", "qwen", "iflow", "kimi":
+	case "gemini-cli", "aistudio", "antigravity", "qwen", "xai", "iflow", "kimi":
 		return provider
 	default:
 		return ""

@@ -166,6 +166,7 @@ func (s cooldownService) applySuccessLocked(auth *Auth, result Result, now time.
 	if auth == nil {
 		return
 	}
+	markClaudeOAuthHealthSuccessLocked(auth, result, now)
 	if result.Model != "" {
 		state := ensureModelState(auth, result.Model)
 		if activeModelQuotaCooldown(state, now) {
@@ -197,6 +198,9 @@ func (s cooldownService) applyFailureLocked(auth *Auth, result Result, now time.
 	if auth == nil {
 		return
 	}
+	if applyClaudeOAuthFailureLocked(auth, result, now, effects) {
+		return
+	}
 	if result.Model != "" {
 		s.applyModelFailureLocked(auth, result, now, effects)
 		return
@@ -214,6 +218,14 @@ func (s cooldownService) applyModelFailureLocked(auth *Auth, result Result, now 
 		state.StatusMessage = result.Error.Message
 		auth.LastError = cloneError(result.Error)
 		auth.StatusMessage = result.Error.Message
+	}
+	if isResponseStreamIncompleteError(result.Error) {
+		state.Unavailable = false
+		state.NextRetryAfter = time.Time{}
+		auth.Status = StatusError
+		auth.UpdatedAt = now
+		updateAggregatedAvailability(auth, now)
+		return
 	}
 
 	statusCode := statusCodeFromResult(result.Error)
@@ -270,6 +282,10 @@ func (s cooldownService) applyModelFailureLocked(auth *Auth, result Result, now 
 	auth.Status = StatusError
 	auth.UpdatedAt = now
 	updateAggregatedAvailability(auth, now)
+}
+
+func isResponseStreamIncompleteError(err *Error) bool {
+	return err != nil && strings.TrimSpace(err.Code) == "response_stream_incomplete"
 }
 
 func (s cooldownService) applyRegistryEffects(result Result, effects resultStateEffects) {
