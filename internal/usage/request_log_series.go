@@ -803,7 +803,7 @@ func QueryUsageExportSummary(days int, apiKey string) ([]UsageExportSummaryRow, 
   COALESCE(SUM(input_tokens), 0) AS input_tokens,
   COALESCE(SUM(output_tokens), 0) AS output_tokens,
   COALESCE(SUM(total_tokens), 0) AS total_tokens,
-  ROUND(COALESCE(SUM(cost), 0), 6) AS total_cost_usd
+  ROUND(COALESCE(SUM(cost), 0)::numeric, 6) AS total_cost_usd
 FROM request_logs` + where + `
 GROUP BY api_key, api_key_name
 ORDER BY total_tokens DESC`
