@@ -14,6 +14,9 @@ import (
 // Path availability contract:
 // - Owner: model path capability boundary.
 // - Responsibility: expose routing/path-specific model availability derived from registry metadata.
+//
+// Claude/Codex live discovery is merged into the root OpenAI path so the model
+// catalog "path-only" enrichment matches the auth-file models panel.
 func (s *Service) PathAvailability() map[string]any {
 	modelRegistry := registry.GetGlobalRegistry()
 	items := make(map[string]*modelPathAvailabilityResponse)
@@ -21,8 +24,30 @@ func (s *Service) PathAvailability() map[string]any {
 	routingConfig := tenantRoutingConfig(s.tenantID, s.cfg)
 	rootOpenAICapabilities := openAIV1Capabilities("/")
 	rootGeminiCapabilities := geminiV1BetaCapabilities("/")
-	appendModelPaths(items, s.modelRootRouteScopedModels(modelRegistry.GetAvailableModels("openai"), routingConfig), "/", rootOpenAICapabilities)
-	appendModelPaths(items, s.modelRootRouteScopedModels(modelRegistry.GetAvailableModels("gemini"), routingConfig), "/", rootGeminiCapabilities)
+	authByID := s.authByID()
+	discoveryByProvider := s.sharedDiscoveryByProvider(false)
+	managementAuthoritativeModelKeys := s.managementAuthoritativeModelKeys()
+	openaiModels := dropStaticDiscoveryProviderModels(
+		modelRegistry.GetAvailableModels("openai"),
+		modelRegistry,
+		discoveryByProvider,
+		authByID,
+		s.authGroupOwnerMappingMap(),
+		managementAuthoritativeModelKeys,
+	)
+	openaiModels = s.modelRootRouteScopedModels(openaiModels, routingConfig)
+	// Live discovery is not registry-backed, so CanServe cannot enforce
+	// channel-group AllowedModels for those rows. Filter after merge so plaza
+	// and catalog path enrichment match configured-availability.
+	openaiModels = s.filterModelsByRoutingAllowedModels(
+		appendSharedDiscoveryModels(openaiModels, discoveryByProvider),
+		"",
+	)
+	appendModelPaths(items, openaiModels, "/", rootOpenAICapabilities)
+	appendModelPaths(items, s.filterModelsByRoutingAllowedModels(
+		s.modelRootRouteScopedModels(modelRegistry.GetAvailableModels("gemini"), routingConfig),
+		"",
+	), "/", rootGeminiCapabilities)
 
 	routes := []modelPathRouteResponse{
 		{
@@ -44,8 +69,14 @@ func (s *Service) PathAvailability() map[string]any {
 			ReadOnly:     false,
 			Capabilities: capabilities,
 		})
-		appendModelPaths(items, s.modelPathRouteScopedModels(modelRegistry.GetAvailableModels("openai"), route.Group), route.Path, openAIV1Capabilities(route.Path))
-		appendModelPaths(items, s.modelPathRouteScopedModels(modelRegistry.GetAvailableModels("gemini"), route.Group), route.Path, geminiV1BetaCapabilities(route.Path))
+		appendModelPaths(items, s.filterModelsByRoutingAllowedModels(
+			s.modelPathRouteScopedModels(modelRegistry.GetAvailableModels("openai"), route.Group),
+			route.Group,
+		), route.Path, openAIV1Capabilities(route.Path))
+		appendModelPaths(items, s.filterModelsByRoutingAllowedModels(
+			s.modelPathRouteScopedModels(modelRegistry.GetAvailableModels("gemini"), route.Group),
+			route.Group,
+		), route.Path, geminiV1BetaCapabilities(route.Path))
 	}
 
 	return map[string]any{

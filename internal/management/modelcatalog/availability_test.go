@@ -2,13 +2,92 @@ package modelcatalog
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	managementauthfiles "github.com/router-for-me/CLIProxyAPI/v6/internal/management/authfiles"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
+
+func initModelCatalogTestDB(t *testing.T) {
+	t.Helper()
+	usage.CloseDB()
+	if err := usage.InitDB(filepath.Join(t.TempDir(), "usage.db"), config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB() error = %v", err)
+	}
+	t.Cleanup(usage.CloseDB)
+}
+
+func TestRuntimePrefixedModelInheritsBasePricing(t *testing.T) {
+	initModelCatalogTestDB(t)
+
+	const (
+		baseModelID    = "deepseek-v4-flash"
+		runtimeModelID = "ollama/deepseek-v4-flash"
+		clientID       = "pricing-fallback-ollama"
+	)
+	if err := usage.UpsertModelConfig(usage.ModelConfigRow{
+		ModelID:               baseModelID,
+		Enabled:               true,
+		PricingMode:           "token",
+		InputPricePerMillion:  0.3,
+		OutputPricePerMillion: 1.2,
+		Source:                "openrouter",
+	}); err != nil {
+		t.Fatalf("UpsertModelConfig() error = %v", err)
+	}
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(clientID)
+	modelRegistry.RegisterClient(clientID, "ollama-cloud", []*registry.ModelInfo{{
+		ID:      runtimeModelID,
+		Object:  "model",
+		OwnedBy: "ollama",
+	}})
+	t.Cleanup(func() { modelRegistry.UnregisterClient(clientID) })
+
+	service := New(&config.Config{}, nil)
+	assertInheritedPricing := func(stage string) {
+		t.Helper()
+		for name, result := range map[string]map[string]any{
+			"configured availability": service.ConfiguredAvailability("", ""),
+			"models":                  service.Models("", ""),
+		} {
+			data, ok := result["data"].([]map[string]any)
+			if !ok {
+				t.Fatalf("%s %s data = %#v, want []map[string]any", stage, name, result["data"])
+			}
+			var pricing map[string]any
+			for _, item := range data {
+				if item["id"] == runtimeModelID {
+					pricing, _ = item["pricing"].(map[string]any)
+					break
+				}
+			}
+			if pricing == nil {
+				t.Fatalf("%s %s missing inherited pricing for %q", stage, name, runtimeModelID)
+			}
+			if pricing["input_price_per_million"] != 0.3 || pricing["output_price_per_million"] != 1.2 {
+				t.Fatalf("%s %s pricing = %#v, want input=0.3 output=1.2", stage, name, pricing)
+			}
+		}
+	}
+
+	assertInheritedPricing("missing exact row")
+	if err := usage.UpsertModelConfig(usage.ModelConfigRow{
+		ModelID:     runtimeModelID,
+		Enabled:     true,
+		PricingMode: "token",
+		Source:      "user",
+	}); err != nil {
+		t.Fatalf("UpsertModelConfig(exact zero price) error = %v", err)
+	}
+	assertInheritedPricing("unpriced exact row")
+}
 
 func TestConfiguredAvailabilityIncludesModelSources(t *testing.T) {
 	const modelID = "source-test-model"
@@ -327,8 +406,445 @@ func TestFilterModelsByScopesAlwaysScopesToTenantWithoutChannelFilters(t *testin
 		{"id": systemModelID},
 		{"id": tenantModelID},
 	}
-	filtered := svc.filterModelsByScopes(models, "", "")
+	filtered := svc.filterModelsByScopes(models, "", "", AvailabilityFilterOptions{})
 	if len(filtered) != 1 || filtered[0]["id"] != tenantModelID {
 		t.Fatalf("filtered = %#v, want only tenant model", filtered)
 	}
+}
+
+func TestConfiguredAvailabilityReplacesStaticCodexWithDiscovery(t *testing.T) {
+	const (
+		staticModelID    = "gpt-5.1-static-only"
+		liveModelID      = "gpt-5.6-sol"
+		bothModelID      = "gpt-5.4" // on static registry AND discovery — must remain
+		codexClientID    = "plaza-discovery-codex"
+		openCodeClientID = "plaza-discovery-opencode"
+		openCodeModelID  = "opencode-keep-model"
+	)
+
+	managementauthfiles.ResetDiscoveryCacheForTest()
+	t.Cleanup(managementauthfiles.ResetDiscoveryCacheForTest)
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(codexClientID)
+	modelRegistry.UnregisterClient(openCodeClientID)
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(codexClientID)
+		modelRegistry.UnregisterClient(openCodeClientID)
+	})
+
+	// Static codex catalog rows (what RegisterClient does at startup).
+	modelRegistry.RegisterClient(codexClientID, "codex", []*registry.ModelInfo{
+		{ID: staticModelID, Object: "model", OwnedBy: "openai"},
+		{ID: bothModelID, Object: "model", OwnedBy: "openai"},
+	})
+	// Non-codex provider must not be stripped.
+	modelRegistry.RegisterClient(openCodeClientID, "opencode-go", []*registry.ModelInfo{
+		{ID: openCodeModelID, Object: "model", OwnedBy: "opencode"},
+	})
+
+	// Seed live discovery with modern models (not registered into runtime registry).
+	managementauthfiles.StoreDiscoveryCacheForTest("", "codex", []*registry.ModelInfo{
+		{ID: liveModelID, Object: "model", OwnedBy: "openai", DisplayName: "GPT-5.6 Sol"},
+		{ID: bothModelID, Object: "model", OwnedBy: "openai", DisplayName: "GPT 5.4"},
+	})
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID: codexClientID, Provider: "codex", Label: "Codex Pro", Status: coreauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("register codex: %v", err)
+	}
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID: openCodeClientID, Provider: "opencode-go", Label: "OpenCode", Status: coreauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("register opencode: %v", err)
+	}
+
+	result := New(&config.Config{}, manager).ConfiguredAvailability("", "")
+	data, ok := result["data"].([]map[string]any)
+	if !ok {
+		t.Fatalf("data = %#v", result["data"])
+	}
+	ids := make(map[string]struct{}, len(data))
+	var liveSources []map[string]any
+	for _, item := range data {
+		id, _ := item["id"].(string)
+		ids[id] = struct{}{}
+		if id == liveModelID {
+			liveSources, _ = item["sources"].([]map[string]any)
+		}
+	}
+
+	if _, ok := ids[liveModelID]; !ok {
+		t.Fatalf("missing live discovery model %q; ids=%v", liveModelID, ids)
+	}
+	if _, ok := ids[bothModelID]; !ok {
+		t.Fatalf("missing overlap model %q; ids=%v", bothModelID, ids)
+	}
+	if _, ok := ids[openCodeModelID]; !ok {
+		t.Fatalf("opencode model %q was stripped; ids=%v", openCodeModelID, ids)
+	}
+	if _, ok := ids[staticModelID]; ok {
+		t.Fatalf("static-only codex model %q should be replaced by discovery; ids=%v", staticModelID, ids)
+	}
+	if len(liveSources) == 0 {
+		t.Fatalf("live discovery model should have synthesized sources")
+	}
+}
+
+func TestMappedOwnerConfigKeepsModelMissingFromCodexDiscovery(t *testing.T) {
+	const (
+		imageModelID     = "gpt-image-2"
+		liveModelID      = "gpt-5.6-sol"
+		staleChatModelID = "gpt-static-chat-only"
+		codexClientID    = "mapped-owner-keep-codex"
+		groupName        = "codex-editor"
+	)
+
+	initModelCatalogTestDB(t)
+	managementauthfiles.ResetDiscoveryCacheForTest()
+	t.Cleanup(managementauthfiles.ResetDiscoveryCacheForTest)
+
+	imageConfig, ok := usage.GetModelConfig(imageModelID)
+	if !ok {
+		t.Fatalf("seed config missing %q", imageModelID)
+	}
+	imageConfig.OwnedBy = "codex"
+	imageConfig.Enabled = true
+	if err := usage.UpsertModelConfig(imageConfig); err != nil {
+		t.Fatalf("upsert image config: %v", err)
+	}
+	if err := usage.UpsertAuthGroupOwnerMapping(usage.AuthGroupOwnerMappingRow{
+		AuthGroup: "codex",
+		Owner:     "codex",
+	}); err != nil {
+		t.Fatalf("upsert codex owner mapping: %v", err)
+	}
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(codexClientID)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(codexClientID) })
+	modelRegistry.RegisterClient(codexClientID, "codex", []*registry.ModelInfo{
+		{ID: imageModelID, Object: "model", OwnedBy: "openai"},
+		{ID: liveModelID, Object: "model", OwnedBy: "openai"},
+		{ID: staleChatModelID, Object: "model", OwnedBy: "openai"},
+	})
+	managementauthfiles.StoreDiscoveryCacheForTest("", "codex", []*registry.ModelInfo{
+		{ID: liveModelID, Object: "model", OwnedBy: "openai"},
+	})
+
+	cfg := &config.Config{Routing: config.RoutingConfig{
+		ChannelGroups: []config.RoutingChannelGroup{{
+			Name:          groupName,
+			AllowedModels: []string{liveModelID},
+			Match: config.ChannelGroupMatch{
+				Channels: []string{"codex"},
+			},
+		}},
+	}}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID: codexClientID, Provider: "codex", Status: coreauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("register codex auth: %v", err)
+	}
+
+	svc := New(cfg, manager)
+	availabilityIDs := configuredAvailabilityIDs(svc.ConfiguredAvailability("", ""))
+	if !containsModelID(availabilityIDs, imageModelID) {
+		t.Fatalf("configured availability missing management-authoritative model %q", imageModelID)
+	}
+	if containsModelID(availabilityIDs, staleChatModelID) {
+		t.Fatalf("configured availability kept static-only chat model %q; ids=%v", staleChatModelID, availabilityIDs)
+	}
+
+	modelIDs := configuredAvailabilityIDs(svc.Models("", groupName, AvailabilityFilterOptions{IgnoreGroupAllowedModels: true}))
+	if !containsModelID(modelIDs, imageModelID) {
+		t.Fatalf("scoped models with ignore missing management-authoritative model %q; ids=%v", imageModelID, modelIDs)
+	}
+	if containsModelID(modelIDs, staleChatModelID) {
+		t.Fatalf("scoped models with ignore kept static-only chat model %q; ids=%v", staleChatModelID, modelIDs)
+	}
+
+	pathRows, ok := svc.PathAvailability()["data"].([]modelPathAvailabilityResponse)
+	if !ok {
+		t.Fatalf("path availability data has unexpected type")
+	}
+	for _, row := range pathRows {
+		if row.ID == staleChatModelID {
+			t.Fatalf("path availability kept static-only chat model %q", staleChatModelID)
+		}
+		if row.ID != imageModelID {
+			continue
+		}
+		for _, path := range row.Paths {
+			if path.Family == "openai-v1-images" {
+				return
+			}
+		}
+		t.Fatalf("path availability model %q missing image capability: %#v", imageModelID, row.Paths)
+	}
+	t.Fatalf("path availability missing management-authoritative model %q", imageModelID)
+}
+
+func TestDropStaticDiscoveryProviderModelsDropsMappedOwnerLibrary(t *testing.T) {
+	const (
+		staleLibraryID = "gpt-5-stale-library"
+		liveModelID    = "gpt-5.6-sol"
+		codexClientID  = "mapped-owner-drop-codex"
+	)
+	managementauthfiles.ResetDiscoveryCacheForTest()
+	t.Cleanup(managementauthfiles.ResetDiscoveryCacheForTest)
+
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(codexClientID)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(codexClientID) })
+
+	modelRegistry.RegisterClient(codexClientID, "codex", []*registry.ModelInfo{
+		{ID: staleLibraryID, Object: "model", OwnedBy: "openai"},
+	})
+	managementauthfiles.StoreDiscoveryCacheForTest("", "codex", []*registry.ModelInfo{
+		{ID: liveModelID, Object: "model", OwnedBy: "openai"},
+	})
+
+	models := []map[string]any{
+		{"id": staleLibraryID, "object": "model", "owned_by": "openai"},
+		{"id": liveModelID, "object": "model", "owned_by": "openai"},
+		{"id": "unrelated-model", "object": "model", "owned_by": "deepseek"},
+	}
+	got := dropStaticDiscoveryProviderModels(
+		models,
+		modelRegistry,
+		map[string][]*registry.ModelInfo{
+			"codex": {{ID: liveModelID, Object: "model", OwnedBy: "openai"}},
+		},
+		map[string]*coreauth.Auth{
+			codexClientID: {ID: codexClientID, Provider: "codex", Status: coreauth.StatusActive},
+		},
+		map[string]string{"codex": "openai"},
+		nil,
+	)
+	ids := make(map[string]struct{}, len(got))
+	for _, m := range got {
+		ids[m["id"].(string)] = struct{}{}
+	}
+	if _, ok := ids[staleLibraryID]; ok {
+		t.Fatalf("stale mapped-owner library row should be dropped; got=%v", ids)
+	}
+	if _, ok := ids[liveModelID]; !ok {
+		t.Fatalf("live model should remain; got=%v", ids)
+	}
+	if _, ok := ids["unrelated-model"]; !ok {
+		t.Fatalf("unrelated owner model should remain; got=%v", ids)
+	}
+}
+
+func TestFilterModelsByRoutingAllowedModelsHonorsDefaultGroupList(t *testing.T) {
+	// Live discovery models are merged after CanServe and must still be filtered
+	// by the channel-group allowed-models list (default group when unscoped).
+	svc := NewForTenant("", &config.Config{
+		Routing: config.RoutingConfig{
+			IncludeDefaultGroup: true,
+			ChannelGroups: []config.RoutingChannelGroup{
+				{
+					Name:          "default",
+					AllowedModels: []string{"grok-4.5"},
+				},
+			},
+		},
+	}, nil)
+
+	models := []map[string]any{
+		{"id": "grok-4.5", "object": "model", "owned_by": "xAI"},
+		{"id": "grok-composer-2.5-fast", "object": "model", "owned_by": "xAI"},
+		{"id": "gpt-5.4", "object": "model", "owned_by": "openai"},
+	}
+	filtered := svc.filterModelsByRoutingAllowedModels(models, "")
+	if len(filtered) != 1 || filtered[0]["id"] != "grok-4.5" {
+		t.Fatalf("filtered = %#v, want only grok-4.5", filtered)
+	}
+}
+
+func TestPathAvailabilityFiltersLiveDiscoveryByDefaultAllowedModels(t *testing.T) {
+	// Path availability used to append xAI/codex/claude live discovery after
+	// CanServe without AllowedModels, so plaza/catalog re-introduced blocked
+	// models via path merge. Discovery rows must be filtered the same way.
+	// Use empty tenant so tenantRoutingConfig falls back to cfg.Routing (no DB).
+	const (
+		allowedModelID = "grok-4.5"
+		blockedModelID = "grok-composer-2.5-fast"
+		authID         = "path-allowed-xai-auth"
+	)
+	managementauthfiles.ResetDiscoveryCacheForTest()
+	t.Cleanup(managementauthfiles.ResetDiscoveryCacheForTest)
+	managementauthfiles.StoreDiscoveryCacheForTest("", "xai", []*registry.ModelInfo{
+		{ID: allowedModelID, Object: "model", OwnedBy: "xAI", Type: "xai"},
+		{ID: blockedModelID, Object: "model", OwnedBy: "xAI", Type: "xai"},
+	})
+
+	cfg := &config.Config{
+		Routing: config.RoutingConfig{
+			IncludeDefaultGroup: true,
+			ChannelGroups: []config.RoutingChannelGroup{
+				{
+					Name:          "default",
+					AllowedModels: []string{allowedModelID},
+				},
+			},
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfig(cfg)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID: authID, Provider: "xai", Status: coreauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("register xai auth: %v", err)
+	}
+
+	result := New(cfg, manager).PathAvailability()
+	// PathAvailability returns typed rows, not map[string]any.
+	rows, ok := result["data"].([]modelPathAvailabilityResponse)
+	if !ok {
+		t.Fatalf("data type = %T, want []modelPathAvailabilityResponse", result["data"])
+	}
+	ids := make(map[string]struct{}, len(rows))
+	for _, item := range rows {
+		if item.ID != "" {
+			ids[item.ID] = struct{}{}
+		}
+	}
+	if _, ok := ids[allowedModelID]; !ok {
+		t.Fatalf("path availability missing allowed model %q; ids=%v", allowedModelID, ids)
+	}
+	if _, ok := ids[blockedModelID]; ok {
+		t.Fatalf("path availability leaked blocked model %q; ids=%v", blockedModelID, ids)
+	}
+}
+
+func TestFilterModelsByRoutingAllowedModelsEmptyMeansUnrestricted(t *testing.T) {
+	svc := NewForTenant("", &config.Config{
+		Routing: config.RoutingConfig{
+			IncludeDefaultGroup: true,
+			ChannelGroups: []config.RoutingChannelGroup{
+				{Name: "default", AllowedModels: nil},
+			},
+		},
+	}, nil)
+	models := []map[string]any{{"id": "a"}, {"id": "b"}}
+	filtered := svc.filterModelsByRoutingAllowedModels(models, "")
+	if len(filtered) != 2 {
+		t.Fatalf("filtered = %#v, want unrestricted", filtered)
+	}
+}
+
+func TestFilterModelsByRoutingAllowedModelsHonorsNamedGroup(t *testing.T) {
+	svc := NewForTenant("", &config.Config{
+		Routing: config.RoutingConfig{
+			ChannelGroups: []config.RoutingChannelGroup{
+				{
+					Name:          "team",
+					AllowedModels: []string{"gpt-5"},
+				},
+			},
+		},
+	}, nil)
+	models := []map[string]any{{"id": "gpt-5"}, {"id": "claude-opus"}}
+	filtered := svc.filterModelsByRoutingAllowedModels(models, "team")
+	if len(filtered) != 1 || filtered[0]["id"] != "gpt-5" {
+		t.Fatalf("filtered = %#v, want only gpt-5", filtered)
+	}
+}
+
+func TestConfiguredAvailabilityIgnoreGroupAllowedModelsKeepsFullChannelSet(t *testing.T) {
+	// Channel-group editor must list every channel-servable model for checkbox
+	// selection, even when AllowedModels already restricts plaza/catalog.
+	// Use a non-discovery provider so registry rows are not stripped as static
+	// claude/codex/xai discovery placeholders.
+	const (
+		authID   = "editor-picker-auth"
+		tenantID = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+		modelA   = "editor-picker-model-a"
+		modelB   = "editor-picker-model-b"
+	)
+	modelRegistry := registry.GetGlobalRegistry()
+	modelRegistry.UnregisterClient(authID)
+	t.Cleanup(func() { modelRegistry.UnregisterClient(authID) })
+	modelRegistry.RegisterClient(authID, "opencode-go", []*registry.ModelInfo{
+		{ID: modelA, Object: "model", OwnedBy: "opencode"},
+		{ID: modelB, Object: "model", OwnedBy: "opencode"},
+	})
+
+	cfg := &config.Config{
+		Routing: config.RoutingConfig{
+			IncludeDefaultGroup: true,
+			ChannelGroups: []config.RoutingChannelGroup{
+				{
+					Name:          "default",
+					AllowedModels: []string{modelA},
+				},
+			},
+		},
+	}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.SetConfigForTenant(tenantID, cfg)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID: authID, TenantID: tenantID, Provider: "opencode-go", Status: coreauth.StatusActive,
+	}); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	svc := NewForTenant(tenantID, cfg, manager)
+
+	restricted := svc.ConfiguredAvailability("", "default")
+	restrictedIDs := configuredAvailabilityIDs(restricted)
+	if len(restrictedIDs) != 1 || restrictedIDs[0] != modelA {
+		t.Fatalf("restricted availability = %v, want only %s", restrictedIDs, modelA)
+	}
+
+	editor := svc.ConfiguredAvailability("", "default", AvailabilityFilterOptions{IgnoreGroupAllowedModels: true})
+	editorIDs := configuredAvailabilityIDs(editor)
+	if len(editorIDs) != 2 {
+		t.Fatalf("editor availability = %v, want both channel-servable models", editorIDs)
+	}
+	want := map[string]bool{modelA: true, modelB: true}
+	for _, id := range editorIDs {
+		if !want[id] {
+			t.Fatalf("editor availability unexpected id %q in %v", id, editorIDs)
+		}
+	}
+}
+
+func configuredAvailabilityIDs(result map[string]any) []string {
+	data, _ := result["data"].([]map[string]any)
+	if data == nil {
+		if raw, ok := result["data"].([]any); ok {
+			out := make([]string, 0, len(raw))
+			for _, item := range raw {
+				entry, _ := item.(map[string]any)
+				if id, _ := entry["id"].(string); id != "" {
+					out = append(out, id)
+				}
+			}
+			return out
+		}
+		return nil
+	}
+	out := make([]string, 0, len(data))
+	for _, entry := range data {
+		if id, _ := entry["id"].(string); id != "" {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+func containsModelID(ids []string, want string) bool {
+	for _, id := range ids {
+		if id == want {
+			return true
+		}
+	}
+	return false
 }

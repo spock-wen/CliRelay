@@ -1827,6 +1827,9 @@ func TestQueryFiltersForLogsLinksFilterFacets(t *testing.T) {
 	if !slices.Equal(filters.APIKeys, []string{"sk-a", "sk-c"}) {
 		t.Fatalf("filters.APIKeys = %#v, want [sk-a sk-c]", filters.APIKeys)
 	}
+	if filters.APIKeyCounts["sk-a"] != 1 || filters.APIKeyCounts["sk-c"] != 1 {
+		t.Fatalf("filters.APIKeyCounts = %#v, want one matching request per key", filters.APIKeyCounts)
+	}
 	if !slices.Equal(filters.Channels, []string{"Anthropic", "OpenCode"}) {
 		t.Fatalf("filters.Channels = %#v, want [Anthropic OpenCode]", filters.Channels)
 	}
@@ -1853,6 +1856,216 @@ func TestQueryFiltersForLogsLinksFilterFacets(t *testing.T) {
 	}
 	if !slices.Equal(filters.Statuses, []string{"success"}) {
 		t.Fatalf("filters.Statuses = %#v, want key-compatible statuses", filters.Statuses)
+	}
+}
+
+func TestQueryFiltersCollapsesOwnedKeysToOneAccountOption(t *testing.T) {
+	// Multi-key end-user accounts must appear once in request-log filters under
+	// the account display name. Selecting that option matches every owned key.
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+
+	db := getDB()
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS end_users (
+			id TEXT PRIMARY KEY,
+			tenant_id TEXT NOT NULL,
+			username TEXT NOT NULL,
+			username_normalized TEXT NOT NULL,
+			display_name TEXT NOT NULL,
+			password_hash TEXT NOT NULL DEFAULT 'x',
+			status TEXT NOT NULL DEFAULT 'active',
+			permission_profile_id TEXT NOT NULL DEFAULT '',
+			daily_limit INTEGER NOT NULL DEFAULT 0,
+			total_quota INTEGER NOT NULL DEFAULT 0,
+			spending_limit REAL NOT NULL DEFAULT 0,
+			daily_spending_limit REAL NOT NULL DEFAULT 0,
+			concurrency_limit INTEGER NOT NULL DEFAULT 0,
+			rpm_limit INTEGER NOT NULL DEFAULT 0,
+			tpm_limit INTEGER NOT NULL DEFAULT 0,
+			allowed_models TEXT NOT NULL DEFAULT '[]',
+			allowed_channels TEXT NOT NULL DEFAULT '[]',
+			allowed_channel_groups TEXT NOT NULL DEFAULT '[]',
+			system_prompt TEXT NOT NULL DEFAULT ''
+		)
+	`); err != nil {
+		t.Fatalf("create end_users: %v", err)
+	}
+
+	endUserID := "eu-kittors"
+	if _, err := db.Exec(`
+		INSERT INTO end_users (id, tenant_id, username, username_normalized, display_name)
+		VALUES (?, ?, 'kittors', 'kittors', 'Kittors')
+	`, endUserID, systemTenantID); err != nil {
+		t.Fatalf("insert end user: %v", err)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	defaultID := "key-default"
+	extraID := "key-extra"
+	if err := UpsertAPIKey(APIKeyRow{
+		TenantID: systemTenantID, ID: defaultID, Key: "sk-kittors-default", Name: "default",
+		EndUserID: endUserID, IsDefault: true, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("upsert default key: %v", err)
+	}
+	if err := UpsertAPIKey(APIKeyRow{
+		TenantID: systemTenantID, ID: extraID, Key: "sk-kittors-test", Name: "测试 key",
+		EndUserID: endUserID, IsDefault: false, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("upsert test key: %v", err)
+	}
+	if err := UpsertAPIKey(APIKeyRow{
+		TenantID: systemTenantID, ID: "key-solo", Key: "sk-solo", Name: "zbb",
+		CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("upsert solo key: %v", err)
+	}
+
+	ts := time.Now().UTC()
+	InsertLogWithDetailsIdentity("sk-kittors-default", defaultID, "Kittors", "gpt-a", "src", "ch", "a1", false, ts, 1, 1, TokenStats{TotalTokens: 10}, "", "", "")
+	InsertLogWithDetailsIdentity("sk-kittors-test", extraID, "测试 key", "gpt-b", "src", "ch", "a2", false, ts.Add(time.Second), 1, 1, TokenStats{TotalTokens: 20}, "", "", "")
+	InsertLogWithDetailsIdentity("sk-solo", "key-solo", "zbb", "gpt-c", "src", "ch", "a3", false, ts.Add(2*time.Second), 1, 1, TokenStats{TotalTokens: 5}, "", "", "")
+
+	filters, err := QueryFilters(7)
+	if err != nil {
+		t.Fatalf("QueryFilters() error = %v", err)
+	}
+	if len(filters.APIKeys) != 2 {
+		t.Fatalf("filters.APIKeys = %#v, want 2 options (account + solo)", filters.APIKeys)
+	}
+	if !slices.Contains(filters.APIKeys, "sk-kittors-default") {
+		t.Fatalf("filters.APIKeys = %#v, want representative sk-kittors-default", filters.APIKeys)
+	}
+	if slices.Contains(filters.APIKeys, "sk-kittors-test") {
+		t.Fatalf("filters.APIKeys = %#v, must not list owned non-representative key", filters.APIKeys)
+	}
+	if filters.APIKeyNames["sk-kittors-default"] != "Kittors" {
+		t.Fatalf("filters.APIKeyNames[sk-kittors-default] = %q, want Kittors", filters.APIKeyNames["sk-kittors-default"])
+	}
+	if filters.APIKeyCounts["sk-kittors-default"] != 2 {
+		t.Fatalf("filters.APIKeyCounts[sk-kittors-default] = %d, want 2 account requests", filters.APIKeyCounts["sk-kittors-default"])
+	}
+	if filters.APIKeyCounts["sk-solo"] != 1 {
+		t.Fatalf("filters.APIKeyCounts[sk-solo] = %d, want 1", filters.APIKeyCounts["sk-solo"])
+	}
+	for _, name := range filters.APIKeyNames {
+		if name == "测试 key" {
+			t.Fatalf("filters.APIKeyNames leaked key label %q", name)
+		}
+	}
+
+	// Selecting a concrete secret is key-scoped; account-wide needs EndUserID.
+	logs, err := QueryLogs(LogQueryParams{Page: 1, Size: 50, Days: 7, APIKeys: []string{"sk-kittors-default"}})
+	if err != nil {
+		t.Fatalf("QueryLogs(key filter) error = %v", err)
+	}
+	if logs.Total != 1 {
+		t.Fatalf("QueryLogs total = %d, want 1 (presented key only)", logs.Total)
+	}
+	accountLogs, err := QueryLogs(LogQueryParams{Page: 1, Size: 50, Days: 7, EndUserID: endUserID})
+	if err != nil {
+		t.Fatalf("QueryLogs(end user) error = %v", err)
+	}
+	if accountLogs.Total != 2 {
+		t.Fatalf("QueryLogs(end user) total = %d, want 2 (both owned keys)", accountLogs.Total)
+	}
+
+	dist, err := QueryAPIKeyDistribution(7)
+	if err != nil {
+		t.Fatalf("QueryAPIKeyDistribution() error = %v", err)
+	}
+	if len(dist) != 2 {
+		t.Fatalf("distribution len = %d, want 2: %#v", len(dist), dist)
+	}
+	var account *APIKeyDistributionPoint
+	for i := range dist {
+		if dist[i].APIKey == "sk-kittors-default" || dist[i].Name == "Kittors" {
+			account = &dist[i]
+			break
+		}
+	}
+	if account == nil {
+		t.Fatalf("missing account distribution point in %#v", dist)
+	}
+	if account.Name != "Kittors" {
+		t.Fatalf("account name = %q, want Kittors", account.Name)
+	}
+	if account.Requests != 2 || account.Tokens != 30 {
+		t.Fatalf("account distribution = %#v, want 2 requests / 30 tokens", account)
+	}
+}
+
+func TestQueryFiltersUsesActiveRepAfterSoftDeletedOwnedKey(t *testing.T) {
+	// Soft-deleted owned keys stay in api_keys for log ownership, but the
+	// account filter representative must be an active secret, never a tombstone.
+	initTestUsageDB(t, config.RequestLogStorageConfig{})
+	db := getDB()
+	if _, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS end_users (
+			id TEXT PRIMARY KEY,
+			tenant_id TEXT NOT NULL,
+			username TEXT NOT NULL,
+			username_normalized TEXT NOT NULL,
+			display_name TEXT NOT NULL,
+			password_hash TEXT NOT NULL DEFAULT 'x',
+			status TEXT NOT NULL DEFAULT 'active',
+			permission_profile_id TEXT NOT NULL DEFAULT '',
+			daily_limit INTEGER NOT NULL DEFAULT 0,
+			total_quota INTEGER NOT NULL DEFAULT 0,
+			spending_limit REAL NOT NULL DEFAULT 0,
+			daily_spending_limit REAL NOT NULL DEFAULT 0,
+			concurrency_limit INTEGER NOT NULL DEFAULT 0,
+			rpm_limit INTEGER NOT NULL DEFAULT 0,
+			tpm_limit INTEGER NOT NULL DEFAULT 0,
+			allowed_models TEXT NOT NULL DEFAULT '[]',
+			allowed_channels TEXT NOT NULL DEFAULT '[]',
+			allowed_channel_groups TEXT NOT NULL DEFAULT '[]',
+			system_prompt TEXT NOT NULL DEFAULT ''
+		)
+	`); err != nil {
+		t.Fatalf("create end_users: %v", err)
+	}
+	endUserID := "eu-soft-del"
+	if _, err := db.Exec(`
+		INSERT INTO end_users (id, tenant_id, username, username_normalized, display_name)
+		VALUES (?, ?, 'lyding', 'lyding', 'LYDing')
+	`, endUserID, systemTenantID); err != nil {
+		t.Fatalf("insert end user: %v", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := UpsertAPIKey(APIKeyRow{
+		TenantID: systemTenantID, ID: "key-dead", Key: "sk-deleted-old", Name: "LYDing",
+		EndUserID: endUserID, Disabled: true, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("upsert dead: %v", err)
+	}
+	if err := UpsertAPIKey(APIKeyRow{
+		TenantID: systemTenantID, ID: "key-live", Key: "sk-live-new", Name: "LYDing1",
+		EndUserID: endUserID, IsDefault: true, CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("upsert live: %v", err)
+	}
+	ts := time.Now().UTC()
+	InsertLogWithDetailsIdentity("sk-old-plain", "key-dead", "LYDing", "gpt-a", "src", "ch", "a1", false, ts, 1, 1, TokenStats{TotalTokens: 1}, "", "", "")
+	InsertLogWithDetailsIdentity("sk-live-new", "key-live", "LYDing1", "gpt-b", "src", "ch", "a2", false, ts.Add(time.Second), 1, 1, TokenStats{TotalTokens: 1}, "", "", "")
+
+	filters, err := QueryFilters(7)
+	if err != nil {
+		t.Fatalf("QueryFilters: %v", err)
+	}
+	if len(filters.APIKeys) != 1 {
+		t.Fatalf("filters.APIKeys = %#v, want one account option", filters.APIKeys)
+	}
+	if filters.APIKeys[0] != "sk-live-new" {
+		t.Fatalf("representative = %q, want sk-live-new (active)", filters.APIKeys[0])
+	}
+	if filters.APIKeyNames["sk-live-new"] != "LYDing" {
+		t.Fatalf("filter name = %q, want account display LYDing not key name", filters.APIKeyNames["sk-live-new"])
+	}
+	for _, name := range filters.APIKeyNames {
+		if name == "LYDing1" {
+			t.Fatalf("filters leaked key name LYDing1: %#v", filters.APIKeyNames)
+		}
 	}
 }
 
@@ -1897,6 +2110,17 @@ func TestQueryAPIKeyDistributionMergesRawAndIDGroupsForSameKey(t *testing.T) {
 		t.Fatalf("UpsertAPIKey(other): %v", err)
 	}
 	InsertLogWithDetailsIdentity("sk-other", "other-id", "Other", "gpt-test", "source", "channel", "auth-2", false, now, 1, 1, TokenStats{TotalTokens: 5}, "", "", "")
+
+	filters, err := QueryFilters(7)
+	if err != nil {
+		t.Fatalf("QueryFilters() error = %v", err)
+	}
+	if filters.APIKeyCounts[rawKey] != 5 {
+		t.Fatalf("filters.APIKeyCounts[%s] = %d, want 5 merged requests", rawKey, filters.APIKeyCounts[rawKey])
+	}
+	if filters.APIKeyIDCounts[stableID] != 5 {
+		t.Fatalf("filters.APIKeyIDCounts[%s] = %d, want 5 merged requests", stableID, filters.APIKeyIDCounts[stableID])
+	}
 
 	dist, err := QueryAPIKeyDistribution(7)
 	if err != nil {
@@ -2190,18 +2414,22 @@ func TestQueryStatsAndHeatmapCountSessionsFromDetails(t *testing.T) {
 		ContentRetentionDays:   30,
 		CleanupIntervalMinutes: 1440,
 	})
+	// Stable api_key_id is required for rollup-backed QueryStats.
+	if err := UpsertAPIKey(APIKeyRow{ID: "key-heatmap", Key: "sk-heatmap", Name: "Heatmap"}); err != nil {
+		t.Fatalf("UpsertAPIKey: %v", err)
+	}
 
 	// Keep both samples inside the rolling query window instead of letting a
 	// hard-coded calendar date age out as the test suite advances.
 	today := CutoffStartUTC(1).Add(12 * time.Hour)
 	yesterday := today.AddDate(0, 0, -1)
-	InsertLogWithDetails("sk-heatmap", "Heatmap", "gpt-5.4", "codex", "Codex", "auth-1", false, today, 10, 5, TokenStats{
+	InsertLogWithDetailsIdentity("sk-heatmap", "key-heatmap", "Heatmap", "gpt-5.4", "codex", "Codex", "auth-1", false, today, 10, 5, TokenStats{
 		InputTokens: 10, OutputTokens: 20, TotalTokens: 30,
 	}, "{}", "{}", `{"session_id":"session-a","request_id":"req-a1"}`)
-	InsertLogWithDetails("sk-heatmap", "Heatmap", "gpt-5.4", "codex", "Codex", "auth-1", false, today.Add(time.Minute), 10, 5, TokenStats{
+	InsertLogWithDetailsIdentity("sk-heatmap", "key-heatmap", "Heatmap", "gpt-5.4", "codex", "Codex", "auth-1", false, today.Add(time.Minute), 10, 5, TokenStats{
 		InputTokens: 20, OutputTokens: 30, TotalTokens: 50,
 	}, "{}", "{}", `{"session_id":"session-a","request_id":"req-a2"}`)
-	InsertLogWithDetails("sk-heatmap", "Heatmap", "gpt-5.4", "codex", "Codex", "auth-1", false, yesterday, 10, 5, TokenStats{
+	InsertLogWithDetailsIdentity("sk-heatmap", "key-heatmap", "Heatmap", "gpt-5.4", "codex", "Codex", "auth-1", false, yesterday, 10, 5, TokenStats{
 		InputTokens: 1, OutputTokens: 2, TotalTokens: 3,
 	}, "{}", "{}", `{"conversation_id":"session-b"}`)
 

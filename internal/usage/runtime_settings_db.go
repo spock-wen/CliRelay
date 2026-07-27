@@ -77,7 +77,13 @@ func ApplyStoredRuntimeSettings(cfg *config.Config) bool {
 	if cfg == nil || !ConfigStoreAvailable() {
 		return false
 	}
-	return runtimeSettingsStore().ApplyToConfig(cfg)
+	store := runtimeSettingsStore()
+	applied := store.ApplyToConfig(cfg)
+	if cfg.EnsureProviderStableIDs() {
+		persistProviderStableIDBackfill(store, cfg)
+		return true
+	}
+	return applied
 }
 
 func MigrateRuntimeSettingsFromConfig(cfg *config.Config, configFilePath string) int {
@@ -113,7 +119,38 @@ func ApplyStoredRuntimeSettingsForTenant(tenantID string, cfg *config.Config) bo
 	if cfg == nil || !ConfigStoreAvailable() {
 		return false
 	}
-	return runtimeSettingsStoreForTenant(tenantID).ApplyToConfig(cfg)
+	store := runtimeSettingsStoreForTenant(tenantID)
+	applied := store.ApplyToConfig(cfg)
+	if cfg.EnsureProviderStableIDs() {
+		persistProviderStableIDBackfill(store, cfg)
+		return true
+	}
+	return applied
+}
+
+func persistProviderStableIDBackfill(store sqlsettings.RuntimeSettingsStore, cfg *config.Config) {
+	settings := []struct {
+		key   string
+		value any
+	}{
+		{RuntimeSettingGeminiKeys, cfg.GeminiKey},
+		{RuntimeSettingCodexKeys, cfg.CodexKey},
+		{RuntimeSettingClaudeKeys, cfg.ClaudeKey},
+		{RuntimeSettingBedrockKeys, cfg.BedrockKey},
+		{RuntimeSettingOpenCodeGoKeys, cfg.OpenCodeGoKey},
+		{RuntimeSettingClineKeys, cfg.ClineKey},
+		{RuntimeSettingOllamaCloudKeys, cfg.OllamaCloudKey},
+		{RuntimeSettingOpenAICompatibility, cfg.OpenAICompatibility},
+		{RuntimeSettingVertexCompatKeys, cfg.VertexCompatAPIKey},
+	}
+	for _, setting := range settings {
+		if !store.Exists(setting.key) {
+			continue
+		}
+		if err := store.Upsert(setting.key, setting.value); err != nil {
+			continue
+		}
+	}
 }
 
 // BuildTenantRuntimeConfig returns an isolated runtime snapshot for one tenant.
@@ -139,6 +176,9 @@ func BuildTenantRuntimeConfig(base *config.Config, tenantID string) config.Confi
 	tenantCfg.VertexCompatAPIKey = nil
 	tenantCfg.ClaudeHeaderDefaults = config.ClaudeHeaderDefaults{}
 	tenantCfg.KimiHeaderDefaults = config.KimiHeaderDefaults{}
+	// Clear tenant identity presets so system custom UA/version never leak, but
+	// re-normalize after apply so missing runtime rows still default providers
+	// to enabled (otherwise XAI/Codex learn+apply is silently off for new tenants).
 	tenantCfg.IdentityFingerprint = config.IdentityFingerprintConfig{}
 	tenantCfg.CodexOAuthAdmission = config.CodexOAuthAdmissionConfig{}
 	tenantCfg.OAuthExcludedModels = nil
@@ -152,5 +192,6 @@ func BuildTenantRuntimeConfig(base *config.Config, tenantID string) config.Confi
 	}
 	tenantCfg.ProxyPool = ListProxyPoolForTenant(tenantID)
 	ApplyStoredRuntimeSettingsForTenant(tenantID, &tenantCfg)
+	tenantCfg.SanitizeIdentityFingerprint()
 	return tenantCfg
 }

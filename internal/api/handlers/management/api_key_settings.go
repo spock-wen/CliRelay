@@ -11,32 +11,42 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/access"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/enduser"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	apikeysettings "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/apikey"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/quota"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 // refreshAPIKeyCache rebuilds the in-memory access provider cache from SQLite.
 // Must be called after every API key write operation.
-func (h *Handler) refreshAPIKeyCache() {
+// Returns error when live access manager update fails (fail-closed for callers that care).
+func (h *Handler) refreshAPIKeyCache() error {
 	if h == nil || h.cfg == nil {
-		return
+		return nil
 	}
 	// Always update the global provider registry (used during config reload and service bootstrap).
 	configaccess.Register(&h.cfg.SDKConfig)
 	// Also update the live access manager provider snapshot so changes take effect immediately
 	// without waiting for a full config reload.
 	if h.accessManager != nil {
-		_, _ = access.ApplyAccessProviders(h.accessManager, nil, h.cfg)
+		if _, err := access.ApplyAccessProviders(h.accessManager, nil, h.cfg); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func (h *Handler) apiKeySettings(c *gin.Context) *apikeysettings.Service {
+	return h.apiKeySettingsForTenant(effectiveTenantID(c))
+}
+
+func (h *Handler) apiKeySettingsForTenant(tenantID string) *apikeysettings.Service {
 	if h == nil {
-		return apikeysettings.NewService(nil)
+		return apikeysettings.NewService(nil, apikeysettings.WithTenantID(tenantID))
 	}
 
-	tenantID := effectiveTenantID(c)
 	var auths []*coreauth.Auth
 	if h.authManager != nil {
 		auths = h.authManager.ListForTenant(tenantID)
@@ -94,7 +104,10 @@ func (h *Handler) PutAPIKeys(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	h.refreshAPIKeyCache()
+	if err := h.refreshAPIKeyCache(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(200, gin.H{"status": "ok"})
 }
 
@@ -111,7 +124,10 @@ func (h *Handler) PatchAPIKeys(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	h.refreshAPIKeyCache()
+	if err := h.refreshAPIKeyCache(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(200, gin.H{"status": "ok"})
 }
 
@@ -124,7 +140,10 @@ func (h *Handler) DeleteAPIKeys(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	h.refreshAPIKeyCache()
+	if err := h.refreshAPIKeyCache(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(200, gin.H{"status": "ok"})
 }
 
@@ -142,36 +161,160 @@ func (h *Handler) PutAPIKeyPermissionProfiles(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
 	}
+	if err := validatePeriodPayloadJSON(data); err != nil {
+		if errors.Is(err, quota.ErrPeriodDayLegacyConflict) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "period_day_legacy_conflict", "message": "daily-spending-limit conflicts with period-spending-limits.day"}})
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "invalid_period_spending_limit", "message": err.Error()}})
+		}
+		return
+	}
 
 	var profiles []usage.APIKeyPermissionProfileRow
+	syncAccounts := false
 	if err = json.Unmarshal(data, &profiles); err != nil {
 		var obj struct {
-			Items []usage.APIKeyPermissionProfileRow `json:"items"`
+			Items        []usage.APIKeyPermissionProfileRow `json:"items"`
+			SyncAccounts bool                               `json:"sync-accounts"`
 		}
 		if err2 := json.Unmarshal(data, &obj); err2 != nil {
 			c.JSON(400, gin.H{"error": "invalid body"})
 			return
 		}
 		profiles = obj.Items
+		syncAccounts = obj.SyncAccounts
 	}
 
-	if err := h.apiKeySettings(c).ReplacePermissionProfiles(profiles); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	result, err := h.apiKeySettings(c).ReplacePermissionProfilesWithCaps(profiles, syncAccounts)
+	if err != nil {
+		if errors.Is(err, enduser.ErrFiveHourProjectionWarming) {
+			c.JSON(http.StatusConflict, gin.H{"error": gin.H{"code": "five_hour_quota_projection_warming", "message": "5-hour quota projection is still warming"}})
+		} else if errors.Is(err, quota.ErrPeriodDayLegacyConflict) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "period_day_legacy_conflict", "message": "daily-spending-limit conflicts with period-spending-limits.day"}})
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		}
 		return
 	}
-	h.refreshAPIKeyCache()
-	c.JSON(200, gin.H{"status": "ok"})
+	if err := h.refreshAPIKeyCache(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if len(result.CappedKeys) > 0 {
+		principal, _ := principalFromContext(c)
+		if audit := identity.Default(); audit != nil {
+			audit.RecordAudit(c.Request.Context(), identity.AuditEvent{
+				TenantID: effectiveTenantID(c), ActorKind: principal.Kind, ActorUserID: principal.User.ID, ActorSessionID: principal.SessionID,
+				Action: "permission_profile.period_quota.cap_keys", ResourceType: "api_key_permission_profiles", Result: "success",
+				Changes: map[string]any{"capped-keys": result.CappedKeys},
+			})
+		}
+	}
+	c.JSON(200, gin.H{"status": "ok", "applied_count": result.AppliedCount, "capped-keys": result.CappedKeys})
 }
 
 // api-key-entries: backed by SQLite api_keys table
 func (h *Handler) GetAPIKeyEntries(c *gin.Context) {
-	c.JSON(200, gin.H{"api-key-entries": h.apiKeySettings(c).ListEntries()})
+	entries, err := h.apiKeySettings(c).ListEntriesWithDailySpending()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"api-key-entries": entries})
+}
+
+// ResetAPIKeyDailySpending sets today's spending baseline so effective used becomes 0.
+// POST /v0/management/api-key-entries/daily-spending/reset
+func (h *Handler) ResetAPIKeyDailySpending(c *gin.Context) {
+	var body struct {
+		ID  *string `json:"id"`
+		Key *string `json:"key"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	actor := apikeysettings.DailySpendingResetActor{Kind: "service_credential"}
+	if principal, ok := principalFromContext(c); ok {
+		actor.Kind = strings.TrimSpace(principal.Kind)
+		if actor.Kind == "" {
+			actor.Kind = "service_credential"
+		}
+		actor.UserID = strings.TrimSpace(principal.User.ID)
+		actor.Username = strings.TrimSpace(principal.User.Username)
+		if actor.Username == "" {
+			actor.Username = strings.TrimSpace(principal.User.DisplayName)
+		}
+	}
+	result, err := h.apiKeySettings(c).ResetDailySpending(body.ID, body.Key, actor)
+	if err != nil {
+		switch {
+		case errors.Is(err, apikeysettings.ErrItemNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "item not found"})
+			return
+		case errors.Is(err, apikeysettings.ErrDailySpendingLimitMissing):
+			c.JSON(http.StatusBadRequest, gin.H{"error": "daily spending limit is not set"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status":                     "ok",
+		"id":                         result.ID,
+		"key":                        result.Key,
+		"daily-spending-limit":       result.DailySpendingLimit,
+		"daily-spending-used":        result.DailySpendingUsed,
+		"daily-spending-remaining":   result.DailySpendingRemaining,
+		"daily-spending-reset-count": result.DailySpendingResetCount,
+	})
+}
+
+// GetAPIKeyDailySpendingResetHistory lists manual reset events for a key.
+// GET /v0/management/api-key-entries/daily-spending/reset-history?id=... or ?key=...
+func (h *Handler) GetAPIKeyDailySpendingResetHistory(c *gin.Context) {
+	id := strings.TrimSpace(c.Query("id"))
+	key := strings.TrimSpace(c.Query("key"))
+	var idPtr, keyPtr *string
+	if id != "" {
+		idPtr = &id
+	}
+	if key != "" {
+		keyPtr = &key
+	}
+	limit := 100
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			limit = n
+		}
+	}
+	events, err := h.apiKeySettings(c).ListDailySpendingResetHistory(idPtr, keyPtr, limit)
+	if err != nil {
+		if errors.Is(err, apikeysettings.ErrItemNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "item not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if events == nil {
+		events = []usage.APIKeyDailySpendingResetEvent{}
+	}
+	c.JSON(http.StatusOK, gin.H{"items": events, "total": len(events)})
 }
 
 func (h *Handler) PutAPIKeyEntries(c *gin.Context) {
 	data, err := c.GetRawData()
 	if err != nil {
 		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	if err := validatePeriodPayloadJSON(data); err != nil {
+		if errors.Is(err, quota.ErrPeriodDayLegacyConflict) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "period_day_legacy_conflict", "message": "daily-spending-limit conflicts with period-spending-limits.day"}})
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "invalid_period_spending_limit", "message": err.Error()}})
+		}
 		return
 	}
 	var arr []config.APIKeyEntry
@@ -193,7 +336,10 @@ func (h *Handler) PutAPIKeyEntries(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	h.refreshAPIKeyCache()
+	if err := h.refreshAPIKeyCache(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(200, gin.H{"status": "ok"})
 }
 
@@ -209,7 +355,20 @@ func (h *Handler) PatchAPIKeyEntry(c *gin.Context) {
 		return
 	}
 	if err := h.apiKeySettings(c).PatchEntry(body.ID, body.Index, body.Match, *body.Value); err != nil {
+		var exceeds *quota.LimitExceedsAccountError
 		switch {
+		case errors.Is(err, quota.ErrPeriodDayLegacyConflict):
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "period_day_legacy_conflict", "message": "daily-spending-limit conflicts with period-spending-limits.day"}})
+			return
+		case errors.Is(err, enduser.ErrFiveHourProjectionWarming):
+			c.JSON(http.StatusConflict, gin.H{"error": gin.H{"code": "five_hour_quota_projection_warming", "message": "5-hour quota projection is still warming"}})
+			return
+		case errors.As(err, &exceeds):
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "key_period_limit_exceeds_account", "message": exceeds.Error(), "details": gin.H{"period": exceeds.Period, "key_limit": exceeds.KeyLimit, "account_limit": exceeds.AccountLimit}}})
+			return
+		case errors.Is(err, apikeysettings.ErrOwnedKeyAccountManagedField):
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{"code": "owned_key_account_managed_field", "message": err.Error()}})
+			return
 		case errors.Is(err, apikeysettings.ErrItemNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"error": "item not found"})
 			return
@@ -223,7 +382,10 @@ func (h *Handler) PatchAPIKeyEntry(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	h.refreshAPIKeyCache()
+	if err := h.refreshAPIKeyCache(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(200, gin.H{"status": "ok"})
 }
 
@@ -251,7 +413,10 @@ func (h *Handler) DeleteAPIKeyEntry(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	h.refreshAPIKeyCache()
+	if err := h.refreshAPIKeyCache(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(200, gin.H{"status": "ok", "logs_deleted": result.LogsDeleted})
 }
 

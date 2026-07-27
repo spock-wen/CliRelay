@@ -1,8 +1,10 @@
 package management
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	postgresstore "github.com/router-for-me/CLIProxyAPI/v6/internal/storage/postgres"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/storage/postgres/compatdriver"
+	_ "modernc.org/sqlite"
 )
 
 func TestPermissionForManagementRequest(t *testing.T) {
@@ -26,11 +29,18 @@ func TestPermissionForManagementRequest(t *testing.T) {
 		{http.MethodGet, "/v0/management/users", "tenant.users.read"},
 		{http.MethodPut, "/v0/management/users/u/roles", "tenant.users.assign_roles"},
 		{http.MethodPut, "/v0/management/roles/r/users", "tenant.users.assign_roles"},
+		{http.MethodPatch, "/v0/management/end-users/eu/api-keys/key", "api_keys.write"},
+		{http.MethodPost, "/v0/management/end-users/eu/api-keys/key/rotate", "api_keys.write"},
+		{http.MethodGet, "/v0/management/end-users/eu/daily-spending/reset-history", "end_users.read"},
 		{http.MethodGet, "/v0/management/menus", "platform.menus.read"},
 		{http.MethodPost, "/v0/management/menus", "platform.menus.update"},
 		{http.MethodPatch, "/v0/management/menus/system.config", "platform.menus.update"},
 		{http.MethodDelete, "/v0/management/menus/custom.menu", "platform.menus.update"},
 		{http.MethodDelete, "/v0/management/usage/logs", "request_logs.delete"},
+		{http.MethodGet, "/v0/management/audit-logs", "tenant.audit.read"},
+		{http.MethodDelete, "/v0/management/audit-logs", "tenant.audit.delete"},
+		{http.MethodGet, "/v0/management/audit-logs/12", "tenant.audit.read"},
+		{http.MethodDelete, "/v0/management/audit-logs/12", "tenant.audit.delete"},
 		{http.MethodGet, "/v0/management/usage/logs/1/content", "request_logs.content.read"},
 		{http.MethodGet, "/v0/management/get-auth-status", "auth_files.oauth"},
 		{http.MethodPost, "/v0/management/proxy-pool/check", "proxies.test"},
@@ -73,6 +83,23 @@ func TestPermissionForManagementRequest(t *testing.T) {
 	}
 }
 
+func TestEndUserResetHistoryPermissionAllowsReadOrWrite(t *testing.T) {
+	path := "/v0/management/end-users/eu/daily-spending/reset-history"
+	permission := permissionForManagementRequest(http.MethodGet, path)
+	for _, permissions := range []map[string]bool{
+		{"end_users.read": true},
+		{"end_users.write": true},
+	} {
+		principal := identity.Principal{Permissions: permissions}
+		if !principalHasManagementRequestPermission(principal, http.MethodGet, path, permission) {
+			t.Fatalf("permissions %#v should allow reset history", permissions)
+		}
+	}
+	if principalHasManagementRequestPermission(identity.Principal{}, http.MethodGet, path, permission) {
+		t.Fatal("principal without end-user permissions should not allow reset history")
+	}
+}
+
 func TestServiceCredentialCannotAccessTenantGovernance(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h := NewHandler(nil, "", nil)
@@ -98,6 +125,139 @@ func TestServiceCredentialCannotAccessTenantGovernance(t *testing.T) {
 	}
 	if reached {
 		t.Fatal("service credential reached tenant governance handler")
+	}
+}
+
+func TestPostUserBindsSnakeCaseDisplayName(t *testing.T) {
+	ctx := context.Background()
+	service := newSQLiteIdentityTestService(t)
+
+	h := NewHandler(nil, "", nil)
+	h.identityService = service
+	t.Cleanup(h.Close)
+
+	principal := identity.Principal{
+		Kind:            "user",
+		User:            identity.User{ID: identity.SystemUserID, TenantID: identity.SystemTenantID},
+		EffectiveTenant: identity.Tenant{ID: identity.SystemTenantID},
+		PlatformAdmin:   true,
+	}
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/v0/management/users", func(c *gin.Context) {
+		c.Set(managementPrincipalKey, principal)
+		h.PostUser(c)
+	})
+
+	body := []byte(`{"username":"snake-case-user","display_name":"Snake Case User","password":"Snake-Case-Password-123!","role_ids":[]}`)
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v0/management/users", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var user identity.User
+	if err := json.Unmarshal(rec.Body.Bytes(), &user); err != nil {
+		t.Fatalf("decode response: %v; body=%s", err, rec.Body.String())
+	}
+	if user.DisplayName != "Snake Case User" {
+		t.Fatalf("display_name = %q, want %q", user.DisplayName, "Snake Case User")
+	}
+}
+
+func TestPostUserBlankPasswordReturnsInitialPassword(t *testing.T) {
+	ctx := context.Background()
+	service := newSQLiteIdentityTestService(t)
+
+	h := NewHandler(nil, "", nil)
+	h.identityService = service
+	t.Cleanup(h.Close)
+
+	principal := identity.Principal{
+		Kind:            "user",
+		User:            identity.User{ID: identity.SystemUserID, TenantID: identity.SystemTenantID},
+		EffectiveTenant: identity.Tenant{ID: identity.SystemTenantID},
+		PlatformAdmin:   true,
+	}
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/v0/management/users", func(c *gin.Context) {
+		c.Set(managementPrincipalKey, principal)
+		h.PostUser(c)
+	})
+
+	body := []byte(`{"username":"generated-admin-user","display_name":"Generated Admin User","password":"   ","role_ids":[]}`)
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v0/management/users", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var response struct {
+		ID              string `json:"id"`
+		DisplayName     string `json:"display_name"`
+		InitialPassword string `json:"initial_password"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v; body=%s", err, rec.Body.String())
+	}
+	if response.ID == "" {
+		t.Fatal("response id is empty")
+	}
+	if response.DisplayName != "Generated Admin User" {
+		t.Fatalf("display_name = %q, want %q", response.DisplayName, "Generated Admin User")
+	}
+	if response.InitialPassword == "" {
+		t.Fatalf("initial_password missing; body=%s", rec.Body.String())
+	}
+	if _, err := identity.HashPassword(response.InitialPassword); err != nil {
+		t.Fatalf("initial_password does not satisfy policy: %v", err)
+	}
+}
+
+func TestPostUserManualPasswordOmitsInitialPassword(t *testing.T) {
+	ctx := context.Background()
+	service := newSQLiteIdentityTestService(t)
+
+	h := NewHandler(nil, "", nil)
+	h.identityService = service
+	t.Cleanup(h.Close)
+
+	principal := identity.Principal{
+		Kind:            "user",
+		User:            identity.User{ID: identity.SystemUserID, TenantID: identity.SystemTenantID},
+		EffectiveTenant: identity.Tenant{ID: identity.SystemTenantID},
+		PlatformAdmin:   true,
+	}
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/v0/management/users", func(c *gin.Context) {
+		c.Set(managementPrincipalKey, principal)
+		h.PostUser(c)
+	})
+
+	body := []byte(`{"username":"manual-admin-user","display_name":"Manual Admin User","password":"Manual-Password-123!","role_ids":[]}`)
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/v0/management/users", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	var response map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v; body=%s", err, rec.Body.String())
+	}
+	if _, ok := response["initial_password"]; ok {
+		t.Fatalf("initial_password should be omitted for manual password; body=%s", rec.Body.String())
 	}
 }
 
@@ -160,7 +320,7 @@ func TestLogsDeleteMiddlewareRequiresExplicitPermission(t *testing.T) {
 	})
 
 	service := identity.NewService(db)
-	if err = service.Bootstrap(ctx, "bootstrap-password-123"); err != nil {
+	if err = service.Bootstrap(ctx, "Bootstrap-Password-123!"); err != nil {
 		t.Fatal(err)
 	}
 	// Pin the service on the handler so Middleware does not depend on process-global Default().
@@ -214,14 +374,14 @@ func TestLogsDeleteMiddlewareRequiresExplicitPermission(t *testing.T) {
 
 	readToken := seedPlatformLogUser(logUserFixture{
 		username:    "log-reader",
-		password:    "reader-password-123",
+		password:    "Reader-Password-123!",
 		userID:      "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1",
 		roleID:      "cccccccc-cccc-cccc-cccc-ccccccccccc1",
 		permissions: []string{"system.logs.read"},
 	})
 	deleteToken := seedPlatformLogUser(logUserFixture{
 		username:    "log-deleter",
-		password:    "deleter-password-123",
+		password:    "Deleter-Password-123!",
 		userID:      "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb2",
 		roleID:      "cccccccc-cccc-cccc-cccc-ccccccccccc2",
 		permissions: []string{"system.logs.read", "system.logs.delete"},
@@ -257,6 +417,37 @@ func TestLogsDeleteMiddlewareRequiresExplicitPermission(t *testing.T) {
 	if code, reached := serve(http.MethodDelete, deleteToken); code != http.StatusOK || !reached {
 		t.Fatalf("delete-capable DELETE: status=%d reached=%v, want 200 and handler executed", code, reached)
 	}
+}
+
+func newSQLiteIdentityTestService(t *testing.T) *identity.Service {
+	t.Helper()
+	dsn := fmt.Sprintf("file:identity_post_user_%d?mode=memory&cache=shared", time.Now().UnixNano())
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(4)
+	t.Cleanup(func() {
+		if closeErr := db.Close(); closeErr != nil {
+			t.Errorf("close sqlite identity db: %v", closeErr)
+		}
+	})
+	for _, statement := range []string{
+		`CREATE TABLE users (
+			id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, username TEXT NOT NULL, username_normalized TEXT NOT NULL,
+			display_name TEXT NOT NULL, password_hash TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+			must_change_password BOOLEAN NOT NULL DEFAULT false, last_login_at TIMESTAMP NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			version INTEGER NOT NULL DEFAULT 1, created_by TEXT
+		)`,
+		`CREATE TABLE roles (id TEXT PRIMARY KEY, code TEXT NOT NULL, name TEXT NOT NULL)`,
+		`CREATE TABLE user_roles (user_id TEXT NOT NULL, role_id TEXT NOT NULL, created_by TEXT)`,
+	} {
+		if _, err = db.Exec(statement); err != nil {
+			t.Fatalf("create sqlite identity schema: %v", err)
+		}
+	}
+	return identity.NewService(db)
 }
 
 func replacePostgresDatabaseForTest(dsn, dbName string) (string, error) {

@@ -705,6 +705,67 @@ func TestIsAuthBlockedForModel_AuthQuotaCooldownBlocksAllModels(t *testing.T) {
 	}
 }
 
+func weekExhaustedAuth(now time.Time, recoverAt time.Time) *Auth {
+	return &Auth{
+		ID: "xai-week-exhausted",
+		Quota: QuotaState{
+			Exceeded:         true,
+			RecoveryRequired: true,
+			Reason:           "quota",
+			Window:           "week",
+			WindowMinutes:    10080,
+			NextRecoverAt:    recoverAt,
+		},
+		NextRetryAfter: recoverAt,
+	}
+}
+
+func TestIsAuthBlockedForModel_WindowExhaustedStaysBlockedUntilWindowDeadline(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := weekExhaustedAuth(now, now.Add(6*24*time.Hour))
+
+	blocked, reason, next := isAuthBlockedForModel(auth, "grok-4.5", now)
+	if !blocked {
+		t.Fatal("blocked = false, want true until recovery is confirmed")
+	}
+	if reason != blockReasonCooldown {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonCooldown)
+	}
+	if next.IsZero() {
+		t.Fatal("next = zero, want the window deadline")
+	}
+}
+
+// The gate must expire: an xAI auth in API-key mode rejects the billing probe
+// outright, so a gate that only a probe can lift would blacklist it forever.
+func TestIsAuthBlockedForModel_WindowExhaustedReleasesAfterWindowDeadline(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := weekExhaustedAuth(now, now.Add(-time.Hour))
+
+	blocked, _, _ := isAuthBlockedForModel(auth, "grok-4.5", now)
+	if blocked {
+		t.Fatal("blocked = true, want release for one retry once the quota window elapsed")
+	}
+}
+
+// Runtime state persisted before the window deadline existed must not stay
+// blocked forever after an upgrade.
+func TestIsAuthBlockedForModel_WindowExhaustedWithoutDeadlineIsNotPermanent(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := weekExhaustedAuth(now, time.Time{})
+
+	blocked, _, _ := isAuthBlockedForModel(auth, "grok-4.5", now)
+	if blocked {
+		t.Fatal("blocked = true, want release for a legacy gate carrying no deadline")
+	}
+}
+
 func TestFillFirstSelectorPick_ThinkingSuffixFallsBackToBaseModelState(t *testing.T) {
 	t.Parallel()
 

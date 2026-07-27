@@ -183,16 +183,11 @@ func identityError(c *gin.Context, err error) {
 func (h *Handler) PostLogin(c *gin.Context) {
 	clientIP := c.ClientIP()
 	now := time.Now()
-	h.attemptsMu.Lock()
-	attempt := h.failedAttempts[clientIP]
-	if attempt != nil && !attempt.blockedUntil.IsZero() && now.Before(attempt.blockedUntil) {
-		remaining := time.Until(attempt.blockedUntil).Round(time.Second)
-		h.attemptsMu.Unlock()
-		c.Header("Retry-After", retryAfterSecondsHeader(remaining))
+	if remaining := h.loginThrottle.blockedFor(clientIP, now); remaining > 0 {
+		c.Header("Retry-After", retryAfterSecondsHeader(remaining.Round(time.Second)))
 		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": gin.H{"code": "login_rate_limited", "message": "too many login attempts"}})
 		return
 	}
-	h.attemptsMu.Unlock()
 
 	var body struct {
 		Username   string `json:"username"`
@@ -210,25 +205,32 @@ func (h *Handler) PostLogin(c *gin.Context) {
 	}
 	result, err := service.Login(c.Request.Context(), body.Username, body.Password, body.RememberMe, c.GetHeader("User-Agent"))
 	if err != nil {
-		h.attemptsMu.Lock()
-		attempt = h.failedAttempts[clientIP]
-		if attempt == nil {
-			attempt = &attemptInfo{}
-			h.failedAttempts[clientIP] = attempt
-		}
-		attempt.count++
-		attempt.lastActivity = now
-		if attempt.count >= 5 {
-			attempt.blockedUntil = now.Add(30 * time.Minute)
-			attempt.count = 0
-		}
-		h.attemptsMu.Unlock()
+		h.loginThrottle.recordFailure(clientIP, now)
 		identityError(c, err)
 		return
 	}
-	h.attemptsMu.Lock()
-	delete(h.failedAttempts, clientIP)
-	h.attemptsMu.Unlock()
+	h.loginThrottle.recordSuccess(clientIP)
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *Handler) PostRefresh(c *gin.Context) {
+	var body struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.RefreshToken) == "" {
+		identityError(c, identity.ErrSessionRevoked)
+		return
+	}
+	service := h.identity()
+	if service == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": gin.H{"code": "identity_unavailable", "message": "identity service unavailable"}})
+		return
+	}
+	result, err := service.RefreshSession(c.Request.Context(), body.RefreshToken)
+	if err != nil {
+		identityError(c, err)
+		return
+	}
 	c.JSON(http.StatusOK, result)
 }
 
@@ -338,17 +340,19 @@ func (h *Handler) PostTenant(c *gin.Context) {
 func (h *Handler) PatchTenant(c *gin.Context) {
 	principal, _ := principalFromContext(c)
 	var body struct {
-		Name        *string    `json:"name"`
-		Description *string    `json:"description"`
-		Status      string     `json:"status"`
-		ExpiresAt   *time.Time `json:"expires_at"`
-		Version     int64      `json:"version"`
+		Name                   *string    `json:"name"`
+		Description            *string    `json:"description"`
+		Status                 string     `json:"status"`
+		ExpiresAt              *time.Time `json:"expires_at"`
+		AccessTokenTTLSeconds  *int       `json:"access_token_ttl_seconds"`
+		RefreshTokenTTLSeconds *int       `json:"refresh_token_ttl_seconds"`
+		Version                int64      `json:"version"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	tenant, err := h.identity().UpdateTenantDetails(c.Request.Context(), principal, c.Param("id"), body.Name, body.Description, body.Status, body.ExpiresAt, body.Version)
+	tenant, err := h.identity().UpdateTenantDetails(c.Request.Context(), principal, c.Param("id"), body.Name, body.Description, body.Status, body.ExpiresAt, body.AccessTokenTTLSeconds, body.RefreshTokenTTLSeconds, body.Version)
 	if err != nil {
 		identityError(c, err)
 		return
@@ -378,12 +382,18 @@ func (h *Handler) PostUser(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	user, err := h.identity().CreateUser(c.Request.Context(), principal, principal.EffectiveTenant.ID, body.Username, body.DisplayName, body.Password, body.RoleIDs)
+	user, initialPassword, err := h.identity().CreateUser(c.Request.Context(), principal, principal.EffectiveTenant.ID, body.Username, body.DisplayName, body.Password, body.RoleIDs)
 	if err != nil {
 		identityError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, user)
+	c.JSON(http.StatusCreated, struct {
+		identity.User
+		InitialPassword string `json:"initial_password,omitempty"`
+	}{
+		User:            user,
+		InitialPassword: initialPassword,
+	})
 }
 
 func (h *Handler) PostUserResetPassword(c *gin.Context) {
@@ -512,12 +522,15 @@ func (h *Handler) PutRolePermissions(c *gin.Context) {
 }
 
 func (h *Handler) setServicePrincipal(c *gin.Context) {
+	systemTenant := identity.Tenant{ID: identity.SystemTenantID, Name: "System", Slug: "system", Status: "active"}
 	principal := identity.Principal{
-		Kind:           "service_credential",
-		PlatformAdmin:  true,
-		Permissions:    map[string]bool{},
-		PermissionList: []string{"*"},
-		User:           identity.User{ID: identity.SystemUserID, TenantID: identity.SystemTenantID, Username: "admin", DisplayName: "Administrator", Status: "active"},
+		Kind:            "service_credential",
+		PlatformAdmin:   true,
+		Permissions:     map[string]bool{},
+		PermissionList:  []string{"*"},
+		User:            identity.User{ID: identity.SystemUserID, TenantID: identity.SystemTenantID, Username: "admin", DisplayName: "Administrator", Status: "active"},
+		HomeTenant:      systemTenant,
+		EffectiveTenant: systemTenant,
 	}
 	if service := h.identity(); service != nil {
 		if tenant, err := service.GetTenant(c.Request.Context(), identity.SystemTenantID); err == nil {
@@ -557,6 +570,7 @@ func isTenantScopedManagementPath(path string) bool {
 	case relative == "/dashboard-summary", relative == "/config":
 		return true
 	case strings.HasPrefix(relative, "/auth-files"),
+		strings.HasPrefix(relative, "/content-moderation"),
 		strings.HasPrefix(relative, "/identity-fingerprint"),
 		strings.HasPrefix(relative, "/model-definitions/"),
 		strings.HasPrefix(relative, "/image-generation"),
@@ -567,7 +581,9 @@ func isTenantScopedManagementPath(path string) bool {
 		return true
 	case strings.HasPrefix(relative, "/api-keys"),
 		strings.HasPrefix(relative, "/api-key-entries"),
-		strings.HasPrefix(relative, "/api-key-permission-profiles"):
+		strings.HasPrefix(relative, "/api-key-permission-profiles"),
+		// Portal end-user accounts + per-user API keys (tenant business data).
+		strings.HasPrefix(relative, "/end-users"):
 		return true
 	case strings.HasPrefix(relative, "/gemini-api-key"),
 		strings.HasPrefix(relative, "/claude-api-key"),
@@ -610,7 +626,10 @@ func isTenantScopedManagementPath(path string) bool {
 		relative == "/usage/auth-file-trend",
 		relative == "/usage/auth-file-quota-snapshot",
 		relative == "/quota/reconcile",
-		relative == "/quota/clear-status":
+		relative == "/quota/clear-status",
+		relative == "/ai-accounts/status",
+		relative == "/ai-accounts/status-refresh",
+		strings.HasPrefix(relative, "/ai-accounts/status-refresh/"):
 		return true
 	default:
 		return false
@@ -745,4 +764,15 @@ func (h *Handler) DeleteAuditLog(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+func (h *Handler) ClearAuditLogs(c *gin.Context) {
+	principal, _ := principalFromContext(c)
+	platform := principal.Has("platform.audit.read")
+	result, err := h.identity().ClearAuditLogs(c.Request.Context(), principal.EffectiveTenant.ID, platform)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
 }

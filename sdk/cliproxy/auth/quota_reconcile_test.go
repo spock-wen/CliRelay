@@ -61,9 +61,10 @@ func TestManagerReconcileQuota_ClearsRecoveredModelCooldown(t *testing.T) {
 		Status:      StatusError,
 		Unavailable: true,
 		Quota: QuotaState{
-			Exceeded:      true,
-			Reason:        "quota",
-			NextRecoverAt: next,
+			Exceeded:         true,
+			RecoveryRequired: true,
+			Reason:           "quota",
+			NextRecoverAt:    next,
 		},
 		ModelStates: map[string]*ModelState{
 			"gpt-5-codex": {
@@ -73,9 +74,10 @@ func TestManagerReconcileQuota_ClearsRecoveredModelCooldown(t *testing.T) {
 				NextRetryAfter: next,
 				LastError:      &Error{Message: "quota exhausted", HTTPStatus: http.StatusTooManyRequests},
 				Quota: QuotaState{
-					Exceeded:      true,
-					Reason:        "quota",
-					NextRecoverAt: next,
+					Exceeded:         true,
+					RecoveryRequired: true,
+					Reason:           "quota",
+					NextRecoverAt:    next,
 				},
 			},
 		},
@@ -117,6 +119,54 @@ func TestManagerReconcileQuota_ClearsRecoveredModelCooldown(t *testing.T) {
 	}
 	if updated.Status != StatusActive {
 		t.Fatalf("auth.Status = %q, want %q", updated.Status, StatusActive)
+	}
+}
+
+func TestApplyQuotaProbeResult_NotRecoveredWithoutResetKeepsWindowGate(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := &Auth{
+		ID:          "xai-auth",
+		Provider:    "xai",
+		Status:      StatusError,
+		Unavailable: true,
+		Quota: QuotaState{
+			Exceeded:         true,
+			RecoveryRequired: true,
+			Reason:           "quota",
+			Window:           "week",
+			WindowMinutes:    10080,
+			NextRecoverAt:    now.Add(-time.Hour),
+		},
+		NextRetryAfter: now.Add(-time.Hour),
+		ModelStates: map[string]*ModelState{
+			"grok-4.5": {
+				Status:         StatusError,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(-time.Hour),
+				Quota: QuotaState{
+					Exceeded:         true,
+					RecoveryRequired: true,
+					Reason:           "quota",
+					Window:           "week",
+					WindowMinutes:    10080,
+					NextRecoverAt:    now.Add(-time.Hour),
+				},
+			},
+		},
+	}
+
+	applyQuotaProbeResult(auth, &QuotaProbeResult{Recovered: false}, now)
+	blocked, _, _ := isAuthBlockedForModel(auth, "grok-4.5", now)
+	if !blocked {
+		t.Fatal("not-recovered zero-reset probe released the credential")
+	}
+	if !authHasActiveQuotaCooldown(auth, now) {
+		t.Fatal("window gate no longer schedules recovery probes")
+	}
+	if next := nextQuotaProbeTime(auth, now); !next.After(now) || next.After(now.Add(2*quotaProbeMinInterval)) {
+		t.Fatalf("nextQuotaProbeTime() = %v, want prompt follow-up probe", next)
 	}
 }
 
@@ -323,5 +373,55 @@ func TestManagerClearQuotaStatus_PreservesStatusDisabled(t *testing.T) {
 	}
 	if state.Unavailable || !state.NextRetryAfter.IsZero() || state.LastError != nil || state.Quota != (QuotaState{}) {
 		t.Fatalf("disabled model quota runtime state was not cleared: %#v", state)
+	}
+}
+
+// A week-exhausted credential whose recovery probe can never succeed (xAI
+// API-key mode rejects the Grok Build billing probe) must still leave the gate
+// once the real quota window elapses, instead of being blacklisted forever.
+func TestWeekExhaustedGateExpiresWhenProbeNeverConfirms(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := &Auth{ID: "xai-api-key", Provider: "xai", Status: StatusActive}
+	applyAuthFailureState(auth, &Error{
+		Message:            `{"error":"Grok Build usage balance exhausted"}`,
+		HTTPStatus:         http.StatusPaymentRequired,
+		QuotaWindow:        "week",
+		QuotaWindowMinutes: 10080,
+	}, nil, now)
+
+	if blocked, _, _ := isAuthBlockedForModel(auth, "grok-4.5", now.Add(6*time.Hour)); !blocked {
+		t.Fatal("blocked = false at +6h, want the gate to outlast the old short cooldown")
+	}
+	if blocked, _, _ := isAuthBlockedForModel(auth, "grok-4.5", now.Add(8*24*time.Hour)); blocked {
+		t.Fatal("blocked = true past the quota window, want the credential back in rotation")
+	}
+}
+
+// disable_cooling is an explicit operator override and must also disable the
+// probe-confirmed gate, otherwise it silently stops working for weekly quota.
+func TestWeekExhaustedGateHonoursDisableCooling(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	auth := &Auth{
+		ID:       "xai-no-cooling",
+		Provider: "xai",
+		Status:   StatusActive,
+		Metadata: map[string]any{"disable_cooling": true},
+	}
+	applyAuthFailureState(auth, &Error{
+		Message:            `{"error":"Grok Build usage balance exhausted"}`,
+		HTTPStatus:         http.StatusPaymentRequired,
+		QuotaWindow:        "week",
+		QuotaWindowMinutes: 10080,
+	}, nil, now)
+
+	if auth.Quota.RecoveryRequired {
+		t.Fatal("RecoveryRequired = true, want disable_cooling to suppress the gate")
+	}
+	if blocked, _, _ := isAuthBlockedForModel(auth, "grok-4.5", now.Add(time.Minute)); blocked {
+		t.Fatal("blocked = true, want disable_cooling to keep the credential selectable")
 	}
 }

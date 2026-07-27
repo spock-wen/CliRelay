@@ -114,9 +114,9 @@ func statusCodeFromResult(err *Error) int {
 }
 
 // isRequestInvalidError returns true if the error represents a client request
-// error that should not be retried. Specifically, it checks for 400 Bad Request
-// with "invalid_request_error" in the message, indicating the request itself is
-// malformed and switching to a different auth will not help.
+// error that should not be retried or failed over to another auth. Switching
+// credentials cannot fix a malformed request body (for example an image that is
+// too small for the upstream vision API).
 func isRequestInvalidError(err error) bool {
 	if err == nil {
 		return false
@@ -125,18 +125,19 @@ func isRequestInvalidError(err error) bool {
 	if status != http.StatusBadRequest {
 		return false
 	}
+
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		if isInvalidRequestSignal(authErr.Code) || isInvalidRequestSignal(authErr.Message) {
+			return true
+		}
+	}
+
 	message := strings.TrimSpace(err.Error())
 	if message == "" {
 		return false
 	}
-	if strings.Contains(message, "invalid_request_error") {
-		return true
-	}
-	lowerMessage := strings.ToLower(message)
-	if strings.Contains(lowerMessage, "model is not supported") || strings.Contains(lowerMessage, "model not supported") {
-		return true
-	}
-	if strings.Contains(lowerMessage, "not supported when using codex with a chatgpt account") {
+	if isInvalidRequestSignal(message) {
 		return true
 	}
 
@@ -147,22 +148,65 @@ func isRequestInvalidError(err error) bool {
 	if errParse := json.Unmarshal([]byte(message), &payload); errParse != nil {
 		return false
 	}
-	lowerDetail := strings.ToLower(firstNonEmptyString(
+	// Providers use different shapes:
+	// - OpenAI-style: {"error":{"type":"invalid_request_error",...}}
+	// - xAI-style:    {"code":"invalid-argument","error":"..."}
+	// - Google-style: {"error":{"status":"INVALID_ARGUMENT","message":"..."}}
+	signals := []string{
+		stringValue(payload["code"]),
+		stringValue(payload["type"]),
+		stringValue(payload["status"]),
+		stringValue(payload["detail"]),
+		stringValue(payload["error"]),
+		stringValue(payload["message"]),
 		nestedString(payload, "error", "type"),
 		nestedString(payload, "error", "code"),
+		nestedString(payload, "error", "status"),
 		nestedString(payload, "error", "message"),
-		stringValue(payload["detail"]),
-	))
-	if strings.Contains(lowerDetail, "invalid_request_error") {
-		return true
 	}
-	if strings.Contains(lowerDetail, "model is not supported") || strings.Contains(lowerDetail, "model not supported") {
-		return true
-	}
-	if strings.Contains(lowerDetail, "not supported when using codex with a chatgpt account") {
-		return true
+	for _, signal := range signals {
+		if isInvalidRequestSignal(signal) {
+			return true
+		}
 	}
 	return false
+}
+
+func isInvalidRequestSignal(raw string) bool {
+	signal := strings.ToLower(strings.TrimSpace(raw))
+	if signal == "" {
+		return false
+	}
+	switch {
+	case strings.Contains(signal, "invalid_request_error"),
+		strings.Contains(signal, "invalid-argument"),
+		strings.Contains(signal, "invalid_argument"),
+		strings.Contains(signal, "invalid request"),
+		strings.Contains(signal, "model is not supported"),
+		strings.Contains(signal, "model not supported"),
+		strings.Contains(signal, "not supported when using codex with a chatgpt account"),
+		// Upstream vision APIs reject undersized images with a stable message.
+		// This is request content, not auth/quota, so failover cannot help.
+		strings.Contains(signal, "below the minimum of") && strings.Contains(signal, "pixels"),
+		strings.Contains(signal, "total pixels") && strings.Contains(signal, "minimum"),
+		// Prompt/context length is a property of the request body. Retrying on
+		// another auth only re-runs multi-MB translation without fixing the body.
+		strings.Contains(signal, "context_length_exceeded"),
+		strings.Contains(signal, "prompt_too_long"),
+		strings.Contains(signal, "maximum context length"),
+		strings.Contains(signal, "maximum prompt length"),
+		strings.Contains(signal, "prompt is too long"),
+		strings.Contains(signal, "prompt too long"),
+		strings.Contains(signal, "too many tokens"),
+		strings.Contains(signal, "tokens > max"),
+		strings.Contains(signal, "tokens exceeds"),
+		// Observed Grok: "maximum prompt length is 500000 but the request contains 816381 tokens"
+		strings.Contains(signal, "maximum prompt") && strings.Contains(signal, "tokens"),
+		strings.Contains(signal, "prompt length") && strings.Contains(signal, "tokens"):
+		return true
+	default:
+		return false
+	}
 }
 
 func nestedString(payload map[string]any, keys ...string) string {

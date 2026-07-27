@@ -59,7 +59,38 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		OAuthModelAlias:      runtimeCfg.OAuthModelAlias,
 		Payload:              runtimeCfg.Payload,
 	}
+	// Platform super-admins often switch into a business tenant for ops. The
+	// tenant-scoped provider view must not leak other tenants' secrets, but
+	// process-global runtime toggles (request-log, logging-to-file, …) still
+	// apply to the host. Omitting them made the management UI default those
+	// booleans to false while the process kept writing full request files.
+	if principal, ok := principalFromContext(c); ok && principal.PlatformAdmin {
+		copyProcessGlobalRuntimeToggles(h.cfg, tenantView)
+	}
 	c.JSON(200, sanitizeConfigForAPI(tenantView))
+}
+
+// copyProcessGlobalRuntimeToggles copies host-wide runtime switches that the
+// config panel reads/writes. Provider credentials stay tenant-scoped.
+func copyProcessGlobalRuntimeToggles(src, dst *config.Config) {
+	if src == nil || dst == nil {
+		return
+	}
+	dst.SDKConfig.RequestLog = src.SDKConfig.RequestLog
+	dst.SDKConfig.RequestLogStorage = src.SDKConfig.RequestLogStorage
+	dst.Debug = src.Debug
+	dst.LoggingToFile = src.LoggingToFile
+	dst.LogsMaxTotalSizeMB = src.LogsMaxTotalSizeMB
+	dst.ErrorLogsMaxFiles = src.ErrorLogsMaxFiles
+	dst.UsageStatisticsEnabled = src.UsageStatisticsEnabled
+	dst.SystemStatsCacheSeconds = src.SystemStatsCacheSeconds
+	dst.SystemStatsWebSocketMaxAgeSeconds = src.SystemStatsWebSocketMaxAgeSeconds
+	dst.WebsocketAuth = src.WebsocketAuth
+	dst.RequestRetry = src.RequestRetry
+	dst.MaxRetryInterval = src.MaxRetryInterval
+	dst.QuotaExceeded = src.QuotaExceeded
+	dst.ForceModelPrefix = src.ForceModelPrefix
+	dst.ProxyURL = src.ProxyURL
 }
 
 // maskKey masks an API key / secret, preserving first 6 and last 4 characters.
@@ -310,21 +341,14 @@ func (h *Handler) GetLatestVersion(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"latest-version": version})
 }
 
+// WriteConfig replaces config.yaml with data. It shares the atomic write and the
+// process-wide write lock with every other config.yaml writer; an in-place truncating
+// write here could splice the file against a concurrent save.
 func WriteConfig(path string, data []byte) error {
-	data = config.NormalizeCommentIndentation(data)
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		return err
-	}
-	if _, errWrite := f.Write(data); errWrite != nil {
-		_ = f.Close()
-		return errWrite
-	}
-	if errSync := f.Sync(); errSync != nil {
-		_ = f.Close()
-		return errSync
-	}
-	return f.Close()
+	normalized := config.NormalizeCommentIndentation(data)
+	return config.WithConfigFileWriteLock(func() error {
+		return config.WriteYAMLFileAtomic(path, normalized)
+	})
 }
 
 func (h *Handler) PutConfigYAML(c *gin.Context) {

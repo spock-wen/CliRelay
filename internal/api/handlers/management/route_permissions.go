@@ -3,6 +3,8 @@ package management
 import (
 	"net/http"
 	"strings"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 )
 
 // ManagementRequestPermission returns the RBAC permission for a management
@@ -10,6 +12,17 @@ import (
 // Exported so package routes can assert every registered route is mapped.
 func ManagementRequestPermission(method, path string) string {
 	return permissionForManagementRequest(method, path)
+}
+
+func principalHasManagementRequestPermission(principal identity.Principal, method, path, permission string) bool {
+	if permission != "" && principal.Has(permission) {
+		return true
+	}
+	relative := strings.TrimSuffix(strings.TrimPrefix(path, "/v0/management"), "/")
+	return (method == http.MethodGet || method == http.MethodHead) &&
+		strings.HasPrefix(relative, "/end-users/") &&
+		strings.HasSuffix(relative, "/daily-spending/reset-history") &&
+		principal.Has("end_users.write")
 }
 
 // permissionForManagementRequest maps a management HTTP method+path to a
@@ -28,7 +41,19 @@ func permissionForManagementRequest(method, path string) string {
 		return "tenant.users.read"
 	case relative == "/users" && method == http.MethodPost:
 		return "tenant.users.create"
-	case strings.HasSuffix(relative, "/reset-password"):
+	// Key sub-resources under end-users use api_keys.* so legacy key-admin roles
+	// keep working after the sidebar moves to 用户账号.
+	case strings.HasPrefix(relative, "/end-users/") && strings.Contains(relative, "/api-keys"):
+		if write {
+			return "api_keys.write"
+		}
+		return "api_keys.read"
+	case strings.HasPrefix(relative, "/end-users"):
+		if write {
+			return "end_users.write"
+		}
+		return "end_users.read"
+	case strings.HasSuffix(relative, "/reset-password") && strings.HasPrefix(relative, "/users/"):
 		return "tenant.users.reset_password"
 	case strings.HasSuffix(relative, "/roles") && strings.HasPrefix(relative, "/users/"):
 		return "tenant.users.assign_roles"
@@ -36,7 +61,11 @@ func permissionForManagementRequest(method, path string) string {
 		return "tenant.users.delete"
 	case strings.HasPrefix(relative, "/users/"):
 		return "tenant.users.update"
-	case relative == "/audit-logs" || (strings.HasPrefix(relative, "/audit-logs/") && method == http.MethodGet):
+	case relative == "/audit-logs" && method == http.MethodGet:
+		return "tenant.audit.read"
+	case relative == "/audit-logs" && method == http.MethodDelete:
+		return "tenant.audit.delete"
+	case strings.HasPrefix(relative, "/audit-logs/") && method == http.MethodGet:
 		return "tenant.audit.read"
 	case strings.HasPrefix(relative, "/audit-logs/") && method == http.MethodDelete:
 		return "tenant.audit.delete"
@@ -86,6 +115,14 @@ func permissionForManagementRequest(method, path string) string {
 	// Exact /usage* stats paths only — /usage-statistics-enabled is config.
 	case relative == "/usage" || strings.HasPrefix(relative, "/usage/"):
 		return "monitor.read"
+	// AI account status read model: same capability surface as auth-files list.
+	case strings.HasPrefix(relative, "/ai-accounts/status-refresh") && write:
+		return "auth_files.write"
+	case strings.HasPrefix(relative, "/ai-accounts/status"):
+		if write {
+			return "auth_files.write"
+		}
+		return "auth_files.read"
 	case strings.HasPrefix(relative, "/auth-files"), relative == "/vertex/import", relative == "/get-auth-status", strings.Contains(relative, "auth-url"), strings.Contains(relative, "oauth"):
 		if relative == "/get-auth-status" || strings.Contains(relative, "auth-url") || strings.Contains(relative, "oauth") {
 			return "auth_files.oauth"
@@ -120,6 +157,14 @@ func permissionForManagementRequest(method, path string) string {
 			return "models.write"
 		}
 		return "models.read"
+	case strings.HasPrefix(relative, "/content-moderation"):
+		if strings.HasSuffix(relative, "/test") {
+			return "content_moderation.test"
+		}
+		if write {
+			return "content_moderation.write"
+		}
+		return "content_moderation.read"
 	case strings.HasPrefix(relative, "/image-generation"):
 		if strings.Contains(relative, "/test") {
 			return "image_generation.test"

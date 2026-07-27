@@ -9,11 +9,29 @@ func (s *Service) PublicChartData(apiKey string, days int) (map[string]any, erro
 	}
 
 	return map[string]any{
-		"daily_series":       chartData.DailySeries,
-		"heatmap_series":     chartData.HeatmapSeries,
-		"model_distribution": chartData.ModelDistribution,
-		"stats":              chartData.Stats,
-		"api_key_name":       s.publicAPIKeyName(apiKey),
+		"daily_series":         chartData.DailySeries,
+		"heatmap_series":       chartData.HeatmapSeries,
+		"model_distribution":   chartData.ModelDistribution,
+		"api_key_distribution": chartData.APIKeyDistribution,
+		"stats":                chartData.Stats,
+		// Key own name only — never end-user display name.
+		"api_key_name": s.publicAPIKeyName(apiKey),
+	}, nil
+}
+
+func (s *Service) PublicChartDataForEndUser(endUserID string, days int) (map[string]any, error) {
+	chartData, err := usage.QueryPublicChartDataForEndUser(s.tenantID, endUserID, days)
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]any{
+		"daily_series":         chartData.DailySeries,
+		"heatmap_series":       chartData.HeatmapSeries,
+		"model_distribution":   chartData.ModelDistribution,
+		"api_key_distribution": chartData.APIKeyDistribution,
+		"stats":                chartData.Stats,
+		"api_key_name":         usage.DisplayNameForEndUser(endUserID),
 	}, nil
 }
 
@@ -51,11 +69,11 @@ func (s *Service) UsageChartData(apiKey string, days int) (map[string]any, error
 		if err != nil {
 			return nil, err
 		}
-		keyNameMap, _, _, _, _, _ := s.buildNameMaps()
+		maps := s.buildNameMaps()
 
 		for i := range apikeyDist {
 			if apikeyDist[i].Name == "" {
-				if name, ok := keyNameMap[apikeyDist[i].APIKey]; ok {
+				if name, ok := maps.keyNameMap[apikeyDist[i].APIKey]; ok {
 					apikeyDist[i].Name = name
 				}
 			}

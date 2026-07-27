@@ -16,6 +16,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -153,15 +154,17 @@ func TestGetUsageLogsKeepsStoredChannelNameWhenCurrentAuthNameDiffers(t *testing
 
 	var payload struct {
 		Items []struct {
-			ChannelName string `json:"channel_name"`
-			AuthIndex   string `json:"auth_index"`
+			ChannelName   string `json:"channel_name"`
+			AuthIndex     string `json:"auth_index"`
+			AuthSubjectID string `json:"auth_subject_id"`
 		} `json:"items"`
 		Filters struct {
 			Channels       []string `json:"channels"`
 			ChannelOptions []struct {
-				Value     string `json:"value"`
-				Label     string `json:"label"`
-				AuthIndex string `json:"auth_index"`
+				Value         string `json:"value"`
+				Label         string `json:"label"`
+				AuthIndex     string `json:"auth_index"`
+				AuthSubjectID string `json:"auth_subject_id"`
 			} `json:"channel_options"`
 		} `json:"filters"`
 	}
@@ -175,8 +178,8 @@ func TestGetUsageLogsKeepsStoredChannelNameWhenCurrentAuthNameDiffers(t *testing
 	if payload.Items[0].ChannelName != "tabcode-plus" {
 		t.Fatalf("channel_name = %q, want %q", payload.Items[0].ChannelName, "tabcode-plus")
 	}
-	// Filter facets use the live auth label / auth_index so renamed channels stay
-	// selectable as one account, while still matching historical rows by index.
+	// Filter facets use the live auth label / account subject so renamed channels
+	// stay selectable as one account, while still matching historical rows.
 	if len(payload.Filters.ChannelOptions) != 1 {
 		t.Fatalf("channel_options = %#v, want one option", payload.Filters.ChannelOptions)
 	}
@@ -184,8 +187,11 @@ func TestGetUsageLogsKeepsStoredChannelNameWhenCurrentAuthNameDiffers(t *testing
 	if opt.Label != "tabcode-pro" {
 		t.Fatalf("channel_options[0].label = %q, want tabcode-pro", opt.Label)
 	}
-	if opt.Value != auth.Index || opt.AuthIndex != auth.Index {
-		t.Fatalf("channel_options[0] value/auth_index = %#v, want auth index %q", opt, auth.Index)
+	if opt.AuthIndex != auth.Index {
+		t.Fatalf("channel_options[0].auth_index = %q, want %q", opt.AuthIndex, auth.Index)
+	}
+	if !strings.HasPrefix(opt.Value, "authsub_") || opt.AuthSubjectID != opt.Value {
+		t.Fatalf("channel_options[0] value/subject = %#v, want authsub_* subject", opt)
 	}
 	if len(payload.Filters.Channels) != 1 || payload.Filters.Channels[0] != "tabcode-pro" {
 		t.Fatalf("filters.channels = %#v, want [tabcode-pro]", payload.Filters.Channels)
@@ -383,10 +389,11 @@ func TestGetUsageLogs_EmptyDB_DoesNotReturnNullSlices(t *testing.T) {
 	var payload struct {
 		Items   []any `json:"items"`
 		Filters struct {
-			APIKeys     []string          `json:"api_keys"`
-			APIKeyNames map[string]string `json:"api_key_names"`
-			Models      []string          `json:"models"`
-			Channels    []string          `json:"channels"`
+			APIKeys      []string          `json:"api_keys"`
+			APIKeyNames  map[string]string `json:"api_key_names"`
+			APIKeyCounts map[string]int64  `json:"api_key_counts"`
+			Models       []string          `json:"models"`
+			Channels     []string          `json:"channels"`
 		} `json:"filters"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
@@ -407,6 +414,9 @@ func TestGetUsageLogs_EmptyDB_DoesNotReturnNullSlices(t *testing.T) {
 	}
 	if payload.Filters.APIKeyNames == nil {
 		t.Fatalf("filters.api_key_names is null; expected {}")
+	}
+	if payload.Filters.APIKeyCounts == nil {
+		t.Fatalf("filters.api_key_counts is null; expected {}")
 	}
 }
 
@@ -864,6 +874,7 @@ func TestGetAuthFileTrendUsesWeeklyResetCycleForRequestTotal(t *testing.T) {
 		RequestTotal      int64    `json:"request_total"`
 		CycleRequestTotal int64    `json:"cycle_request_total"`
 		CycleCostTotal    float64  `json:"cycle_cost_total"`
+		CycleTotalTokens  int64    `json:"cycle_total_tokens"`
 		WeeklyQuotaUsed   *float64 `json:"weekly_quota_used_percent"`
 		CycleStart        string   `json:"cycle_start"`
 		DailyUsage        []struct {
@@ -902,6 +913,9 @@ func TestGetAuthFileTrendUsesWeeklyResetCycleForRequestTotal(t *testing.T) {
 	if math.Abs(payload.CycleCostTotal-0.008) > 1e-12 {
 		t.Fatalf("cycle_cost_total = %v, want 0.008", payload.CycleCostTotal)
 	}
+	if payload.CycleTotalTokens != 5000 {
+		t.Fatalf("cycle_total_tokens = %d, want 5000", payload.CycleTotalTokens)
+	}
 	if payload.WeeklyQuotaUsed == nil || math.Abs(*payload.WeeklyQuotaUsed-7) > 1e-12 {
 		t.Fatalf("weekly_quota_used_percent = %v, want 7", payload.WeeklyQuotaUsed)
 	}
@@ -936,6 +950,146 @@ func TestGetAuthFileTrendUsesWeeklyResetCycleForRequestTotal(t *testing.T) {
 	}
 	if len(payload.QuotaSeries[0].Points) != 1 || payload.QuotaSeries[0].Points[0].Percent == nil || *payload.QuotaSeries[0].Points[0].Percent != 93 {
 		t.Fatalf("quota point = %+v, want one 93%% point", payload.QuotaSeries[0].Points)
+	}
+}
+
+func TestGetAuthFileTrendSharesCycleAcrossTenantsForStableAccountID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "usage.db")
+	if err := usage.InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(func() {
+		usage.CloseDB()
+		_ = os.Remove(dbPath)
+		_ = os.Remove(dbPath + "-wal")
+		_ = os.Remove(dbPath + "-shm")
+	})
+
+	const (
+		tenantA = "11111111-1111-1111-1111-111111111111"
+		tenantB = "22222222-2222-2222-2222-222222222222"
+	)
+	store := &memoryAuthStore{}
+	manager := coreauth.NewManager(store, nil, nil)
+	authA, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex-shared-a",
+		TenantID: tenantA,
+		FileName: "a.json",
+		Provider: "codex",
+		Label:    "Shared A",
+		Metadata: map[string]any{"account_id": "acct-shared-trend", "email": "tyktgyk@gmail.com"},
+	})
+	if err != nil {
+		t.Fatalf("register auth A: %v", err)
+	}
+	authB, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:       "codex-shared-b",
+		TenantID: tenantB,
+		FileName: "b.json",
+		Provider: "codex",
+		Label:    "Shared B",
+		Metadata: map[string]any{"account_id": "acct-shared-trend", "email": "tyktgyk@gmail.com"},
+	})
+	if err != nil {
+		t.Fatalf("register auth B: %v", err)
+	}
+	identityA := usage.ResolveAuthSubjectIdentity(authA)
+	identityB := usage.ResolveAuthSubjectIdentity(authB)
+	if identityA == nil || identityB == nil || identityA.ID != identityB.ID || !identityA.ShareEligible {
+		t.Fatalf("expected shared subject, got A=%+v B=%+v", identityA, identityB)
+	}
+	if err := usage.UpsertAIAccountTenantBinding(authA, identityA); err != nil {
+		t.Fatal(err)
+	}
+	if err := usage.UpsertAIAccountTenantBinding(authB, identityB); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	resetAt := now.Add(4 * 24 * time.Hour)
+	cycleStart := resetAt.Add(-7 * 24 * time.Hour)
+	if err := usage.UpsertModelPricing("gpt-5.4", 1, 2, 0); err != nil {
+		t.Fatalf("UpsertModelPricing: %v", err)
+	}
+	// Cycle cache must exist before request projection writes cycle buckets.
+	remaining := 93.0
+	if err := usage.RecordQuotaSnapshotPointsIdentityForTenant(tenantA, authA.Index, identityA.ID, "codex", []usage.QuotaSnapshotPoint{{
+		RecordedAt: now, QuotaKey: "code_week", QuotaLabel: "Weekly",
+		Percent: &remaining, ResetAt: &resetAt, WindowSeconds: 604800,
+	}}); err != nil {
+		t.Fatalf("record quota: %v", err)
+	}
+	// Only tenant A has request logs; B must still see shared cycle totals.
+	usage.InsertLogWithDetailsIdentitySubject("sk-a", "", identityA.ID, "A", "gpt-5.4", "codex", "A", authA.Index, false, cycleStart.Add(time.Hour), 1, 1, usage.TokenStats{
+		InputTokens: 1000, OutputTokens: 2000, TotalTokens: 3000,
+	}, "", "", "")
+	usage.InsertLogWithDetailsIdentitySubject("sk-a", "", identityA.ID, "A", "gpt-5.4", "codex", "A", authA.Index, false, now, 1, 1, usage.TokenStats{
+		InputTokens: 1000, OutputTokens: 1000, TotalTokens: 2000,
+	}, "", "", "")
+
+	h := &Handler{cfg: &config.Config{}, authManager: manager}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Set(managementPrincipalKey, identity.Principal{EffectiveTenant: identity.Tenant{ID: tenantB}})
+	c.Request = httptest.NewRequest(http.MethodGet, "/usage/auth-file-trend?auth_index="+authB.Index+"&days=7&hours=5", nil)
+	h.UsageLogs().GetAuthFileTrend(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		CycleRequestTotal int64    `json:"cycle_request_total"`
+		CycleCostTotal    float64  `json:"cycle_cost_total"`
+		CycleTotalTokens  int64    `json:"cycle_total_tokens"`
+		RequestTotal      int64    `json:"request_total"`
+		WeeklyQuotaUsed   *float64 `json:"weekly_quota_used_percent"`
+		CycleKnown        bool     `json:"cycle_known"`
+		CycleStart        string   `json:"cycle_start"`
+		HourlyUsage       []struct {
+			Hour     string  `json:"hour"`
+			Requests int64   `json:"requests"`
+			Cost     float64 `json:"cost"`
+		} `json:"hourly_usage"`
+		QuotaSeries []struct {
+			QuotaKey string `json:"quota_key"`
+			Points   []struct {
+				Percent *float64 `json:"percent"`
+			} `json:"points"`
+		} `json:"quota_series"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !payload.CycleKnown || payload.CycleRequestTotal != 2 {
+		t.Fatalf("tenant B cycle = known=%v total=%d, want 2 shared requests", payload.CycleKnown, payload.CycleRequestTotal)
+	}
+	if math.Abs(payload.CycleCostTotal-0.008) > 1e-12 {
+		t.Fatalf("tenant B cycle_cost_total=%v, want 0.008", payload.CycleCostTotal)
+	}
+	if payload.CycleTotalTokens != 5000 {
+		t.Fatalf("cycle_total_tokens = %d, want 5000", payload.CycleTotalTokens)
+	}
+	if payload.RequestTotal != 2 {
+		t.Fatalf("tenant B request_total=%d, want 2", payload.RequestTotal)
+	}
+	if payload.CycleStart != cycleStart.Format(time.RFC3339) {
+		t.Fatalf("cycle_start=%q want %q", payload.CycleStart, cycleStart.Format(time.RFC3339))
+	}
+	if payload.WeeklyQuotaUsed == nil || math.Abs(*payload.WeeklyQuotaUsed-7) > 1e-12 {
+		t.Fatalf("weekly_quota_used=%v, want 7", payload.WeeklyQuotaUsed)
+	}
+	if len(payload.QuotaSeries) != 1 || len(payload.QuotaSeries[0].Points) != 1 {
+		t.Fatalf("quota_series=%+v", payload.QuotaSeries)
+	}
+	var hourlyRequests int64
+	for _, point := range payload.HourlyUsage {
+		hourlyRequests += point.Requests
+	}
+	if hourlyRequests < 1 {
+		t.Fatalf("tenant B hourly_usage requests=%d, want shared recent hours from tenant A", hourlyRequests)
 	}
 }
 
@@ -1029,6 +1183,7 @@ func TestGetAuthFileTrendKeepsWeeklyCycleAcrossCodexPlanRename(t *testing.T) {
 		RequestTotal      int64   `json:"request_total"`
 		CycleRequestTotal int64   `json:"cycle_request_total"`
 		CycleCostTotal    float64 `json:"cycle_cost_total"`
+		CycleTotalTokens  int64   `json:"cycle_total_tokens"`
 		CycleKnown        bool    `json:"cycle_known"`
 		CycleStart        string  `json:"cycle_start"`
 	}
@@ -1043,6 +1198,9 @@ func TestGetAuthFileTrendKeepsWeeklyCycleAcrossCodexPlanRename(t *testing.T) {
 	}
 	if math.Abs(payload.CycleCostTotal-0.008) > 1e-12 {
 		t.Fatalf("cycle_cost_total = %v, want 0.008", payload.CycleCostTotal)
+	}
+	if payload.CycleTotalTokens != 5000 {
+		t.Fatalf("cycle_total_tokens = %d, want 5000", payload.CycleTotalTokens)
 	}
 	if !payload.CycleKnown {
 		t.Fatalf("cycle_known = false, want true")
@@ -1573,7 +1731,9 @@ func TestGetPublicUsageLogs_ReturnsChannelNameWithoutSensitiveFields(t *testing.
 	if item.ChannelName != "Codex 主渠道" {
 		t.Fatalf("channel_name = %q, want Codex 主渠道", item.ChannelName)
 	}
-	if item.APIKey != "" || item.APIKeyName != "" || item.Source != "" || item.AuthIndex != "" {
+	// api_key_name is non-secret and needed so multi-key portal users can tell keys apart.
+	// Raw api_key / source / auth_index must still be scrubbed.
+	if item.APIKey != "" || item.Source != "" || item.AuthIndex != "" {
 		t.Fatalf("sensitive fields not scrubbed: %+v", item)
 	}
 }
@@ -1900,11 +2060,12 @@ func TestGetUsageLogsFiltersByOrphanAuthIndexWithoutLiveMeta(t *testing.T) {
 	var listPayload struct {
 		Filters struct {
 			ChannelOptions []struct {
-				Value     string `json:"value"`
-				Label     string `json:"label"`
-				Provider  string `json:"provider"`
-				AuthType  string `json:"auth_type"`
-				AuthIndex string `json:"auth_index"`
+				Value         string `json:"value"`
+				Label         string `json:"label"`
+				Provider      string `json:"provider"`
+				AuthType      string `json:"auth_type"`
+				AuthIndex     string `json:"auth_index"`
+				AuthSubjectID string `json:"auth_subject_id"`
 			} `json:"channel_options"`
 		} `json:"filters"`
 	}
@@ -1915,8 +2076,11 @@ func TestGetUsageLogsFiltersByOrphanAuthIndexWithoutLiveMeta(t *testing.T) {
 		t.Fatalf("channel_options = %#v, want one merged option", listPayload.Filters.ChannelOptions)
 	}
 	option := listPayload.Filters.ChannelOptions[0]
-	if option.Value != liveAuth.Index || option.AuthIndex != liveAuth.Index {
-		t.Fatalf("merged option value/auth_index = %#v, want live index %q", option, liveAuth.Index)
+	if option.AuthIndex != liveAuth.Index {
+		t.Fatalf("merged option auth_index = %q, want live index %q", option.AuthIndex, liveAuth.Index)
+	}
+	if !strings.HasPrefix(option.Value, "authsub_") || option.AuthSubjectID != option.Value {
+		t.Fatalf("merged option value/subject = %#v, want authsub_* subject", option)
 	}
 	if option.Label != "asherandersenloqv@outlook.com" || option.Provider != "xai" || option.AuthType != "oauth" {
 		t.Fatalf("merged option metadata = %#v", option)
@@ -1954,5 +2118,155 @@ func TestGetUsageLogsFiltersByOrphanAuthIndexWithoutLiveMeta(t *testing.T) {
 	}
 	if !found[orphanIndex] || !found[liveAuth.Index] {
 		t.Fatalf("orphan filter missing alias rows: %#v", filtered.Items)
+	}
+}
+
+func TestGetPublicUsageLogs_RawSecretIsKeyScoped(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "usage.db")
+	if err := usage.InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(func() {
+		usage.CloseDB()
+		_ = os.Remove(dbPath)
+		_ = os.Remove(dbPath + "-wal")
+		_ = os.Remove(dbPath + "-shm")
+	})
+
+	tenantID := "00000000-0000-0000-0000-0000000000ac"
+	endUserID := "00000000-0000-0000-0000-0000000000bd"
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, row := range []usage.APIKeyRow{
+		{ID: "00000000-0000-0000-0000-0000000000a2", Key: "sk-owned-log-a", Name: "Laptop", EndUserID: endUserID, CreatedAt: now, UpdatedAt: now},
+		{ID: "00000000-0000-0000-0000-0000000000b2", Key: "sk-owned-log-b", Name: "Automation", EndUserID: endUserID, CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := usage.UpsertAPIKeyForTenant(tenantID, row); err != nil {
+			t.Fatalf("UpsertAPIKeyForTenant(%s): %v", row.Key, err)
+		}
+		usage.InsertLog(row.Key, row.Name, "gpt-test", "test", "channel", "auth", false, time.Now().UTC(), 1, 0, usage.TokenStats{TotalTokens: 1}, "", "")
+	}
+
+	h := &Handler{cfg: &config.Config{}}
+	body := []byte(`{"api_key":"sk-owned-log-b","days":7,"page":1,"size":50}`)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/public/usage/logs", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.UsageLogs().GetPublicUsageLogs(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var payload struct {
+		Total      int64  `json:"total"`
+		APIKeyName string `json:"api_key_name"`
+		Items      []struct {
+			APIKey        string `json:"api_key"`
+			APIKeyID      string `json:"api_key_id"`
+			APIKeyMasked  string `json:"api_key_masked"`
+			APIKeyOwnName string `json:"api_key_own_name"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// Raw secret lookup must stay key-scoped; sibling keys on the same account stay hidden.
+	if payload.Total != 1 || len(payload.Items) != 1 {
+		t.Fatalf("public logs total/items = %d/%d, want 1/1; body=%s", payload.Total, len(payload.Items), rec.Body.String())
+	}
+	if payload.APIKeyName != "Automation" {
+		t.Fatalf("api_key_name = %q, want Automation (presented key own name)", payload.APIKeyName)
+	}
+	item := payload.Items[0]
+	if item.APIKey != "" || item.APIKeyID != "" {
+		t.Fatalf("public item leaked raw key identity: %+v", item)
+	}
+	if item.APIKeyMasked == "" {
+		t.Fatalf("public item missing masked key fallback: %+v", item)
+	}
+	if item.APIKeyOwnName != "Automation" {
+		t.Fatalf("api_key_own_name = %q, want Automation", item.APIKeyOwnName)
+	}
+}
+
+func TestGetPublicUsageLogs_FiltersByAPIKeyIDs(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "usage.db")
+	if err := usage.InitDB(dbPath, config.RequestLogStorageConfig{}, time.UTC); err != nil {
+		t.Fatalf("InitDB: %v", err)
+	}
+	t.Cleanup(func() {
+		usage.CloseDB()
+		_ = os.Remove(dbPath)
+		_ = os.Remove(dbPath + "-wal")
+		_ = os.Remove(dbPath + "-shm")
+	})
+
+	tenantID := "00000000-0000-0000-0000-0000000000ac"
+	endUserID := "00000000-0000-0000-0000-0000000000bd"
+	keyAID := "00000000-0000-0000-0000-0000000000a2"
+	keyBID := "00000000-0000-0000-0000-0000000000b2"
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, row := range []usage.APIKeyRow{
+		{ID: keyAID, Key: "sk-owned-log-a", Name: "Laptop", EndUserID: endUserID, CreatedAt: now, UpdatedAt: now},
+		{ID: keyBID, Key: "sk-owned-log-b", Name: "Automation", EndUserID: endUserID, CreatedAt: now, UpdatedAt: now},
+	} {
+		if err := usage.UpsertAPIKeyForTenant(tenantID, row); err != nil {
+			t.Fatalf("UpsertAPIKeyForTenant(%s): %v", row.Key, err)
+		}
+		usage.InsertLog(row.Key, row.Name, "gpt-test", "test", "channel", "auth", false, time.Now().UTC(), 1, 0, usage.TokenStats{TotalTokens: 1}, "", "")
+	}
+
+	h := &Handler{cfg: &config.Config{}}
+	body, err := json.Marshal(map[string]any{
+		"api_key":     "sk-owned-log-b",
+		"days":        7,
+		"page":        1,
+		"size":        50,
+		"api_key_ids": []string{keyAID},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v0/management/public/usage/logs", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.UsageLogs().GetPublicUsageLogs(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var payload struct {
+		Total int64 `json:"total"`
+		Items []struct {
+			APIKeyOwnName string `json:"api_key_own_name"`
+		} `json:"items"`
+		Filters struct {
+			APIKeyIDs      []string          `json:"api_key_ids"`
+			APIKeyIDNames  map[string]string `json:"api_key_id_names"`
+			APIKeyIDCounts map[string]int64  `json:"api_key_id_counts"`
+		} `json:"filters"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// Sibling key ids are not in the raw-secret allow-list; filter is rejected → empty.
+	if payload.Total != 0 || len(payload.Items) != 0 {
+		t.Fatalf("filtered total/items = %d/%d, want 0/0; body=%s", payload.Total, len(payload.Items), rec.Body.String())
+	}
+	if len(payload.Filters.APIKeyIDs) != 1 || payload.Filters.APIKeyIDs[0] != keyBID {
+		t.Fatalf("filters.api_key_ids = %#v, want only presented key %s", payload.Filters.APIKeyIDs, keyBID)
+	}
+	if payload.Filters.APIKeyIDNames[keyBID] != "Automation" {
+		t.Fatalf("filters.api_key_id_names[%s] = %q, want Automation", keyBID, payload.Filters.APIKeyIDNames[keyBID])
+	}
+	if payload.Filters.APIKeyIDNames[keyAID] != "" {
+		t.Fatalf("sibling key %s must not appear in filter options", keyAID)
 	}
 }

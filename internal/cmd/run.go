@@ -16,6 +16,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/contentmoderation"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/enduser"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	settingsstore "github.com/router-for-me/CLIProxyAPI/v6/internal/management/settings/store"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -40,9 +42,14 @@ func StartService(cfg *config.Config, configPath string, localPassword string) {
 	usage.InitRedis(cfg.Redis)
 	defer usage.StopRedis()
 
+	moderator := contentmoderation.NewRequestModerator(contentmoderation.NewStore(usage.RuntimeDB()), contentmoderation.NewEvaluator(nil))
+	contentmoderation.SetRuntime(moderator)
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
+		WithCoreAuthHook(usage.NewAIAccountBindingHook()).
+		WithRequestModerator(moderator).
+		WithHooks(runtimeDataStackPostStartHooks(defaultRuntimeDataStackMaintenanceOps())).
 		WithLocalManagementPassword(localPassword)
 
 	ctxSignal, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -82,9 +89,14 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 	}
 	usage.InitRedis(cfg.Redis)
 
+	moderator := contentmoderation.NewRequestModerator(contentmoderation.NewStore(usage.RuntimeDB()), contentmoderation.NewEvaluator(nil))
+	contentmoderation.SetRuntime(moderator)
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).
+		WithCoreAuthHook(usage.NewAIAccountBindingHook()).
+		WithRequestModerator(moderator).
+		WithHooks(runtimeDataStackPostStartHooks(defaultRuntimeDataStackMaintenanceOps())).
 		WithLocalManagementPassword(localPassword)
 
 	ctx, cancelFn := context.WithCancel(context.Background())
@@ -109,6 +121,35 @@ func StartServiceBackground(cfg *config.Config, configPath string, localPassword
 	return cancelFn, doneCh
 }
 
+type bootstrapAdminPassword struct {
+	value  string
+	source string
+}
+
+type identityBootstrapper interface {
+	Bootstrap(context.Context, string) error
+}
+
+func resolveBootstrapAdminPassword(cfg *config.Config) bootstrapAdminPassword {
+	if value := strings.TrimSpace(os.Getenv("CLIRELAY_ADMIN_PASSWORD")); value != "" {
+		return bootstrapAdminPassword{value: value, source: "CLIRELAY_ADMIN_PASSWORD"}
+	}
+	if value := strings.TrimSpace(os.Getenv("MANAGEMENT_PASSWORD")); value != "" {
+		return bootstrapAdminPassword{value: value, source: "MANAGEMENT_PASSWORD"}
+	}
+	return bootstrapAdminPassword{
+		value:  strings.TrimSpace(cfg.RemoteManagement.SecretKey),
+		source: "remote-management.secret-key",
+	}
+}
+
+func bootstrapIdentity(ctx context.Context, service identityBootstrapper, password bootstrapAdminPassword) error {
+	if err := service.Bootstrap(ctx, password.value); err != nil {
+		return fmt.Errorf("identity bootstrap using admin password from %s: %w", password.source, err)
+	}
+	return nil
+}
+
 func initializeRuntimeDataStack(cfg *config.Config, configPath string, loc *time.Location) error {
 	if cfg == nil {
 		return errors.New("config is nil")
@@ -116,19 +157,24 @@ func initializeRuntimeDataStack(cfg *config.Config, configPath string, loc *time
 	if err := usage.InitPostgres(cfg.Postgres, cfg.RequestLogStorage, loc); err != nil {
 		return err
 	}
-	bootstrapPassword := strings.TrimSpace(os.Getenv("CLIRELAY_ADMIN_PASSWORD"))
-	if bootstrapPassword == "" {
-		bootstrapPassword = strings.TrimSpace(os.Getenv("MANAGEMENT_PASSWORD"))
-	}
-	if bootstrapPassword == "" {
-		bootstrapPassword = strings.TrimSpace(cfg.RemoteManagement.SecretKey)
-	}
+	bootstrapPassword := resolveBootstrapAdminPassword(cfg)
 	identityService := identity.NewService(usage.RuntimeDB())
-	if err := identityService.Bootstrap(context.Background(), bootstrapPassword); err != nil {
-		return fmt.Errorf("identity bootstrap: %w", err)
+	enduserService := enduser.NewService(usage.RuntimeDB())
+	enduser.SetDefault(enduserService)
+	if err := bootstrapIdentity(context.Background(), identityService, bootstrapPassword); err != nil {
+		return err
 	}
 	identity.SetDefault(identityService)
-	usage.MigrateAPIKeysFromConfig(cfg, configPath)
+	// Import YAML keys first so one-shot end-user backfill can see them.
+	if _, err := usage.MigrateAPIKeysFromConfig(cfg, configPath); err != nil {
+		return fmt.Errorf("migrate api keys from config: %w", err)
+	}
+	if created, err := enduserService.BackfillFromAPIKeys(context.Background()); err != nil {
+		log.WithError(err).Error("enduser: backfill from api keys failed")
+		return fmt.Errorf("enduser backfill: %w", err)
+	} else if created > 0 {
+		log.Infof("enduser: backfilled %d end users from api keys", created)
+	}
 	usage.MigrateAPIKeyPermissionProfilesFromYAML(configPath)
 	usage.MigrateRoutingConfigFromConfig(cfg, configPath)
 	usage.ApplyStoredRoutingConfig(cfg)
@@ -137,8 +183,61 @@ func initializeRuntimeDataStack(cfg *config.Config, configPath string, loc *time
 	settingsstore.MigrateRuntimeSettingsFromConfig(cfg, configPath)
 	settingsstore.ApplyStoredRuntimeSettings(cfg)
 	middleware.InitQuotaUsageFuncs(usage.CountTodayByKey, usage.CountTotalByKey, usage.QueryTotalCostByKey, usage.QueryTodayCostByKey)
-	usage.SetTokenUsageCallback(middleware.RecordTokenUsage)
+	middleware.InitQuotaEndUserUsageFuncs(usage.CountTodayByEndUser, usage.CountTotalByEndUser, usage.QueryTotalCostByEndUser, usage.QueryTodayCostByEndUser)
+	middleware.InitQuotaPeriodUsageFuncs(usage.QueryPeriodSpendingByAPIKeyIDForTenant, usage.QueryPeriodSpendingByEndUserForTenant)
+	usage.SetTokenUsageCallback(func(apiKey string, totalTokens int64) {
+		endUserID := ""
+		if row := usage.GetAPIKey(apiKey); row != nil {
+			endUserID = row.EndUserID
+		}
+		middleware.RecordTokenUsageForRequest(apiKey, endUserID, totalTokens)
+	})
 	return nil
+}
+
+type runtimeDataStackMaintenanceOps struct {
+	runAIAccountSharedSubjectBackfill func() error
+	scheduleUsageRollupCatchup        func()
+}
+
+func defaultRuntimeDataStackMaintenanceOps() runtimeDataStackMaintenanceOps {
+	return runtimeDataStackMaintenanceOps{
+		runAIAccountSharedSubjectBackfill: func() error {
+			if _, err := usage.RunAIAccountSharedSubjectBackfillAtInit(); err != nil {
+				return err
+			}
+			return usage.RunAIAccountSubjectUsageTokensBackfillAtInit()
+		},
+		scheduleUsageRollupCatchup: usage.ScheduleUsageRollupBlueGreenCatchup,
+	}
+}
+
+func runtimeDataStackPostStartHooks(ops runtimeDataStackMaintenanceOps) cliproxy.Hooks {
+	return cliproxy.Hooks{OnAfterStart: func(*cliproxy.Service) {
+		go runRuntimeDataStackPostStartMaintenance(ops)
+	}}
+}
+
+func runRuntimeDataStackPostStartMaintenance(ops runtimeDataStackMaintenanceOps) {
+	startedAt := time.Now()
+	log.Info("usage: post-listen runtime data maintenance started")
+
+	if ops.runAIAccountSharedSubjectBackfill != nil {
+		stepStartedAt := time.Now()
+		if err := ops.runAIAccountSharedSubjectBackfill(); err != nil {
+			log.WithError(err).Error("usage: post-listen ai account shared subject backfill failed")
+		} else {
+			log.Infof("usage: post-listen ai account shared subject backfill completed in %s", time.Since(stepStartedAt).Round(time.Millisecond))
+		}
+	}
+	// Old blue-green slot may keep writing request_logs until drain. Run the one
+	// absolute rebuild only after the drain window so it includes both slots and
+	// cannot block the HTTP listener or deployment readiness.
+	if ops.scheduleUsageRollupCatchup != nil {
+		ops.scheduleUsageRollupCatchup()
+	}
+
+	log.Infof("usage: post-listen runtime data maintenance scheduled in %s", time.Since(startedAt).Round(time.Millisecond))
 }
 
 // WaitForCloudDeploy waits indefinitely for shutdown signals in cloud deploy mode

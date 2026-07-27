@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/identity"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/management/modelcatalog"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -29,7 +30,20 @@ func (h *ModelsHandler) service(c *gin.Context) *modelcatalog.Service {
 	if h == nil {
 		return modelcatalog.NewForTenant(tenantID, nil, nil)
 	}
-	return modelcatalog.NewForTenant(tenantID, h.cfg, h.authManager)
+	// Overlay the effective tenant's routing onto the process cfg so channel-group
+	// allowed-models apply on plaza/catalog. Non-system tenants store routing in DB;
+	// system keeps h.cfg.Routing when no DB row exists.
+	cfgCopy := &config.Config{}
+	if h.cfg != nil {
+		copied := *h.cfg
+		cfgCopy = &copied
+	}
+	if routing := usage.GetRoutingConfigForTenant(tenantID); routing != nil {
+		cfgCopy.Routing = *routing
+	} else if tenantID != "" && tenantID != identity.SystemTenantID {
+		cfgCopy.Routing = config.RoutingConfig{IncludeDefaultGroup: true}
+	}
+	return modelcatalog.NewForTenant(tenantID, cfgCopy, h.authManager)
 }
 
 func modelConfigScope(c *gin.Context) string {
@@ -54,12 +68,35 @@ func queryAlias(c *gin.Context, primary, fallback string) string {
 	return value
 }
 
+// queryIgnoreGroupAllowedModels is set by the channel-group editor so the picker
+// lists every model the group's channels can serve, not only the saved allow-list.
+// Plaza/catalog omit this flag and keep AllowedModels filtering.
+func queryIgnoreGroupAllowedModels(c *gin.Context) bool {
+	raw := strings.TrimSpace(queryAlias(c, "ignore_group_allowed_models", "ignore-group-allowed-models"))
+	if raw == "" {
+		return false
+	}
+	switch strings.ToLower(raw) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func availabilityFilterOptionsFromQuery(c *gin.Context) modelcatalog.AvailabilityFilterOptions {
+	return modelcatalog.AvailabilityFilterOptions{
+		IgnoreGroupAllowedModels: queryIgnoreGroupAllowedModels(c),
+	}
+}
+
 // GetConfiguredModelAvailability returns the currently configured and serviceable
 // model IDs with pricing/metadata and active_metadata for owner/source filtering.
 func (h *ModelsHandler) GetConfiguredModelAvailability(c *gin.Context) {
 	c.JSON(http.StatusOK, h.service(c).ConfiguredAvailability(
 		queryAlias(c, "allowed_channels", "allowed-channels"),
 		queryAlias(c, "allowed_channel_groups", "allowed-channel-groups"),
+		availabilityFilterOptionsFromQuery(c),
 	))
 }
 
@@ -69,6 +106,7 @@ func (h *ModelsHandler) GetModels(c *gin.Context) {
 	c.JSON(http.StatusOK, h.service(c).Models(
 		queryAlias(c, "allowed_channels", "allowed-channels"),
 		queryAlias(c, "allowed_channel_groups", "allowed-channel-groups"),
+		availabilityFilterOptionsFromQuery(c),
 	))
 }
 

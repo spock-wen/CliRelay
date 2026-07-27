@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/bodyutil"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/contentmoderation"
 	managementauthfiles "github.com/router-for-me/CLIProxyAPI/v6/internal/management/authfiles"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
@@ -28,6 +29,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		return
 	}
 	auths := h.authManager.ListForTenant(effectiveTenantID(c))
+	// auth_subject_id is set once in BuildEntry (canonical server identity).
 	files := managementauthfiles.ListEntries(auths, managementauthfiles.EntryOptions{
 		OnStatError: func(path string, err error) {
 			log.WithError(err).Warnf("failed to stat auth file %s", path)
@@ -37,7 +39,16 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	c.JSON(200, gin.H{"files": files})
 }
 
-// GetAuthFileModels returns the models supported by a specific auth file
+// GetAuthFileModels returns the models supported by a specific auth file.
+//
+// Query params:
+//   - name (required): auth file name or auth ID
+//   - refresh=1|true: force re-fetch live models from upstream.
+//     xai/antigravity: updates runtime registry when successful.
+//     claude/codex: provider-level discovery cache (shared by same-type accounts);
+//     open auto-warms once and subsequent opens reuse cache; force refreshes
+//     cache. Does NOT RegisterClient-replace the static channel catalog.
+//     Falls back to registry on failure.
 func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	name := c.Query("name")
 	if name == "" {
@@ -45,8 +56,25 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 		return
 	}
 
-	models := managementauthfiles.ListModelEntriesForTenant(h.authManager, registry.GetGlobalRegistry(), effectiveTenantID(c), name)
-	c.JSON(200, gin.H{"models": models})
+	refresh := false
+	switch strings.ToLower(strings.TrimSpace(c.Query("refresh"))) {
+	case "1", "true", "yes", "force":
+		refresh = true
+	}
+
+	reg := registry.GetGlobalRegistry()
+	tenantID := effectiveTenantID(c)
+	models, source := managementauthfiles.ListModelEntriesLiveForTenant(
+		c.Request.Context(),
+		h.authManager,
+		reg,
+		reg,
+		h.cfg,
+		tenantID,
+		name,
+		refresh,
+	)
+	c.JSON(200, gin.H{"models": models, "source": source})
 }
 
 // List auth files from disk when the auth manager is unavailable.
@@ -172,14 +200,22 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		RemoveChannels: func(channels []string) error {
 			return h.removeChannelReferencesForTenant(effectiveTenantID(c), channels)
 		},
+		RemoveAuthBindings: func(authIDs []string) error {
+			return h.deleteContentModerationBindings(ctx, effectiveTenantID(c), contentmoderation.ChannelTypeAuthFile, authIDs)
+		},
 	}
 	if managementauthfiles.IsDeleteAllValue(c.Query("all")) {
 		result, err := service.DeleteAll(ctx)
-		if err != nil {
+		if err != nil && result.Deleted == 0 {
 			c.JSON(500, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(200, gin.H{"status": "ok", "deleted": result.Deleted})
+		payload := gin.H{"status": "ok", "deleted": result.Deleted}
+		if err != nil {
+			log.WithError(err).Warn("auth files deleted with cleanup warning")
+			payload["warning"] = err.Error()
+		}
+		c.JSON(200, payload)
 		return
 	}
 	name, errValidate := managementauthfiles.ValidateFileQueryName(c.Query("name"), false)
@@ -187,15 +223,21 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": errValidate.Error()})
 		return
 	}
-	if _, err := service.DeleteOne(ctx, name); err != nil {
-		if errors.Is(err, managementauthfiles.ErrAuthFileNotFound) {
+	result, errDelete := service.DeleteOne(ctx, name)
+	if errDelete != nil && result.Deleted == 0 {
+		if errors.Is(errDelete, managementauthfiles.ErrAuthFileNotFound) {
 			c.JSON(404, gin.H{"error": "file not found"})
 		} else {
-			c.JSON(500, gin.H{"error": err.Error()})
+			c.JSON(500, gin.H{"error": errDelete.Error()})
 		}
 		return
 	}
-	c.JSON(200, gin.H{"status": "ok"})
+	payload := gin.H{"status": "ok", "deleted": result.Deleted}
+	if errDelete != nil {
+		log.WithError(errDelete).Warnf("auth file %s deleted with cleanup warning", name)
+		payload["warning"] = errDelete.Error()
+	}
+	c.JSON(200, payload)
 }
 
 func newAuthFileUploadService(h *Handler, c *gin.Context) managementauthfiles.UploadService {
