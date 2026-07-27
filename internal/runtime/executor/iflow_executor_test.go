@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +72,74 @@ func TestPreserveReasoningContentInMessages(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNormalizeGLMStopToArray(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []byte
+		want  []byte // nil means output should equal input
+	}{
+		{
+			"non-glm model passthrough",
+			[]byte(`{"model":"gpt-4","stop":"</block>"}`),
+			nil,
+		},
+		{
+			"glm model no stop field",
+			[]byte(`{"model":"glm-4","messages":[]}`),
+			nil,
+		},
+		{
+			"glm model stop is already array",
+			[]byte(`{"model":"glm-4","stop":["</block>","</text>"]}`),
+			nil,
+		},
+		{
+			"glm model stop is bare string",
+			[]byte(`{"model":"glm-4","stop":"</block>"}`),
+			[]byte(`{"model":"glm-4","stop":["</block>"]}`),
+		},
+		{
+			"glm-4.7 model stop is bare string",
+			[]byte(`{"model":"glm-4.7","stop":"</block>"}`),
+			[]byte(`{"model":"glm-4.7","stop":["</block>"]}`),
+		},
+		{
+			"glm model stop is empty string",
+			[]byte(`{"model":"glm-4","stop":""}`),
+			[]byte(`{"model":"glm-4","stop":[""]}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeGLMStopToArray(tt.input)
+			want := tt.want
+			if want == nil {
+				want = tt.input
+			}
+			// Compare as JSON to avoid encoding/json HTML-escaping differences
+			var gotMap, wantMap map[string]any
+			if err := json.Unmarshal(got, &gotMap); err != nil {
+				t.Fatalf("got is not valid JSON: %v", err)
+			}
+			if err := json.Unmarshal(want, &wantMap); err != nil {
+				t.Fatalf("want is not valid JSON: %v", err)
+			}
+			gotStop := gotMap["stop"]
+			wantStop := wantMap["stop"]
+			if !jsonEqual(gotStop, wantStop) {
+				t.Errorf("normalizeGLMStopToArray() stop = %v, want %v", gotStop, wantStop)
+			}
+		})
+	}
+}
+
+func jsonEqual(a, b any) bool {
+	aj, _ := json.Marshal(a)
+	bj, _ := json.Marshal(b)
+	return string(aj) == string(bj)
 }
 
 func TestIFlowCookieRefreshLogsMaskedEmail(t *testing.T) {
