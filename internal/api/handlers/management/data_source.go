@@ -69,13 +69,11 @@ func (h *Handler) GetDataSourceMembers(c *gin.Context) {
 	}
 	items := make([]dataSourceMember, 0, len(members))
 	for _, m := range members {
-		items = append(items, dataSourceMember{
-			ID:     m.ID,
-			Email:  tokenHubEmailFor(m.DisplayName),
-			Name:   m.DisplayName,
-			Role:   "member",
-			Status: m.Status,
-		})
+		email := tokenHubEmailFor(m.DisplayName)
+		if email == "" {
+			continue
+		}
+		items = append(items, dataSourceMember{ID: m.ID, Email: email, Name: m.DisplayName, Role: "member", Status: m.Status})
 	}
 	c.JSON(http.StatusOK, dataSourceMembersResponse{
 		Members:  items,
@@ -137,6 +135,9 @@ func (h *Handler) GetDataSourceUsageEvents(c *gin.Context) {
 }
 
 func tokenHubEmailFor(displayName string) string {
+	if strings.TrimSpace(displayName) == "" {
+		return ""
+	}
 	return util.NameToPinyin(displayName) + "@" + tokenHubEmailDomain
 }
 
