@@ -1,6 +1,7 @@
 package usage
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -76,13 +77,37 @@ func TestListDataSourceMembers(t *testing.T) {
 func TestListDataSourceMembersClampsPageSize(t *testing.T) {
 	cleanup := setupTestDB(t)
 	defer cleanup()
-	seedEndUsers(t)
 
-	_, total, err := ListDataSourceMembers(1, 9999)
+	if _, err := usageDB.Exec(endUsersDDL); err != nil {
+		t.Fatalf("create end_users: %v", err)
+	}
+	// Seed 501 rows directly (not via seedEndUsers) so the pageSize>500 clamp
+	// is observable: with LIMIT 500 OFFSET 500 over 501 rows, page 2 has 1 row.
+	const totalRows = 501
+	for i := 1; i <= totalRows; i++ {
+		username := fmt.Sprintf("user_%04d", i)
+		if _, err := usageDB.Exec(
+			"INSERT INTO end_users (id, tenant_id, username, username_normalized, display_name, status) VALUES (?, ?, ?, ?, ?, ?)",
+			username, systemTenantID, username, username, username, "active",
+		); err != nil {
+			t.Fatalf("insert end_user %s: %v", username, err)
+		}
+	}
+
+	members, total, err := ListDataSourceMembers(2, 9999)
 	if err != nil {
 		t.Fatalf("ListDataSourceMembers: %v", err)
 	}
-	if total != 3 {
-		t.Errorf("total = %d, want 3", total)
+	if total != totalRows {
+		t.Errorf("total = %d, want %d", total, totalRows)
+	}
+	// pageSize 9999 clamps to 500, so offset = (2-1)*500 = 500 and page 2
+	// returns exactly the 501st row. Without the clamp the offset would be
+	// 9999, yielding 0 rows.
+	if len(members) != 1 {
+		t.Fatalf("page 2 of 501 rows with clamped pageSize = %d members, want 1", len(members))
+	}
+	if members[0].DisplayName != "user_0501" {
+		t.Errorf("page 2 member = %+v, want user_0501", members[0])
 	}
 }
