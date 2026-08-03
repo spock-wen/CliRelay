@@ -193,6 +193,11 @@ func permissionForManagementRequest(method, path string) string {
 		return "providers.read"
 	case strings.HasPrefix(relative, "/api-call"):
 		return "providers.test"
+	// POST /reset-cooldown mutates provider/channel circuit-breaker state.
+	case relative == "/reset-cooldown":
+		return "providers.write"
+	case strings.HasPrefix(relative, "/data-source"):
+		return "datasource.read"
 	default:
 		// Fail closed: unmapped routes get no permission (middleware rejects "").
 		return ""

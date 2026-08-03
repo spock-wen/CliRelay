@@ -26,7 +26,7 @@ func TestRegisterManagementRouteTable(t *testing.T) {
 		routes[key] = route
 	}
 
-	if got, want := len(routes), 262; got != want {
+	if got, want := len(routes), 266; got != want {
 		t.Fatalf("route count = %d, want %d", got, want)
 	}
 	if got, want := sortedRouteKeys(routes), expectedManagementRoutes(); !slices.Equal(got, want) {
@@ -124,6 +124,8 @@ func TestManagementRoutePermissionsComplete(t *testing.T) {
 		{http.MethodDelete, "/v0/management/logs", "system.logs.delete"},
 		{http.MethodPost, "/v0/management/usage/import", "system.config.write"},
 		{http.MethodPost, "/v0/management/usage/auth-file-quota-snapshot", "auth_files.write"},
+		{http.MethodGet, "/v0/management/data-source/members", "datasource.read"},
+		{http.MethodGet, "/v0/management/data-source/usage-events", "datasource.read"},
 		{http.MethodGet, "/v0/management/totally-unknown-route", ""},
 	}
 	for _, item := range locked {
@@ -250,6 +252,8 @@ func expectedManagementRoutes() []string {
 		"GET /v0/management/codex-oauth-admission",
 		"GET /v0/management/config",
 		"GET /v0/management/config.yaml",
+		"GET /v0/management/data-source/members",
+		"GET /v0/management/data-source/usage-events",
 		"GET /v0/management/dashboard-summary",
 		"GET /v0/management/debug",
 		"GET /v0/management/error-logs-max-files",
@@ -314,6 +318,7 @@ func expectedManagementRoutes() []string {
 		"GET /v0/management/usage/chart-data",
 		"GET /v0/management/usage/entity-stats",
 		"GET /v0/management/usage/export",
+		"GET /v0/management/usage/export/summary",
 		"GET /v0/management/usage/logs",
 		"GET /v0/management/usage/logs/:id/content",
 		"GET /v0/management/usage/logs/:id/egress",
@@ -380,6 +385,7 @@ func expectedManagementRoutes() []string {
 		"POST /v0/management/public/usage/summary",
 		"POST /v0/management/quota/clear-status",
 		"POST /v0/management/quota/reconcile",
+		"POST /v0/management/reset-cooldown",
 		"POST /v0/management/usage/auth-file-quota-snapshot",
 		"POST /v0/management/usage/import",
 		"POST /v0/management/update/apply",

@@ -50,6 +50,7 @@ func RegisterManagement(engine *gin.Engine, h *managementhandlers.Handler, opts 
 	registerManagementRuntimeTuningRoutes(mgmt, h)
 	registerManagementProviderRoutes(mgmt, h)
 	registerManagementAuthRoutes(mgmt, h)
+	registerManagementDataSourceRoutes(mgmt, h)
 	mgmt.POST("/reset-cooldown", h.ResetCooldown)
 	registerPublicManagementRoutes(engine, h, opts)
 }

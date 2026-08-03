@@ -70,6 +70,7 @@ var PermissionCatalog = []PermissionSeed{
 	{Code: "proxies.test", Name: "Test proxies", Scope: "tenant", Resource: "proxies", Action: "test", Sensitive: true},
 	{Code: "tenant_settings.read", Name: "Read tenant settings", Scope: "tenant", Resource: "tenant_settings", Action: "read"},
 	{Code: "tenant_settings.write", Name: "Write tenant settings", Scope: "tenant", Resource: "tenant_settings", Action: "write", Sensitive: true},
+	{Code: "datasource.read", Name: "Read data source", Scope: "platform", Resource: "datasource", Action: "read"},
 }
 
 func menuCodeForPermission(permission PermissionSeed) string {
@@ -93,6 +94,10 @@ func menuCodeForPermission(permission PermissionSeed) string {
 	case "dashboard":
 		return "dashboard"
 	case "monitor":
+		return "runtime.monitor"
+	// Platform data-collection feeds (member list / usage events) are
+	// observability data surfaced under the monitor menu.
+	case "datasource":
 		return "runtime.monitor"
 	case "request_logs":
 		return "runtime.request-logs"
