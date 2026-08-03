@@ -197,6 +197,11 @@ func permissionForManagementRequest(method, path string) string {
 	case relative == "/reset-cooldown":
 		return "providers.write"
 	case strings.HasPrefix(relative, "/data-source"):
+		// Data-source endpoints are read-only; a future write route must map to a
+		// .write permission (TestManagementRoutePermissionsComplete backstops this).
+		if write {
+			return ""
+		}
 		return "datasource.read"
 	default:
 		// Fail closed: unmapped routes get no permission (middleware rejects "").
