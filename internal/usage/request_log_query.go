@@ -574,9 +574,18 @@ func buildWhereClause(params LogQueryParams) (string, []interface{}) {
 	conditions = append(conditions, "tenant_id = ?")
 	args = append(args, params.TenantID)
 
-	// Time range: days=1 means "today", days=7 means "last 7 days", etc.
-	conditions = append(conditions, "timestamp >= ?")
-	args = append(args, CutoffStartUTC(params.Days).Format(time.RFC3339))
+	// Time range: an absolute window overrides the relative days cutoff.
+	if params.StartTime != nil {
+		conditions = append(conditions, "timestamp >= ?")
+		args = append(args, params.StartTime.UTC().Format(time.RFC3339))
+	} else {
+		conditions = append(conditions, "timestamp >= ?")
+		args = append(args, CutoffStartUTC(params.Days).Format(time.RFC3339))
+	}
+	if params.EndTime != nil {
+		conditions = append(conditions, "timestamp < ?")
+		args = append(args, params.EndTime.UTC().Format(time.RFC3339))
+	}
 
 	// API Key multi-value filter
 	if len(params.APIKeys) > 0 {
