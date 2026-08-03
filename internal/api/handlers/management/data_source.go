@@ -94,6 +94,8 @@ func (h *Handler) GetDataSourceUsageEvents(c *gin.Context) {
 	page, pageSize := parseDataSourcePage(c)
 
 	result, err := usage.QueryLogs(usage.LogQueryParams{
+		// Data-source serves platform-wide system-tenant request logs; the
+		// TokenHub endpoint intentionally ignores the caller's effective tenant.
 		TenantID:  identity.SystemTenantID,
 		StartTime: &start,
 		EndTime:   &end,
