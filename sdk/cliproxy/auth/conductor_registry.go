@@ -192,6 +192,49 @@ func (m *Manager) Delete(ctx context.Context, id string) (*Auth, error) {
 }
 
 // Load resets manager state from the backing store.
+func (m *Manager) ResetCooldown(channelName string, model string) int {
+	channelName = strings.TrimSpace(channelName)
+	model = strings.TrimSpace(model)
+	if channelName == "" {
+		return 0
+	}
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	count := 0
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		labels := auth.ChannelIdentifiers()
+		matched := false
+		for _, label := range labels {
+			if strings.EqualFold(strings.TrimSpace(label), channelName) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		if model == "" {
+				for _, state := range auth.ModelStates {
+					resetModelState(state, now)
+				}
+				updateAggregatedAvailability(auth, now)
+			} else {
+				if state := auth.ModelStates[model]; state != nil {
+					resetModelState(state, now)
+				}
+				updateAggregatedAvailability(auth, now)
+			}
+			count++
+	}
+	return count
+}
+
+// Load resets manager state from the backing store.
 func (m *Manager) Load(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
