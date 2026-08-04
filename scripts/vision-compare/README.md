@@ -57,7 +57,8 @@ GOPROXY=https://goproxy.cn,direct GOSUMDB=sum.golang.google.cn go run ./scripts/
 每个 JSON entry（`results[]`）：
 
 - `image` / `question`
-- `server_ocr` / `mcp_ocr` — 两端的 OCR 片段（服务器取 `ImageSummary.OCRHints`；MCP 取响应文本中 OCR/文字/文本 段，若无结构化分段则整段文本兜底）
+- `server_ocr` / `mcp_ocr` — 两端的 OCR 片段（服务器取 `ImageSummary.OCRHints`；MCP 只取响应文本中 OCR/文字/文本 段内的行）
+- `mcp_ocr_fallback` — `true` 表示 MCP 响应没有 OCR 标记段，`mcp_ocr` 用了整段文本兜底（此时 `ocr_f1` 是上界启发值）
 - `ocr_f1` — 词集合 F1（归一化：去空白/小写/去标点）
 - `server_summary` / `mcp_summary` — 两份摘要原文，供人工/LLM 抽检
 - `server_ok` / `mcp_ok` — 该通道是否成功返回分析（含极限尺寸处理）
@@ -68,8 +69,18 @@ GOPROXY=https://goproxy.cn,direct GOSUMDB=sum.golang.google.cn go run ./scripts/
 `aggregate`：
 
 - `avg_ocr_f1`、`both_ok_pass_rate`（两条通道都成功的比例，对应极限尺寸 100% 通过线）
+- `mcp_ocr_fallback_count` — 走整段文本兜底的图数
 - `llm_judge_pass_rate`（server 获胜 / 被评判图数，对应 LLM-judge ≥50% 通过线）
 - 各 winner 计数
+
+## OCR-F1 的解读（重要）
+
+- `mcp_ocr_fallback=false` 时，`ocr_f1` 才是两端 OCR 段的直接可比指标（MCP 只取
+  OCR/文字/文本 段内行，不含摘要散文）。
+- `mcp_ocr_fallback=true` 时（MCP 响应没有 OCR 标记段），`mcp_ocr` 用整段文本兜底，
+  摘要散文 token 会拉低 MCP 侧 precision，`ocr_f1` 只是**上界启发值**：即便服务器 OCR
+  已完全包含在 MCP 响应里，F1 也大概率低于 0.9。此时**不要用 `ocr_f1` 判定 §8 OCR 准确率**，
+  以人工/LLM 评判（`judge_winner` + 落盘的两份摘要）作为门槛。
 
 ## LLM 评判
 
@@ -79,7 +90,8 @@ GOPROXY=https://goproxy.cn,direct GOSUMDB=sum.golang.google.cn go run ./scripts/
 
 ## 通过线（spec §8）
 
-- OCR F1 ≥ 0.9
+- OCR 准确率：优先以人工/LLM 评判为准；当 `mcp_ocr_fallback` 全为 `false` 时可直接看
+  `ocr_f1 ≥ 0.9`，否则 `ocr_f1` 仅作上界参考
 - LLM-judge server 胜率 ≥ 50%
 - 极限尺寸两张通道 100% 成功
 
