@@ -524,3 +524,32 @@ func (h *Handler) updateStringField(c *gin.Context, set func(string)) {
 	set(*body.Value)
 	h.persist(c)
 }
+
+// ResetCooldown clears circuit-breaker cooldown state for a channel (and optionally a specific model).
+// POST /v0/management/reset-cooldown
+// Body: {"channel": "讯飞199", "model": "deepseek-v4-pro"}  — model is optional.
+func (h *Handler) ResetCooldown(c *gin.Context) {
+	var body struct {
+		Channel string `json:"channel"`
+		Model   string `json:"model"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	if strings.TrimSpace(body.Channel) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "channel is required"})
+		return
+	}
+	if h.authManager == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "auth manager unavailable"})
+		return
+	}
+	count := h.authManager.ResetCooldown(body.Channel, body.Model)
+	c.JSON(http.StatusOK, gin.H{
+		"channel": body.Channel,
+		"model":   body.Model,
+		"cleared": count,
+		"message": fmt.Sprintf("reset cooldown for %d auth(s)", count),
+	})
+}

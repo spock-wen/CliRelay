@@ -193,6 +193,18 @@ func permissionForManagementRequest(method, path string) string {
 		return "providers.read"
 	case strings.HasPrefix(relative, "/api-call"):
 		return "providers.test"
+	// POST /reset-cooldown mutates provider/channel circuit-breaker state.
+	case relative == "/reset-cooldown":
+		return "providers.write"
+	case strings.HasPrefix(relative, "/data-source"):
+		// Data-source endpoints reuse the existing request-log read capability so
+		// operators who can already view request logs can poll TokenHub data.
+		// A future write route must map to a .write permission
+		// (TestManagementRoutePermissionsComplete backstops this).
+		if write {
+			return ""
+		}
+		return "request_logs.read"
 	default:
 		// Fail closed: unmapped routes get no permission (middleware rejects "").
 		return ""
