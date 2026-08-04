@@ -28,6 +28,9 @@ type Config struct {
 	// RequestBody controls request-body limits for public model API endpoints.
 	RequestBody RequestBodyConfig `yaml:"request-body,omitempty" json:"request-body,omitempty"`
 
+	// Vision controls server-side image externalization and recognition.
+	Vision VisionConfig `yaml:"vision" json:"vision"`
+
 	// Timezone configures the project's timezone (IANA name, e.g. "Asia/Shanghai").
 	// It affects "today" boundaries and day-based aggregation in monitoring/usage pages.
 	// When empty, the process local timezone (time.Local) is used.
