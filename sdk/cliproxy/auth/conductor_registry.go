@@ -219,17 +219,17 @@ func (m *Manager) ResetCooldown(channelName string, model string) int {
 			continue
 		}
 		if model == "" {
-				for _, state := range auth.ModelStates {
-					resetModelState(state, now)
-				}
-				updateAggregatedAvailability(auth, now)
-			} else {
-				if state := auth.ModelStates[model]; state != nil {
-					resetModelState(state, now)
-				}
-				updateAggregatedAvailability(auth, now)
+			for _, state := range auth.ModelStates {
+				resetModelState(state, now)
 			}
-			count++
+			updateAggregatedAvailability(auth, now)
+		} else {
+			if state := auth.ModelStates[model]; state != nil {
+				resetModelState(state, now)
+			}
+			updateAggregatedAvailability(auth, now)
+		}
+		count++
 	}
 	return count
 }

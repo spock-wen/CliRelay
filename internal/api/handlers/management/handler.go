@@ -547,9 +547,9 @@ func (h *Handler) ResetCooldown(c *gin.Context) {
 	}
 	count := h.authManager.ResetCooldown(body.Channel, body.Model)
 	c.JSON(http.StatusOK, gin.H{
-		"channel":   body.Channel,
-		"model":     body.Model,
-		"cleared":   count,
-		"message":   fmt.Sprintf("reset cooldown for %d auth(s)", count),
+		"channel": body.Channel,
+		"model":   body.Model,
+		"cleared": count,
+		"message": fmt.Sprintf("reset cooldown for %d auth(s)", count),
 	})
 }
