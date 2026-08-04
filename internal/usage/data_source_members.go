@@ -29,14 +29,19 @@ func ListDataSourceMembers(page, pageSize int) ([]DataSourceMember, int64, error
 		pageSize = 500
 	}
 
+	// Rows with a blank display_name cannot yield a member email (tokenHubEmailFor
+	// skips them), so filter them at the SQL layer to keep total consistent with
+	// the rows actually returned.
+	const memberFilter = " WHERE length(trim(display_name)) > 0"
+
 	var total int64
-	if err := db.QueryRow("SELECT COUNT(*) FROM end_users").Scan(&total); err != nil {
+	if err := db.QueryRow("SELECT COUNT(*) FROM end_users" + memberFilter).Scan(&total); err != nil {
 		return []DataSourceMember{}, 0, fmt.Errorf("usage: count end_users: %w", err)
 	}
 
 	offset := (page - 1) * pageSize
 	rows, err := db.Query(
-		"SELECT id, display_name, status FROM end_users ORDER BY username_normalized LIMIT ? OFFSET ?",
+		"SELECT id, display_name, status FROM end_users"+memberFilter+" ORDER BY username_normalized LIMIT ? OFFSET ?",
 		pageSize, offset,
 	)
 	if err != nil {

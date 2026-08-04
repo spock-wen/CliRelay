@@ -64,6 +64,9 @@ func seedEndUsersDirect(t *testing.T, dbPath string) {
 		{"u1", "00000000-0000-0000-0000-000000000001", "wen_guorong", "文国荣", "active"},
 		{"u2", "00000000-0000-0000-0000-000000000001", "yan_peng", "闫鹏", "disabled"},
 		{"u3", "00000000-0000-0000-0000-000000000001", "mac", "Mac", "active"},
+		// Blank display_name cannot yield a member email; it must be filtered at
+		// the SQL layer so total stays consistent with returned rows.
+		{"u4", "00000000-0000-0000-0000-000000000001", "empty_display", "", "active"},
 	}
 	for _, r := range rows {
 		if _, err := db.Exec(
@@ -179,9 +182,10 @@ func TestGetDataSourceUsageEvents(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	// Window matches 2 rows (文国荣 + empty-name); empty-name row is skipped.
-	if payload.Total != 2 {
-		t.Fatalf("total = %d, want 2; body=%s", payload.Total, rec.Body.String())
+	// Window matches 2 rows (文国荣 + empty-name); the empty-name row is
+	// excluded at the SQL layer so total matches the rows actually returned.
+	if payload.Total != 1 {
+		t.Fatalf("total = %d, want 1; body=%s", payload.Total, rec.Body.String())
 	}
 	if len(payload.Usages) != 1 {
 		t.Fatalf("usages len = %d, want 1; body=%s", len(payload.Usages), rec.Body.String())

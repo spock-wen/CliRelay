@@ -587,6 +587,13 @@ func buildWhereClause(params LogQueryParams) (string, []interface{}) {
 		args = append(args, params.EndTime.UTC().Format(time.RFC3339))
 	}
 
+	// Exclude rows with a blank api_key_name at the SQL layer so pagination
+	// totals match the rows actually returned (TokenHub usage events rely on
+	// this: skipping in Go after pagination would desync total from the items).
+	if params.SkipEmptyAPIKeyName {
+		conditions = append(conditions, `trim(coalesce(api_key_name, '')) <> ''`)
+	}
+
 	// API Key multi-value filter
 	if len(params.APIKeys) > 0 {
 		apiKeyConds := make([]string, 0, len(params.APIKeys))
