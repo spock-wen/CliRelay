@@ -3,7 +3,10 @@ package executor
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"image"
+	"image/jpeg"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -442,5 +445,105 @@ func TestApplyClaudeToolPrefix_SkipsBuiltinToolReference(t *testing.T) {
 	got := gjson.GetBytes(out, "messages.0.content.0.content.0.tool_name").String()
 	if got != "web_search" {
 		t.Fatalf("built-in tool_reference should not be prefixed, got %q", got)
+	}
+}
+
+func testSmallJPEGBase64(t *testing.T) string {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, nil); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(buf.Bytes())
+}
+
+func TestClaudeExecutorExternalizesImages(t *testing.T) {
+	var upstreamBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/chat/completions"):
+			// Recognizer path: return a structured summary.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"SUMMARY: a red button.\nOCR: SUBMIT\nLAYOUT: center"}}]}`))
+		default:
+			// Upstream Claude path: capture body, return a Claude message.
+			body, _ := io.ReadAll(r.Body)
+			upstreamBody = body
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"m","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+		}
+	}))
+	defer srv.Close()
+
+	v := config.DefaultVisionConfig()
+	v.Channel = "xunfei-199"
+	executor := NewClaudeExecutor(&config.Config{
+		Vision:    v,
+		ClaudeKey: []config.ClaudeKey{{Name: "xunfei-199", BaseURL: srv.URL, APIKey: "k1"}},
+	})
+	auth := &cliproxyauth.Auth{
+		ID:         "user-A",
+		Attributes: map[string]string{"api_key": "k1", "base_url": srv.URL},
+	}
+
+	imgB64 := testSmallJPEGBase64(t)
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"what is this?"},{"type":"image","source":{"type":"base64","data":"` + imgB64 + `","media_type":"image/jpeg"}}]}]}`)
+
+	if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "kimi-k2.6",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	}); err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	if len(upstreamBody) == 0 {
+		t.Fatal("upstream never received request")
+	}
+	bodyStr := string(upstreamBody)
+	if strings.Contains(bodyStr, `"type":"image"`) {
+		t.Fatal("image block still present in upstream body")
+	}
+	if !strings.Contains(bodyStr, "[Image Registry - Text Summary]") {
+		t.Fatalf("expected summary placeholder in upstream body, got: %s", bodyStr)
+	}
+}
+
+func TestClaudeExecutorVisionDisabledLeavesImage(t *testing.T) {
+	var upstreamBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upstreamBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"m","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	v := config.DefaultVisionConfig()
+	v.Enabled = false
+	executor := NewClaudeExecutor(&config.Config{
+		Vision:    v,
+		ClaudeKey: []config.ClaudeKey{{Name: "xunfei-199", BaseURL: srv.URL, APIKey: "k1"}},
+	})
+	auth := &cliproxyauth.Auth{
+		ID:         "user-A",
+		Attributes: map[string]string{"api_key": "k1", "base_url": srv.URL},
+	}
+
+	imgB64 := testSmallJPEGBase64(t)
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","data":"` + imgB64 + `","media_type":"image/jpeg"}}]}]}`)
+
+	if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "m",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	}); err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if !strings.Contains(string(upstreamBody), `"type":"image"`) {
+		t.Fatal("image block should remain when vision disabled")
 	}
 }
