@@ -102,6 +102,9 @@ func (h *Handler) GetDataSourceUsageEvents(c *gin.Context) {
 		Page:                page,
 		Size:                pageSize,
 		SkipEmptyAPIKeyName: true,
+		// Failed requests are not real usage; exclude them so TokenHub only
+		// receives successful calls.
+		Statuses: []string{"success"},
 	})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

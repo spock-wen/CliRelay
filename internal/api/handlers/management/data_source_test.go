@@ -149,6 +149,14 @@ func TestGetDataSourceUsageEvents(t *testing.T) {
 		usage.TokenStats{InputTokens: 1, OutputTokens: 1, TotalTokens: 2},
 		"", "",
 	)
+	// Failed request inside the window: must be excluded (only successful calls
+	// are reported to TokenHub).
+	usage.InsertLog(
+		"sk-4", "方珍", "glm-5.2", "cli", "", "",
+		true, now.Add(-2*time.Hour), 300, 150,
+		usage.TokenStats{InputTokens: 50, OutputTokens: 10, TotalTokens: 60},
+		"", "",
+	)
 
 	start := now.Add(-24 * time.Hour).Format(time.RFC3339)
 	end := now.Add(time.Hour).Format(time.RFC3339)
