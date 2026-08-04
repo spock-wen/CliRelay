@@ -72,19 +72,20 @@ type harness struct {
 }
 
 type imageReport struct {
-	Image         string   `json:"image"`
-	Question      string   `json:"question"`
-	ServerOCR     []string `json:"server_ocr"`
-	McpOCR        []string `json:"mcp_ocr"`
-	OCRF1         float64  `json:"ocr_f1"`
-	ServerSummary string   `json:"server_summary"`
-	McpSummary    string   `json:"mcp_summary"`
-	ServerOK      bool     `json:"server_ok"`
-	McpOK         bool     `json:"mcp_ok"`
-	ServerError   string   `json:"server_error,omitempty"`
-	McpError      string   `json:"mcp_error,omitempty"`
-	JudgeWinner   string   `json:"judge_winner"`
-	SizeBytes     int64    `json:"size_bytes"`
+	Image          string   `json:"image"`
+	Question       string   `json:"question"`
+	ServerOCR      []string `json:"server_ocr"`
+	McpOCR         []string `json:"mcp_ocr"`
+	McpOCRFallback bool     `json:"mcp_ocr_fallback"`
+	OCRF1          float64  `json:"ocr_f1"`
+	ServerSummary  string   `json:"server_summary"`
+	McpSummary     string   `json:"mcp_summary"`
+	ServerOK       bool     `json:"server_ok"`
+	McpOK          bool     `json:"mcp_ok"`
+	ServerError    string   `json:"server_error,omitempty"`
+	McpError       string   `json:"mcp_error,omitempty"`
+	JudgeWinner    string   `json:"judge_winner"`
+	SizeBytes      int64    `json:"size_bytes"`
 }
 
 type configInfo struct {
@@ -98,17 +99,18 @@ type configInfo struct {
 }
 
 type aggregate struct {
-	ImagesTotal      int     `json:"images_total"`
-	ImagesServerOK   int     `json:"images_server_ok"`
-	ImagesMcpOK      int     `json:"images_mcp_ok"`
-	ImagesBothOK     int     `json:"images_both_ok"`
-	BothOKPassRate   float64 `json:"both_ok_pass_rate"` // robustness / extreme-size pass line (spec §8: 100%)
-	AvgOCRF1         float64 `json:"avg_ocr_f1"`        // over images both channels handled
-	JudgeServerWins  int     `json:"judge_server_wins"`
-	JudgeMcpWins     int     `json:"judge_mcp_wins"`
-	JudgeTies        int     `json:"judge_ties"`
-	JudgePending     int     `json:"judge_pending"`
-	LLMJudgePassRate float64 `json:"llm_judge_pass_rate"` // server wins / judged images (spec §8: >= 50%)
+	ImagesTotal         int     `json:"images_total"`
+	ImagesServerOK      int     `json:"images_server_ok"`
+	ImagesMcpOK         int     `json:"images_mcp_ok"`
+	ImagesBothOK        int     `json:"images_both_ok"`
+	BothOKPassRate      float64 `json:"both_ok_pass_rate"` // robustness / extreme-size pass line (spec §8: 100%)
+	AvgOCRF1            float64 `json:"avg_ocr_f1"`        // over images both channels handled; upper-bound heuristic when McpOCRFallbackCount > 0
+	McpOCRFallbackCount int     `json:"mcp_ocr_fallback_count"`
+	JudgeServerWins     int     `json:"judge_server_wins"`
+	JudgeMcpWins        int     `json:"judge_mcp_wins"`
+	JudgeTies           int     `json:"judge_ties"`
+	JudgePending        int     `json:"judge_pending"`
+	LLMJudgePassRate    float64 `json:"llm_judge_pass_rate"` // server wins / judged images (spec §8: >= 50%)
 }
 
 type report struct {
@@ -286,7 +288,7 @@ func (h *harness) runImage(ctx context.Context, path string) imageReport {
 	} else {
 		ir.McpOK = true
 		ir.McpSummary = mcpText
-		ir.McpOCR = extractOCR(mcpText)
+		ir.McpOCR, ir.McpOCRFallback = extractOCR(mcpText)
 	}
 
 	if ir.ServerOK && ir.McpOK {
@@ -446,44 +448,70 @@ func (h *harness) judge(serverSummary, mcpSummary string) string {
 	return "unknown"
 }
 
-// extractOCR pulls OCR fragments out of a free-form analysis response. If the
-// response is structured with an OCR/文字/文本 section, that section is used;
-// otherwise the whole text is treated as the OCR candidate (the default
-// question asks the MCP to list all visible text verbatim, so this is a
-// reasonable fallback).
-func extractOCR(text string) []string {
-	var out []string
+// extractOCR pulls OCR fragments out of a free-form analysis response and
+// reports whether it had to fall back to the whole text.
+//
+// When the response contains an OCR-marked section (lines under an
+// OCR/文字/文本/TEXT header), ONLY those lines are returned (fallback=false) so
+// summary prose does not pollute the OCR token set. When no such section is
+// found, the whole text is treated as the OCR candidate (fallback=true) — that
+// is an upper-bound heuristic, since prose tokens inflate the MCP side and
+// depress ocr_f1 regardless of how completely the server OCR is contained.
+func extractOCR(text string) ([]string, bool) {
+	var ocr []string
+	inOCR := false
 	for _, line := range strings.Split(text, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
+			if inOCR {
+				break // OCR section ends at a blank line
+			}
 			continue
 		}
 		upper := strings.ToUpper(trimmed)
-		switch {
-		case strings.HasPrefix(upper, "SUMMARY") || strings.HasPrefix(upper, "LAYOUT") ||
-			strings.HasPrefix(upper, "DETAIL") || strings.HasPrefix(upper, "总结") || strings.HasPrefix(upper, "描述"):
-			// skip structure/summary sections, keep the rest as OCR candidates
-		case strings.HasPrefix(upper, "OCR") || strings.HasPrefix(upper, "TEXT") ||
-			strings.HasPrefix(upper, "文字") || strings.HasPrefix(upper, "文本"):
+		if isOCRSectionHeader(upper) {
+			inOCR = true
 			if v := afterColon(trimmed); v != "" {
-				out = append(out, v)
+				ocr = append(ocr, v)
 			}
-		default:
-			out = append(out, trimmed)
+			continue
+		}
+		if !inOCR {
+			continue // skip prose before any OCR header
+		}
+		if isOtherSectionHeader(upper) {
+			break // reached SUMMARY/LAYOUT/DETAIL etc after the OCR section
+		}
+		if len(ocr) > 0 {
+			ocr[len(ocr)-1] += " " + trimmed
+		} else {
+			ocr = append(ocr, trimmed)
 		}
 	}
-	if len(out) == 0 {
-		return []string{text}
+	if inOCR {
+		return ocr, false
 	}
-	return out
+	return []string{text}, true
+}
+
+func isOCRSectionHeader(upper string) bool {
+	return strings.HasPrefix(upper, "OCR") || strings.HasPrefix(upper, "TEXT") ||
+		strings.HasPrefix(upper, "文字") || strings.HasPrefix(upper, "文本")
+}
+
+func isOtherSectionHeader(upper string) bool {
+	return strings.HasPrefix(upper, "SUMMARY") || strings.HasPrefix(upper, "LAYOUT") ||
+		strings.HasPrefix(upper, "DETAIL") || strings.HasPrefix(upper, "总结") ||
+		strings.HasPrefix(upper, "描述")
 }
 
 func afterColon(line string) string {
-	idx := strings.IndexAny(line, ":：")
-	if idx < 0 {
-		return ""
+	for i, r := range line {
+		if r == ':' || r == '：' {
+			return strings.TrimSpace(line[i+len(string(r)):])
+		}
 	}
-	return strings.TrimSpace(line[idx+1:])
+	return ""
 }
 
 // ocrF1 returns token-level set F1 between two OCR fragment lists. Tokens are
@@ -556,6 +584,9 @@ func summarize(results []imageReport) aggregate {
 			a.ImagesBothOK++
 			f1Sum += r.OCRF1
 		}
+		if r.McpOCRFallback {
+			a.McpOCRFallbackCount++
+		}
 		switch r.JudgeWinner {
 		case "server":
 			a.JudgeServerWins++
@@ -595,9 +626,13 @@ func printTable(results []imageReport, agg aggregate) {
 	}
 	fmt.Println(strings.Repeat("-", 82))
 	fmt.Printf("%-40s %8s %8s %8s %10s\n", "TOTAL", "", fmt.Sprintf("%d/%d", agg.ImagesServerOK, agg.ImagesTotal), fmt.Sprintf("%d/%d", agg.ImagesMcpOK, agg.ImagesTotal), "")
-	fmt.Printf("avg OCR-F1: %.3f   both-ok pass rate: %.0f%%   LLM-judge server win rate: %.0f%% (server=%d mcp=%d tie=%d pending=%d)\n",
+	fmt.Printf("avg OCR-F1: %.3f   both-ok pass rate: %.0f%%   LLM-judge server win rate: %.0f%% (server=%d mcp=%d tie=%d pending=%d)  mcp-ocr-fallback=%d\n",
 		agg.AvgOCRF1, agg.BothOKPassRate*100, agg.LLMJudgePassRate*100,
-		agg.JudgeServerWins, agg.JudgeMcpWins, agg.JudgeTies, agg.JudgePending)
+		agg.JudgeServerWins, agg.JudgeMcpWins, agg.JudgeTies, agg.JudgePending, agg.McpOCRFallbackCount)
+	if agg.McpOCRFallbackCount > 0 {
+		fmt.Printf("note: %d image(s) used whole-text MCP OCR fallback — avg OCR-F1 is an upper-bound heuristic; use the human/LLM judge as the gate for the spec §8 OCR-accuracy line.\n",
+			agg.McpOCRFallbackCount)
+	}
 }
 
 func truncate(s string, n int) string {
