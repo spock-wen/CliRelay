@@ -234,10 +234,12 @@ type VisionConfig struct {
 }
 
 // DefaultVisionConfig returns the defaults. Model and analyze-timeout are the
-// two fields the ops team will tune first.
+// two fields the ops team will tune first. Enabled defaults to false — vision
+// is opt-in via an explicit "enabled: true" in the vision section; this is a
+// sample/default, never an auto-enable.
 func DefaultVisionConfig() VisionConfig {
 	return VisionConfig{
-		Enabled:           true,
+		Enabled:           false,
 		Channel:           "xunfei-199",
 		Model:             "kimi-k2.6",
 		MaxSizeMB:         10,

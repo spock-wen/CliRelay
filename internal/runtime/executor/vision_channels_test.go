@@ -43,6 +43,7 @@ func TestNewVisionRecognizerDisabled(t *testing.T) {
 
 func TestNewVisionRecognizerMissingChannel(t *testing.T) {
 	v := config.DefaultVisionConfig()
+	v.Enabled = true
 	v.Channel = "missing"
 	e := NewClaudeExecutor(&config.Config{
 		Vision:    v,
@@ -55,6 +56,7 @@ func TestNewVisionRecognizerMissingChannel(t *testing.T) {
 
 func TestNewVisionRecognizerBuilds(t *testing.T) {
 	v := config.DefaultVisionConfig()
+	v.Enabled = true
 	v.Channel = "xunfei-199"
 	e := NewClaudeExecutor(&config.Config{
 		Vision:    v,
