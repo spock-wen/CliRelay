@@ -187,7 +187,7 @@ TokenHub 调用频率：默认每 2 小时一次增量同步；每日凌晨 2 �
 | `internal/api/handlers/management/data_source.go` | **新增**：`GetDataSourceMembers`、`GetDataSourceUsageEvents` handler |
 | `internal/api/routes/management_data_source_routes.go` | **新增**：注册两个端点，挂到 `/v0/management` 组 |
 | `internal/api/routes/management.go` | 调用新的路由注册函数 |
-| `internal/api/handlers/management/route_permissions.go` | `permissionForManagementRequest` 新增 `datasource.read` 映射（两个路径） |
+| `internal/api/handlers/management/route_permissions.go` | `permissionForManagementRequest` 复用 `request_logs.read` 映射（两个路径，不新增权限） |
 | `internal/util/pinyin.go` | **新增**：中文姓名 → 拼音小写 `姓_名` 工具函数 + 单测 |
 | `internal/usage/usage_db.go`（或 `request_log_query.go`） | `LogQueryParams` 新增 `StartTime`/`EndTime` 可选字段，`QueryLogs` 支持绝对时间窗口过滤 |
 | `go.mod` | 新增 `github.com/mozillazg/go-pinyin` |
@@ -209,7 +209,7 @@ TokenHub 调用频率：默认每 2 小时一次增量同步；每日凌晨 2 �
 | 场景 | 行为 |
 |------|------|
 | 未认证 / token 失效 | 401（现有中间件） |
-| 运管角色无 `datasource.read` 权限 | 403（现有中间件 fail-closed） |
+| 运管角色无 `request_logs.read` 权限 | 403（现有中间件 fail-closed） |
 | `startDate`/`endDate` 缺失或非法 | 400，`{"error": "..."}` |
 | `endDate` < `startDate` | 400 |
 | `pageSize` 超 500 | 钳制到 500（响应 `pageSize` 返回实际钳制值） |
@@ -221,7 +221,7 @@ TokenHub 调用频率：默认每 2 小时一次增量同步；每日凌晨 2 �
 - **单测**：`pinyin.go`（文国荣→wen_guorong、多音字兜底、非中文字符、空输入）
 - **单测**：字段映射函数（固定值 source/operation/credits/costCurrency/cacheWriteTokens、email 拼接）
 - **集成测试**：handler 测试——插入 request_logs / end_users 行，验证 members 与 usage-events 的响应结构、分页、时间过滤、空 api_key_name 跳过
-- **路由/权限测试**：`management_test.go` 断言两个新路径存在且权限映射为 `datasource.read`
+- **路由/权限测试**：`management_test.go` 断言两个新路径存在且权限映射为 `request_logs.read`
 
 ## 9. 非目标（Out of Scope）
 
