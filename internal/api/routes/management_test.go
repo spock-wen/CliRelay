@@ -124,8 +124,8 @@ func TestManagementRoutePermissionsComplete(t *testing.T) {
 		{http.MethodDelete, "/v0/management/logs", "system.logs.delete"},
 		{http.MethodPost, "/v0/management/usage/import", "system.config.write"},
 		{http.MethodPost, "/v0/management/usage/auth-file-quota-snapshot", "auth_files.write"},
-		{http.MethodGet, "/v0/management/data-source/members", "datasource.read"},
-		{http.MethodGet, "/v0/management/data-source/usage-events", "datasource.read"},
+		{http.MethodGet, "/v0/management/data-source/members", "request_logs.read"},
+		{http.MethodGet, "/v0/management/data-source/usage-events", "request_logs.read"},
 		{http.MethodGet, "/v0/management/totally-unknown-route", ""},
 	}
 	for _, item := range locked {

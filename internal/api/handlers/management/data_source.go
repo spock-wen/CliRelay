@@ -13,7 +13,7 @@ import (
 )
 
 // TokenHub 平台数据采集接口（成员列表 + 用量事件）。
-// 鉴权由现有 h.Middleware() 处理（cps_* session token + RBAC，权限 datasource.read）。
+// 鉴权由现有 h.Middleware() 处理（cps_* session token + RBAC，复用 request_logs.read）。
 
 const (
 	tokenHubEmailDomain       = "hoperun.com"
