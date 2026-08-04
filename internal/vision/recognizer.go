@@ -62,16 +62,21 @@ func (r *Recognizer) Analyze(ctx context.Context, req AnalyzeRequest) (AnalyzeRe
 
 	var resp AnalyzeResponse
 	err = r.limiter.Run(ctx, func() error {
-		key, release, ok := r.pool.Acquire()
-		if !ok {
-			return fmt.Errorf("no kimi key available")
-		}
-		defer release()
-
 		body := r.buildBody(proc.Base64, req)
 		var lastErr error
 		for attempt := 0; attempt <= r.cfg.Retries; attempt++ {
+			// Acquire a fresh key per attempt: on a retryable error the key is
+			// cooled down (MarkUnavailable) and released, so the next attempt
+			// round-robins to a different key and the cooldown actually bites.
+			key, release, ok := r.pool.Acquire()
+			if !ok {
+				if lastErr != nil {
+					return lastErr
+				}
+				return fmt.Errorf("no kimi key available")
+			}
 			out, err := r.doRequest(ctx, key, body)
+			release()
 			if err == nil {
 				parsed, perr := r.parseSummary(out, req)
 				if perr != nil {

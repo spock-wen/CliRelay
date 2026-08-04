@@ -107,6 +107,43 @@ func TestRecognizerExhaustedKeysReturnsError(t *testing.T) {
 	<-firstDone
 }
 
+func TestRecognizerReAcquiresFreshKeyAfterRetryableError(t *testing.T) {
+	// k1 always 429s; k2 succeeds. After the retryable error the key must be
+	// released and cooled so the retry round-robins to a fresh key (k2) —
+	// holding the throttled key across retries would make the retry fail too.
+	var hitsK1, hitsK2 int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.Contains(r.Header.Get("Authorization"), "k1"):
+			atomic.AddInt32(&hitsK1, 1)
+			http.Error(w, "rate limited", http.StatusTooManyRequests)
+		case strings.Contains(r.Header.Get("Authorization"), "k2"):
+			atomic.AddInt32(&hitsK2, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"SUMMARY: ok"}}]}`))
+		default:
+			t.Fatalf("unexpected Authorization %q", r.Header.Get("Authorization"))
+		}
+	}))
+	defer srv.Close()
+
+	r := NewRecognizer(RecognizerConfig{
+		BaseURL: srv.URL, APIKeys: []string{"k1", "k2"},
+		Model: "m", MaxConcurrency: 10, PerKeyConcurrency: 5, KeyCooldown: time.Minute,
+		Timeout: 5 * time.Second, Retries: 1, Preprocess: DefaultPreprocessConfig(), AnalyzeTimeout: 5 * time.Second,
+	})
+	img := base64Of(t, makeTestJPEG(t, 64, 64))
+	if _, err := r.Analyze(context.Background(), AnalyzeRequest{ImageData: img, MIMEType: "image/jpeg"}); err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if got := atomic.LoadInt32(&hitsK1); got != 1 {
+		t.Fatalf("k1 hit %d times, want 1", got)
+	}
+	if got := atomic.LoadInt32(&hitsK2); got != 1 {
+		t.Fatalf("k2 hit %d times, want 1 (fresh key must be re-acquired after 429)", got)
+	}
+}
+
 func TestRecognizerDoesNotRetryNonRetryableError(t *testing.T) {
 	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

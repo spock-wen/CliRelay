@@ -3,9 +3,12 @@ package vision
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/jpeg"
+	"image/png"
 	"testing"
 )
 
@@ -90,10 +93,66 @@ func TestPreprocessImageRejectsOversizedBytes(t *testing.T) {
 	}
 }
 
+func TestPreprocessImageAcceptsRealPNG(t *testing.T) {
+	// Real PNG input must pass the dimension guard and be re-encoded to JPEG.
+	cfg := DefaultPreprocessConfig()
+	var buf bytes.Buffer
+	img := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	out, err := PreprocessImage(buf.Bytes(), PreprocessModeStandard, cfg)
+	if err != nil {
+		t.Fatalf("PreprocessImage: %v", err)
+	}
+	if out.Width != 64 || out.Height != 64 {
+		t.Fatalf("dims %dx%d, want 64x64", out.Width, out.Height)
+	}
+	if out.MediaType != "image/jpeg" {
+		t.Fatalf("media type = %q, want image/jpeg", out.MediaType)
+	}
+}
+
 func TestPreprocessImageRejectsGarbage(t *testing.T) {
 	_, err := PreprocessImage([]byte("not an image"), PreprocessModeStandard, DefaultPreprocessConfig())
 	if err != ErrUnsupportedFormat {
 		t.Fatalf("err = %v, want ErrUnsupportedFormat", err)
+	}
+}
+
+// makePNGClaimingDims crafts a minimal PNG containing only a valid signature +
+// IHDR header (no image data) claiming the given dimensions. Used to exercise
+// the dimension guard without allocating a real huge image.
+func makePNGClaimingDims(w, h int) []byte {
+	var buf bytes.Buffer
+	buf.Write([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
+	var ihdr [13]byte
+	binary.BigEndian.PutUint32(ihdr[0:4], uint32(w))
+	binary.BigEndian.PutUint32(ihdr[4:8], uint32(h))
+	ihdr[8] = 8 // bit depth
+	ihdr[9] = 6 // color type RGBA
+	// ihdr[10:13] are 0 (compression / filter / interlace)
+	buf.Write([]byte{0, 0, 0, 13})
+	buf.WriteString("IHDR")
+	buf.Write(ihdr[:])
+	crc := crc32.NewIEEE()
+	crc.Write([]byte("IHDR"))
+	crc.Write(ihdr[:])
+	buf.Write(crc.Sum(nil))
+	return buf.Bytes()
+}
+
+func TestPreprocessImageRejectsHugeDimensionsBeforeDecode(t *testing.T) {
+	cfg := DefaultPreprocessConfig()
+	// A tiny compressed image claiming 20000x20000 (400M pixels) must be
+	// rejected on dimensions BEFORE any full decode (decompression bomb).
+	bomb := makePNGClaimingDims(20000, 20000)
+	if len(bomb) > 100 {
+		t.Fatalf("bomb fixture unexpectedly large: %d bytes", len(bomb))
+	}
+	_, err := PreprocessImage(bomb, PreprocessModeStandard, cfg)
+	if err != ErrImageTooLarge {
+		t.Fatalf("err = %v, want ErrImageTooLarge (rejected before full decode)", err)
 	}
 }
 

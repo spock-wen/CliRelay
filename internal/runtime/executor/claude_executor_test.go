@@ -11,7 +11,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -477,6 +480,7 @@ func TestClaudeExecutorExternalizesImages(t *testing.T) {
 	defer srv.Close()
 
 	v := config.DefaultVisionConfig()
+	v.Enabled = true
 	v.Channel = "xunfei-199"
 	executor := NewClaudeExecutor(&config.Config{
 		Vision:    v,
@@ -508,6 +512,188 @@ func TestClaudeExecutorExternalizesImages(t *testing.T) {
 	}
 	if !strings.Contains(bodyStr, "[Image Registry - Text Summary]") {
 		t.Fatalf("expected summary placeholder in upstream body, got: %s", bodyStr)
+	}
+}
+
+func TestClaudeExecutorSharesRecognizerAcrossRequests(t *testing.T) {
+	// The recognizer must be a process-wide singleton on the executor: with a
+	// global MaxConcurrency cap of 1, two CONCURRENT image requests through two
+	// separate Execute calls must never hit the recognizer upstream more than
+	// one at a time. Per-request recognizer construction would break this.
+	var inFlight, maxInFlight, recHits atomic.Int64
+	var upstreamBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/chat/completions"):
+			v := inFlight.Add(1)
+			defer inFlight.Add(-1)
+			for {
+				m := maxInFlight.Load()
+				if v <= m || maxInFlight.CompareAndSwap(m, v) {
+					break
+				}
+			}
+			recHits.Add(1)
+			time.Sleep(150 * time.Millisecond) // slow recognizer upstream
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"SUMMARY: x"}}]}`))
+		default:
+			body, _ := io.ReadAll(r.Body)
+			upstreamBody = body
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"m","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+		}
+	}))
+	defer srv.Close()
+
+	v := config.DefaultVisionConfig()
+	v.Enabled = true
+	v.Channel = "xunfei-199"
+	v.MaxConcurrency = 1
+	v.PerKeyConcurrency = 1
+	executor := NewClaudeExecutor(&config.Config{
+		Vision:    v,
+		ClaudeKey: []config.ClaudeKey{{Name: "xunfei-199", BaseURL: srv.URL, APIKey: "k1"}},
+	})
+	mkAuth := func(id string) *cliproxyauth.Auth {
+		return &cliproxyauth.Auth{
+			ID:         id,
+			Attributes: map[string]string{"api_key": "k1", "base_url": srv.URL},
+		}
+	}
+
+	imgB64 := testSmallJPEGBase64(t)
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","data":"` + imgB64 + `","media_type":"image/jpeg"}}]}]}`)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			id := "user-A"
+			if i == 1 {
+				id = "user-B"
+			}
+			if _, err := executor.Execute(context.Background(), mkAuth(id), cliproxyexecutor.Request{
+				Model:   "m",
+				Payload: payload,
+			}, cliproxyexecutor.Options{
+				SourceFormat: sdktranslator.FromString("claude"),
+			}); err != nil {
+				t.Errorf("Execute %d error: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if got := recHits.Load(); got != 2 {
+		t.Fatalf("recognizer hit %d times, want 2", got)
+	}
+	if got := maxInFlight.Load(); got > 1 {
+		t.Fatalf("max recognizer in-flight = %d, want <= 1 (global cap must hold across requests)", got)
+	}
+	if len(upstreamBody) == 0 {
+		t.Fatal("upstream never received a request")
+	}
+}
+
+func TestClaudeExecutorVisionEnabledNoChannelDegradesToPlaceholder(t *testing.T) {
+	// Vision enabled but the configured channel is missing → images must be
+	// replaced with a visible placeholder (never leak image bytes upstream).
+	var upstreamBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		upstreamBody = body
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"m","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	v := config.DefaultVisionConfig()
+	v.Enabled = true
+	v.Channel = "does-not-exist"
+	executor := NewClaudeExecutor(&config.Config{
+		Vision:    v,
+		ClaudeKey: []config.ClaudeKey{{Name: "xunfei-199", BaseURL: srv.URL, APIKey: "k1"}},
+	})
+	auth := &cliproxyauth.Auth{
+		ID:         "user-A",
+		Attributes: map[string]string{"api_key": "k1", "base_url": srv.URL},
+	}
+
+	imgB64 := testSmallJPEGBase64(t)
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","data":"` + imgB64 + `","media_type":"image/jpeg"}}]}]}`)
+
+	if _, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "m",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	}); err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if strings.Contains(string(upstreamBody), `"type":"image"`) {
+		t.Fatal("image block leaked upstream when recognizer unavailable")
+	}
+	if !strings.Contains(string(upstreamBody), "[Image Registry] 无可用的图片分析模型。") {
+		t.Fatal("expected degradation placeholder in upstream body")
+	}
+}
+
+func TestClaudeExecutorCountTokensSkipsRecognizer(t *testing.T) {
+	// count_tokens must replace images cheaply WITHOUT a kimi recognition
+	// round-trip (otherwise every new image pays analyzer latency + quota twice
+	// per turn — once here, once in Execute/ExecuteStream).
+	var recHits int32
+	var countBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/chat/completions"):
+			atomic.AddInt32(&recHits, 1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"SUMMARY: x"}}]}`))
+		case strings.HasSuffix(r.URL.Path, "/count_tokens"):
+			countBody, _ = io.ReadAll(r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"input_tokens": 42}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	v := config.DefaultVisionConfig()
+	v.Enabled = true
+	v.Channel = "xunfei-199"
+	executor := NewClaudeExecutor(&config.Config{
+		Vision:    v,
+		ClaudeKey: []config.ClaudeKey{{Name: "xunfei-199", BaseURL: srv.URL, APIKey: "k1"}},
+	})
+	auth := &cliproxyauth.Auth{
+		ID:         "user-A",
+		Attributes: map[string]string{"api_key": "k1", "base_url": srv.URL},
+	}
+
+	imgB64 := testSmallJPEGBase64(t)
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","data":"` + imgB64 + `","media_type":"image/jpeg"}}]}]}`)
+
+	if _, err := executor.CountTokens(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "m",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FromString("claude"),
+	}); err != nil {
+		t.Fatalf("CountTokens error: %v", err)
+	}
+
+	if got := atomic.LoadInt32(&recHits); got != 0 {
+		t.Fatalf("recognizer hit %d times, want 0 (count_tokens must not analyze images)", got)
+	}
+	if len(countBody) == 0 {
+		t.Fatal("count_tokens never received a request")
+	}
+	if strings.Contains(string(countBody), `"type":"image"`) {
+		t.Fatal("image block still present in count_tokens body")
 	}
 }
 
