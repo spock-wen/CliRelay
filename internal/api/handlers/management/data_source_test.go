@@ -111,13 +111,13 @@ func TestGetDataSourceMembers(t *testing.T) {
 	}
 	// Ordered by username_normalized: mac, wen_guorong.
 	first := payload.Members[0]
-	if first.Email != "mac@hoperun.com" {
-		t.Errorf("first email = %q, want mac@hoperun.com", first.Email)
+	if first.Email != "mac@hihope.com" {
+		t.Errorf("first email = %q, want mac@hihope.com", first.Email)
 	}
 	if first.Name != "Mac" || first.Role != "member" || first.Status != "active" {
 		t.Errorf("first member = %+v", first)
 	}
-	if second := payload.Members[1]; second.Email != "wen_guorong@hoperun.com" || second.Name != "文国荣" {
+	if second := payload.Members[1]; second.Email != "wen_guorong@hihope.com" || second.Name != "文国荣" {
 		t.Errorf("second member = %+v", second)
 	}
 }
@@ -187,8 +187,8 @@ func TestGetDataSourceUsageEvents(t *testing.T) {
 		t.Fatalf("usages len = %d, want 1; body=%s", len(payload.Usages), rec.Body.String())
 	}
 	first := payload.Usages[0]
-	if first.UserEmail != "wen_guorong@hoperun.com" {
-		t.Errorf("userEmail = %q, want wen_guorong@hoperun.com", first.UserEmail)
+	if first.UserEmail != "wen_guorong@hihope.com" {
+		t.Errorf("userEmail = %q, want wen_guorong@hihope.com", first.UserEmail)
 	}
 	if first.Source != "CLI" || first.Operation != "Agent" || first.Credits != 0 || first.CostCurrency != "USD" {
 		t.Errorf("fixed fields = %+v", first)

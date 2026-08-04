@@ -16,7 +16,7 @@ import (
 // 鉴权由现有 h.Middleware() 处理（cps_* session token + RBAC，复用 request_logs.read）。
 
 const (
-	tokenHubEmailDomain       = "hoperun.com"
+	tokenHubEmailDomain       = "hihope.com"
 	dataSourceDefaultPage     = 1
 	dataSourceDefaultPageSize = 100
 	dataSourceMaxPageSize     = 500
