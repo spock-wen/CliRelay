@@ -148,6 +148,60 @@ func TestLoadConfigSanitizesProxyWarmupDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadConfigVisionPartialSectionGetsDefaults(t *testing.T) {
+	t.Parallel()
+
+	// A partial vision section (enabled + channel, no numerics) must get the
+	// numeric/string defaults while keeping the explicitly-set fields.
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("vision:\n  enabled: true\n  channel: xunfei-199\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+
+	if !cfg.Vision.Enabled {
+		t.Fatal("vision.enabled = false, want true")
+	}
+	if cfg.Vision.Channel != "xunfei-199" {
+		t.Fatalf("vision.channel = %q, want xunfei-199", cfg.Vision.Channel)
+	}
+	d := DefaultVisionConfig()
+	if cfg.Vision.Model != d.Model {
+		t.Fatalf("vision.model = %q, want default %q", cfg.Vision.Model, d.Model)
+	}
+	if cfg.Vision.MaxSizeMB != d.MaxSizeMB {
+		t.Fatalf("vision.max-size-mb = %d, want default %d", cfg.Vision.MaxSizeMB, d.MaxSizeMB)
+	}
+	if cfg.Vision.MaxConcurrency != d.MaxConcurrency {
+		t.Fatalf("vision.max-concurrency = %d, want default %d", cfg.Vision.MaxConcurrency, d.MaxConcurrency)
+	}
+	if cfg.Vision.KeyCooldownMs != d.KeyCooldownMs {
+		t.Fatalf("vision.key-cooldown-ms = %d, want default %d", cfg.Vision.KeyCooldownMs, d.KeyCooldownMs)
+	}
+}
+
+func TestLoadConfigVisionAbsentDisabled(t *testing.T) {
+	t.Parallel()
+
+	// No vision section at all must leave vision disabled (never auto-enable).
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8317\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.Vision.Enabled {
+		t.Fatal("vision should be disabled when section is absent")
+	}
+}
+
 func TestSanitizeRoutingPreservesChannelGroupSettings(t *testing.T) {
 	t.Parallel()
 

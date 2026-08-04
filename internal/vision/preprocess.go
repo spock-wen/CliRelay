@@ -6,6 +6,9 @@ import (
 	"errors"
 	"image"
 	"image/jpeg"
+	// Imported so the stdlib PNG decoder registers with image.Decode /
+	// image.DecodeConfig regardless of what the importing binary links in.
+	_ "image/png"
 
 	"golang.org/x/image/bmp"
 	"golang.org/x/image/draw"
@@ -31,6 +34,10 @@ type PreprocessConfig struct {
 	OCRMaxDim      int
 	DiffMaxDim     int
 	JPEGQuality    int
+	// MaxPixelCount caps width*height accepted for full decode, bounding
+	// decompression-bomb memory (a tiny highly-compressed file can claim huge
+	// dimensions). <= 0 falls back to the default.
+	MaxPixelCount int
 }
 
 func DefaultPreprocessConfig() PreprocessConfig {
@@ -40,6 +47,7 @@ func DefaultPreprocessConfig() PreprocessConfig {
 		OCRMaxDim:      4096,
 		DiffMaxDim:     2048,
 		JPEGQuality:    80,
+		MaxPixelCount:  100_000_000,
 	}
 }
 
@@ -56,6 +64,20 @@ func PreprocessImage(data []byte, mode PreprocessMode, cfg PreprocessConfig) (*P
 	if len(data) > cfg.MaxSizeBytes {
 		return nil, ErrImageTooLarge
 	}
+	maxPixels := cfg.MaxPixelCount
+	if maxPixels <= 0 {
+		maxPixels = DefaultPreprocessConfig().MaxPixelCount
+	}
+	// Read only the header (cheap) to bound decode memory BEFORE full decode:
+	// a small highly-compressed image can inflate to gigabytes of RGBA on the
+	// request hot path, so reject absurd dimensions early (decompression bomb).
+	w, h, err := decodeImageConfig(data)
+	if err != nil {
+		return nil, ErrUnsupportedFormat
+	}
+	if w > 0 && h > 0 && int64(w)*int64(h) > int64(maxPixels) {
+		return nil, ErrImageTooLarge
+	}
 	src, err := decodeImage(data)
 	if err != nil {
 		return nil, ErrUnsupportedFormat
@@ -69,7 +91,7 @@ func PreprocessImage(data []byte, mode PreprocessMode, cfg PreprocessConfig) (*P
 	}
 
 	bounds := src.Bounds()
-	w, h := bounds.Dx(), bounds.Dy()
+	w, h = bounds.Dx(), bounds.Dy()
 	downsized := false
 	if w > maxDim || h > maxDim {
 		scale := float64(maxDim) / float64(w)
@@ -103,6 +125,21 @@ func PreprocessImage(data []byte, mode PreprocessMode, cfg PreprocessConfig) (*P
 		Bytes:     buf.Len(),
 		Downsized: downsized,
 	}, nil
+}
+
+// decodeImageConfig reads only the image header (dimensions) without decoding
+// the full pixel data, mirroring decodeImage's format detection for webp/bmp.
+func decodeImageConfig(data []byte) (width, height int, err error) {
+	if len(data) >= 12 && bytes.Equal(data[:4], []byte("RIFF")) && bytes.Equal(data[8:12], []byte("WEBP")) {
+		cfg, err := webp.DecodeConfig(bytes.NewReader(data))
+		return cfg.Width, cfg.Height, err
+	}
+	if len(data) >= 2 && data[0] == 'B' && data[1] == 'M' {
+		cfg, err := bmp.DecodeConfig(bytes.NewReader(data))
+		return cfg.Width, cfg.Height, err
+	}
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	return cfg.Width, cfg.Height, err
 }
 
 func decodeImage(data []byte) (image.Image, error) {
