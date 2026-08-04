@@ -13,6 +13,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/vision"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -75,6 +76,36 @@ func (e *ClaudeExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 	return httpClient.Do(httpReq)
 }
 
+// externalizeImages replaces all image content blocks with text summaries so
+// the upstream model never receives raw image bytes. Disabled vision is a
+// strict no-op; enabled vision with no recognizer degrades to placeholders.
+func (e *ClaudeExecutor) externalizeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, payload []byte) []byte {
+	if e == nil || e.cfg == nil || !e.cfg.Vision.Enabled {
+		return payload
+	}
+	analyzer := e.newVisionRecognizer()
+	sessionKey, _ := vision.ResolveIsolatedSessionKey(opts, auth)
+
+	if analyzer == nil {
+		payload, _ = vision.ReplaceAllImages(payload, "[Image Registry] 无可用的图片分析模型。")
+		return payload
+	}
+
+	proc := vision.NewProcessor(analyzer)
+	procRes, _ := proc.Process(ctx, payload, sessionKey, 0)
+	payload = procRes.Payload
+
+	if vision.CurrentTurnHasImages(payload) {
+		a3, err := proc.A3ProcessCurrentTurn(ctx, payload, sessionKey, 0)
+		if err == nil {
+			payload = a3
+		} else {
+			payload, _ = vision.ReplaceAllImages(payload, "[Image Registry] 图片分析失败，无法提供文本摘要。")
+		}
+	}
+	return payload
+}
+
 func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
@@ -94,6 +125,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	})
 	reporter := execCtx.Reporter()
 	defer reporter.trackFailure(execCtx.Context, &err)
+	req.Payload = e.externalizeImages(ctx, auth, req, opts, req.Payload)
 	body, originalTranslated := execCtx.TranslateRequestPair(req.Payload)
 	body, _ = sjson.SetBytes(body, "model", execCtx.BaseModel)
 
@@ -229,6 +261,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	})
 	reporter := execCtx.Reporter()
 	defer reporter.trackFailure(execCtx.Context, &err)
+	req.Payload = e.externalizeImages(ctx, auth, req, opts, req.Payload)
 	body, originalTranslated := execCtx.TranslateRequestPair(req.Payload)
 	body, _ = sjson.SetBytes(body, "model", execCtx.BaseModel)
 
@@ -396,6 +429,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		TargetFormat:      to,
 		TranslateAsStream: stream,
 	})
+	req.Payload = e.externalizeImages(ctx, auth, req, opts, req.Payload)
 	body, _ := execCtx.TranslateRequestPair(req.Payload)
 	body, _ = sjson.SetBytes(body, "model", execCtx.BaseModel)
 

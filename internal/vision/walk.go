@@ -394,3 +394,19 @@ func fmtInt(n int) string {
 	}
 	return string(buf)
 }
+
+// ReplaceAllImages replaces every image content part (current and historical)
+// with a text placeholder. Used when no recognizer is available so image bytes
+// never reach the upstream model.
+func ReplaceAllImages(payload []byte, placeholder string) ([]byte, error) {
+	walk := WalkPayload(payload)
+	arrayType := detectArrayType(payload)
+	for _, part := range walk.Parts {
+		var err error
+		payload, err = ReplaceImagePartEx(payload, part, placeholder, arrayType)
+		if err != nil {
+			return payload, err
+		}
+	}
+	return payload, nil
+}
