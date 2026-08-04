@@ -805,3 +805,15 @@ func TestA3WithNoSessionStillReplacesImage(t *testing.T) {
 		t.Fatal("A3 should replace images even without a session key")
 	}
 }
+
+func TestReplaceAllImages(t *testing.T) {
+	img := base64Of(t, makeTestJPEG(t, 64, 64))
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image","source":{"type":"base64","data":"` + img + `","media_type":"image/jpeg"}}]},{"role":"user","content":[{"type":"image","source":{"type":"base64","data":"` + img + `","media_type":"image/jpeg"}}]}]}`)
+	out, err := ReplaceAllImages(payload, "[Image Registry] placeholder")
+	if err != nil {
+		t.Fatalf("ReplaceAllImages: %v", err)
+	}
+	if got := string(out); strings.Contains(got, `"type":"image"`) {
+		t.Fatalf("image blocks remain: %s", got)
+	}
+}
