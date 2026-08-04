@@ -149,6 +149,8 @@ func TestManagementRoutePermissionsComplete(t *testing.T) {
 		{http.MethodGet, "/v0/management/ai-accounts/status", "auth_files.read"},
 		{http.MethodPost, "/v0/management/ai-accounts/status-refresh", "auth_files.write"},
 		{http.MethodGet, "/v0/management/ai-accounts/status-refresh/job-1", "auth_files.read"},
+		{http.MethodGet, "/v0/management/data-source/members", "request_logs.read"},
+		{http.MethodGet, "/v0/management/data-source/usage-events", "request_logs.read"},
 		{http.MethodGet, "/v0/management/totally-unknown-route", ""},
 	}
 	for _, item := range locked {
@@ -332,6 +334,8 @@ func expectedManagementRoutes() []string {
 		"GET /v0/management/content-moderation/metrics",
 		"GET /v0/management/content-moderation/profiles",
 		"GET /v0/management/content-moderation/profiles/:id",
+		"GET /v0/management/data-source/members",
+		"GET /v0/management/data-source/usage-events",
 		"GET /v0/management/dashboard-summary",
 		"GET /v0/management/debug",
 		"GET /v0/management/error-logs-max-files",
@@ -400,6 +404,7 @@ func expectedManagementRoutes() []string {
 		"GET /v0/management/usage/chart-data",
 		"GET /v0/management/usage/entity-stats",
 		"GET /v0/management/usage/export",
+		"GET /v0/management/usage/export/summary",
 		"GET /v0/management/usage/logs",
 		"GET /v0/management/usage/logs/:id/content",
 		"GET /v0/management/usage/logs/:id/egress",
@@ -472,6 +477,7 @@ func expectedManagementRoutes() []string {
 		"POST /v0/management/public/usage/summary",
 		"POST /v0/management/quota/clear-status",
 		"POST /v0/management/quota/reconcile",
+		"POST /v0/management/reset-cooldown",
 		"POST /v0/management/usage/auth-file-quota-snapshot",
 		"POST /v0/management/usage/import",
 		"POST /v0/management/update/apply",

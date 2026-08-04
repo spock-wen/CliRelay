@@ -197,6 +197,51 @@ func (m *Manager) Delete(ctx context.Context, id string) (*Auth, error) {
 // Load resets manager state from the backing store. Lifecycle callbacks run
 // after releasing the manager lock so database-backed hooks cannot deadlock auth
 // selection or refresh paths.
+// ResetCooldown clears per-model cooldown states for auths matching the given
+// channel name (and optional model), returning how many auths actually had
+// state reset. Misspelled channel/model names return 0 without side effects.
+func (m *Manager) ResetCooldown(channelName string, model string) int {
+	channelName = strings.TrimSpace(channelName)
+	model = strings.TrimSpace(model)
+	if channelName == "" {
+		return 0
+	}
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	count := 0
+	for _, auth := range m.auths {
+		if auth == nil {
+			continue
+		}
+		labels := auth.ChannelIdentifiers()
+		matched := false
+		for _, label := range labels {
+			if strings.EqualFold(strings.TrimSpace(label), channelName) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		if model == "" {
+			for _, state := range auth.ModelStates {
+				resetModelState(state, now)
+			}
+			updateAggregatedAvailability(auth, now)
+			count++
+		} else if state := auth.ModelStates[model]; state != nil {
+			// Only count a match that actually reset state; a misspelled
+			// model name must not report a false success.
+			resetModelState(state, now)
+			updateAggregatedAvailability(auth, now)
+			count++
+		}
+	}
+	return count
+}
 func (m *Manager) Load(ctx context.Context) error {
 	items, err := m.loadPersistedAuths(ctx)
 	if err != nil {

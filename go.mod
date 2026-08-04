@@ -22,6 +22,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/klauspost/compress v1.19.0
 	github.com/minio/minio-go/v7 v7.0.66
+	github.com/mozillazg/go-pinyin v0.21.0
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/refraction-networking/utls v1.8.2
 	github.com/shirou/gopsutil/v3 v3.24.5

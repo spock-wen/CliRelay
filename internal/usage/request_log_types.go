@@ -57,9 +57,16 @@ type LogQueryParams struct {
 	AuthSubjectIDs   []string // optional auth_subject_id IN (...) filter (account-level)
 	AuthIndexes      []string // optional auth_index IN (...) filter (credential instance)
 	ChannelNames     []string // optional channel_name IN (...) filter
+	SkipEmptyAPIKeyName bool // exclude rows with blank api_key_name at the SQL layer
 	// Optional precise legacy matches for renamed auth channels whose stored
 	// channel_name was a shared provider/source value.
 	AuthIndexChannelNames map[string][]string
+
+	// StartTime/EndTime define an absolute half-open [StartTime, EndTime)
+	// window that overrides the relative Days range. When StartTime is set the
+	// Days cutoff is ignored; EndTime is optional and adds an upper bound.
+	StartTime *time.Time
+	EndTime   *time.Time
 }
 
 // LogQueryResult holds the paginated query result.
