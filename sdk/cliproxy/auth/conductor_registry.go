@@ -223,13 +223,14 @@ func (m *Manager) ResetCooldown(channelName string, model string) int {
 				resetModelState(state, now)
 			}
 			updateAggregatedAvailability(auth, now)
-		} else {
-			if state := auth.ModelStates[model]; state != nil {
-				resetModelState(state, now)
-			}
+			count++
+		} else if state := auth.ModelStates[model]; state != nil {
+			// Only count a match that actually reset state; a misspelled
+			// model name must not report a false success.
+			resetModelState(state, now)
 			updateAggregatedAvailability(auth, now)
+			count++
 		}
-		count++
 	}
 	return count
 }
