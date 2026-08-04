@@ -81,9 +81,10 @@ func (r *Recognizer) Analyze(ctx context.Context, req AnalyzeRequest) (AnalyzeRe
 				return nil
 			}
 			lastErr = err
-			if isRetryable(err) {
-				r.pool.MarkUnavailable(key)
+			if !isRetryable(err) {
+				break
 			}
+			r.pool.MarkUnavailable(key)
 		}
 		return lastErr
 	})

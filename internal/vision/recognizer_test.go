@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -104,4 +105,26 @@ func TestRecognizerExhaustedKeysReturnsError(t *testing.T) {
 	}
 	close(blocked)
 	<-firstDone
+}
+
+func TestRecognizerDoesNotRetryNonRetryableError(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	r := NewRecognizer(RecognizerConfig{
+		BaseURL: srv.URL, APIKeys: []string{"k1"},
+		Model: "m", MaxConcurrency: 10, PerKeyConcurrency: 5, KeyCooldown: time.Minute,
+		Timeout: 5 * time.Second, Retries: 2, Preprocess: DefaultPreprocessConfig(), AnalyzeTimeout: 5 * time.Second,
+	})
+	img := base64Of(t, makeTestJPEG(t, 64, 64))
+	if _, err := r.Analyze(context.Background(), AnalyzeRequest{ImageData: img, MIMEType: "image/jpeg"}); err == nil {
+		t.Fatal("expected error from 400 response")
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("upstream hit %d times, want 1 (non-retryable 400 must not be retried)", got)
+	}
 }
