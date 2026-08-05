@@ -95,12 +95,14 @@ func (r *Recognizer) Analyze(ctx context.Context, req AnalyzeRequest) (AnalyzeRe
 			if !isRetryable(err) {
 				break
 			}
-			// Cool the key only on upstream status errors (throttling / server
-			// trouble tied to the key). Transport errors are network-level —
-			// the key is fine, so a retry can reuse it instead of burning
-			// capacity (and a single-key pool stays able to retry).
+			// Cool the key only on 429 — the one status that means "this key is
+			// throttled, back off this key specifically". 5xx are server-side
+			// trouble and transport errors are network-level; the retry loop's
+			// fresh acquire already rotates keys for multi-key pools, and
+			// cooling on a 5xx would black out a single-key pool for the whole
+			// cooldown even after the upstream recovers.
 			var statusErr *apiStatusError
-			if errors.As(err, &statusErr) {
+			if errors.As(err, &statusErr) && statusErr.code == http.StatusTooManyRequests {
 				r.pool.MarkUnavailable(slot)
 			}
 		}

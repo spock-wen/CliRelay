@@ -139,6 +139,52 @@ func TestOpenAICompatExecutorClineUsesOpenCodeGoForCrossProviderVisionFallback(t
 	}
 }
 
+func TestOpenAICompatExecutorClineVisionFallbackPreservesImageWhenVisionEnabled(t *testing.T) {
+	// Cross-provider cline→OpenCodeGo vision fallback with vision externalization
+	// ENABLED: the request is deliberately routed to a vision-capable model, so
+	// the raw image must survive the nested OpenCodeGo executor's upstream call.
+	clineServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "cline should not receive cross-provider fallback", http.StatusInternalServerError)
+	}))
+	defer clineServer.Close()
+
+	var gotBody []byte
+	opencodeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","created":1,"model":"qwen3.5-plus","choices":[{"index":0,"message":{"role":"assistant","content":"vision ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer opencodeServer.Close()
+	oldBaseURL := opencodeGoBaseURL
+	opencodeGoBaseURL = opencodeServer.URL + "/v1"
+	defer func() { opencodeGoBaseURL = oldBaseURL }()
+
+	exec := NewOpenAICompatExecutor("cline", &config.Config{
+		Vision: config.VisionConfig{Enabled: true},
+		OpenCodeGoKey: []config.OpenCodeGoKey{{
+			APIKey: "go-key",
+			Name:   "opencode go",
+			Models: []config.OpenCodeGoModel{{Name: "qwen3.5-plus"}},
+		}},
+	})
+	auth := &cliproxyauth.Auth{Attributes: map[string]string{
+		"base_url":              clineServer.URL + "/api/v1",
+		"api_key":               "cline-key",
+		"vision_fallback_model": "qwen3.5-plus",
+	}}
+	payload := []byte(`{"model":"cline-pass/deepseek-v4-flash","messages":[{"role":"user","content":[{"type":"text","text":"what is this?"},{"type":"image_url","image_url":{"url":"data:image/png;base64,aGVsbG8="}}]}]}`)
+	if _, err := exec.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "cline-pass/deepseek-v4-flash",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}); err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if !strings.Contains(string(gotBody), `"image_url"`) {
+		t.Fatalf("image should be preserved for the vision-capable fallback model even with vision externalization enabled; body=%s", string(gotBody))
+	}
+}
+
 func TestOpenAICompatExecutorClineStreamsOpenCodeGoCrossProviderVisionFallback(t *testing.T) {
 	var clineHit bool
 	clineServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -193,6 +193,35 @@ func TestRecognizerDoesNotRetry400Containing429Substring(t *testing.T) {
 	}
 }
 
+func TestRecognizerRetries500WithoutCoolingKey(t *testing.T) {
+	// A 5xx must be retried WITHOUT cooling the key: cooling on 5xx would black
+	// out a single-key pool for the whole cooldown window even after the
+	// upstream recovers. Only 429 is key-specific throttling that cools.
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 1 {
+			http.Error(w, "temporary server trouble", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"SUMMARY: ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	r := NewRecognizer(RecognizerConfig{
+		BaseURL: srv.URL, APIKeys: []string{"k1"},
+		Model: "m", MaxConcurrency: 10, PerKeyConcurrency: 5, KeyCooldown: time.Minute,
+		Timeout: 5 * time.Second, Retries: 2, Preprocess: DefaultPreprocessConfig(), AnalyzeTimeout: 5 * time.Second,
+	})
+	img := base64Of(t, makeTestJPEG(t, 64, 64))
+	if _, err := r.Analyze(context.Background(), AnalyzeRequest{ImageData: img, MIMEType: "image/jpeg"}); err != nil {
+		t.Fatalf("Analyze: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("upstream hit %d times, want 2 (single-key pool must retry a 5xx on the same key)", got)
+	}
+}
+
 func TestRecognizerRetriesTransientNetworkError(t *testing.T) {
 	// First attempt: connection is closed without an HTTP response (a transient
 	// network blip). A transport error is retryable and must not cool the key,
