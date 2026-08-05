@@ -156,6 +156,21 @@ func TestPreprocessImageRejectsHugeDimensionsBeforeDecode(t *testing.T) {
 	}
 }
 
+func TestPreprocessImageRejectsModerateDimensionClaim(t *testing.T) {
+	cfg := DefaultPreprocessConfig()
+	// The default MaxPixelCount must stay well under ~400MB per decode: a 30M
+	// pixel claim (~120MB RGBA) is rejected by the default, so the security
+	// cap cannot silently regress to the old 100M default.
+	if cfg.MaxPixelCount >= 30_000_000 {
+		t.Fatalf("MaxPixelCount default %d is too high; a 30M-pixel claim must be rejected", cfg.MaxPixelCount)
+	}
+	bomb := makePNGClaimingDims(6000, 5000)
+	_, err := PreprocessImage(bomb, PreprocessModeStandard, cfg)
+	if err != ErrImageTooLarge {
+		t.Fatalf("err = %v, want ErrImageTooLarge (30M-pixel claim must be rejected by default)", err)
+	}
+}
+
 func TestPreprocessImageOCRUsesLargerDim(t *testing.T) {
 	cfg := DefaultPreprocessConfig()
 	cfg.StandardMaxDim = 64

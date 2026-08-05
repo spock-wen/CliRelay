@@ -53,7 +53,11 @@ func NewKeyPool(keys []string, perKeyConcurrency int, cooldown time.Duration) *K
 	}
 }
 
-func (p *KeyPool) Acquire() (string, func(), bool) {
+// Acquire reserves the next available key slot and returns the key value, its
+// slot index, and a release func. The slot index is what MarkUnavailable cools,
+// so duplicate key strings in the config cool only the slot that actually hit
+// the error — not every slot sharing the same key value.
+func (p *KeyPool) Acquire() (key string, slot int, release func(), ok bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
@@ -68,7 +72,7 @@ func (p *KeyPool) Acquire() (string, func(), bool) {
 			p.cursor = (idx + 1) % n
 			key := p.keys[idx]
 			var done bool
-			return key, func() {
+			return key, idx, func() {
 				p.mu.Lock()
 				defer p.mu.Unlock()
 				if done {
@@ -81,16 +85,14 @@ func (p *KeyPool) Acquire() (string, func(), bool) {
 			}, true
 		}
 	}
-	return "", nil, false
+	return "", -1, nil, false
 }
 
-func (p *KeyPool) MarkUnavailable(key string) {
+func (p *KeyPool) MarkUnavailable(slot int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for i, k := range p.keys {
-		if k == key {
-			p.cooldownUntil[i] = time.Now().Add(p.cooldown)
-			return
-		}
+	if slot < 0 || slot >= len(p.cooldownUntil) {
+		return
 	}
+	p.cooldownUntil[slot] = time.Now().Add(p.cooldown)
 }

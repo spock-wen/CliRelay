@@ -63,7 +63,7 @@ func TestKeyPoolRoundRobinAndConcurrency(t *testing.T) {
 	p := NewKeyPool([]string{"k1", "k2"}, 1, time.Minute)
 	var got []string
 	for i := 0; i < 4; i++ {
-		k, release, ok := p.Acquire()
+		k, _, release, ok := p.Acquire()
 		if !ok {
 			t.Fatalf("acquire %d failed", i)
 		}
@@ -73,9 +73,9 @@ func TestKeyPoolRoundRobinAndConcurrency(t *testing.T) {
 	if len(got) != 4 {
 		t.Fatalf("acquired %d, want 4", len(got))
 	}
-	_, rel1, _ := p.Acquire()
-	_, rel2, _ := p.Acquire()
-	if k, _, ok := p.Acquire(); ok {
+	_, _, rel1, _ := p.Acquire()
+	_, _, rel2, _ := p.Acquire()
+	if k, _, _, ok := p.Acquire(); ok {
 		t.Fatalf("expected no key available, got %q", k)
 	}
 	rel1()
@@ -84,17 +84,44 @@ func TestKeyPoolRoundRobinAndConcurrency(t *testing.T) {
 
 func TestKeyPoolMarkUnavailable(t *testing.T) {
 	p := NewKeyPool([]string{"k1"}, 2, time.Hour)
-	p.MarkUnavailable("k1")
-	if _, _, ok := p.Acquire(); ok {
+	_, slot, _, ok := p.Acquire()
+	if !ok {
+		t.Fatal("expected acquire to succeed")
+	}
+	p.MarkUnavailable(slot)
+	if _, _, _, ok := p.Acquire(); ok {
 		t.Fatal("expected acquire to fail after mark unavailable")
 	}
 }
 
 func TestKeyPoolCooldownExpires(t *testing.T) {
 	p := NewKeyPool([]string{"k1"}, 2, 10*time.Millisecond)
-	p.MarkUnavailable("k1")
+	_, slot, _, ok := p.Acquire()
+	if !ok {
+		t.Fatal("expected acquire to succeed")
+	}
+	p.MarkUnavailable(slot)
 	time.Sleep(15 * time.Millisecond)
-	if _, _, ok := p.Acquire(); !ok {
+	if _, _, _, ok := p.Acquire(); !ok {
 		t.Fatal("expected acquire to succeed after cooldown expired")
 	}
+}
+
+func TestKeyPoolDuplicateKeyCoolsOnlyUsedSlot(t *testing.T) {
+	// The same key string listed twice is two distinct slots. Cooling the slot
+	// that hit the error must NOT cool the other slot sharing the value.
+	p := NewKeyPool([]string{"k1", "k1"}, 1, time.Hour)
+	k1, slot1, _, ok := p.Acquire()
+	if !ok || k1 != "k1" {
+		t.Fatalf("first acquire: key=%q ok=%v, want k1/true", k1, ok)
+	}
+	p.MarkUnavailable(slot1)
+	_, slot2, release2, ok2 := p.Acquire()
+	if !ok2 {
+		t.Fatal("second slot sharing the key value must still be usable")
+	}
+	if slot2 == slot1 {
+		t.Fatalf("expected a different slot, got %d again", slot1)
+	}
+	release2()
 }

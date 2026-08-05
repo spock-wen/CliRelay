@@ -102,7 +102,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	// Image externalization must run in every executor before translation:
 	// OpenAI-compat channels (讯飞/glm) are the production path for image
 	// requests, and the upstream chat model must never receive raw image bytes.
-	req.Payload = externalizeImages(ctx, e.cfg, auth, opts, req.Payload)
+	// When a vision fallback was applied the request is deliberately routed to
+	// a vision-capable model that must receive the raw image — skip replacement.
+	if !fallback.Applied {
+		req.Payload = externalizeImages(ctx, e.cfg, auth, opts, req.Payload)
+	}
 
 	baseURL, apiKey := e.resolveCredentials(auth)
 	if baseURL == "" {
@@ -250,7 +254,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// Image externalization must run in every executor before translation:
 	// OpenAI-compat channels (讯飞/glm) are the production path for image
 	// requests, and the upstream chat model must never receive raw image bytes.
-	req.Payload = externalizeImages(ctx, e.cfg, auth, opts, req.Payload)
+	// When a vision fallback was applied the request is deliberately routed to
+	// a vision-capable model that must receive the raw image — skip replacement.
+	if !fallback.Applied {
+		req.Payload = externalizeImages(ctx, e.cfg, auth, opts, req.Payload)
+	}
 
 	baseURL, apiKey := e.resolveCredentials(auth)
 	if baseURL == "" {

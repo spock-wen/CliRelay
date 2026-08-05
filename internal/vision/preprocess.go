@@ -47,7 +47,10 @@ func DefaultPreprocessConfig() PreprocessConfig {
 		OCRMaxDim:      4096,
 		DiffMaxDim:     2048,
 		JPEGQuality:    80,
-		MaxPixelCount:  100_000_000,
+		// 16M pixels bounds a single full decode to ~64MB RGBA (comfortably
+		// covers a 4K screenshot's 8.3M) while keeping a crafted-dimension
+		// decompression bomb from claiming ~400MB per request.
+		MaxPixelCount: 16_000_000,
 	}
 }
 

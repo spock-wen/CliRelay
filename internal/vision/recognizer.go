@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -48,34 +49,39 @@ func NewRecognizer(cfg RecognizerConfig) *Recognizer {
 func (r *Recognizer) Name() string { return "recognizer" }
 
 func (r *Recognizer) Analyze(ctx context.Context, req AnalyzeRequest) (AnalyzeResponse, error) {
-	raw, err := base64.StdEncoding.DecodeString(req.ImageData)
-	if err != nil {
-		return AnalyzeResponse{}, fmt.Errorf("decode image data: %w", err)
-	}
-	proc, err := PreprocessImage(raw, PreprocessModeStandard, r.cfg.Preprocess)
-	if err != nil {
-		return AnalyzeResponse{}, fmt.Errorf("preprocess image: %w", err)
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, r.cfg.AnalyzeTimeout)
-	defer cancel()
-
 	var resp AnalyzeResponse
-	err = r.limiter.Run(ctx, func() error {
+	err := r.limiter.Run(ctx, func() error {
+		// Decode + preprocess run INSIDE the limiter so the potentially large
+		// per-image memory allocation (a crafted 100MP image decodes to ~400MB)
+		// is bounded by MaxConcurrency instead of by the number of concurrent
+		// chat requests. Queue-wait time is bounded by the caller ctx.
+		raw, err := base64.StdEncoding.DecodeString(req.ImageData)
+		if err != nil {
+			return fmt.Errorf("decode image data: %w", err)
+		}
+		proc, err := PreprocessImage(raw, PreprocessModeStandard, r.cfg.Preprocess)
+		if err != nil {
+			return fmt.Errorf("preprocess image: %w", err)
+		}
+
 		body := r.buildBody(proc.Base64, req)
 		var lastErr error
 		for attempt := 0; attempt <= r.cfg.Retries; attempt++ {
 			// Acquire a fresh key per attempt: on a retryable error the key is
 			// cooled down (MarkUnavailable) and released, so the next attempt
 			// round-robins to a different key and the cooldown actually bites.
-			key, release, ok := r.pool.Acquire()
+			key, slot, release, ok := r.pool.Acquire()
 			if !ok {
 				if lastErr != nil {
 					return lastErr
 				}
 				return fmt.Errorf("no kimi key available")
 			}
-			out, err := r.doRequest(ctx, key, body)
+			// Per-attempt deadline: a long queue wait must not consume the
+			// retry budget, so each HTTP attempt gets its own AnalyzeTimeout.
+			attemptCtx, cancel := context.WithTimeout(ctx, r.cfg.AnalyzeTimeout)
+			out, err := r.doRequest(attemptCtx, key, body)
+			cancel()
 			release()
 			if err == nil {
 				parsed, perr := r.parseSummary(out, req)
@@ -89,7 +95,14 @@ func (r *Recognizer) Analyze(ctx context.Context, req AnalyzeRequest) (AnalyzeRe
 			if !isRetryable(err) {
 				break
 			}
-			r.pool.MarkUnavailable(key)
+			// Cool the key only on upstream status errors (throttling / server
+			// trouble tied to the key). Transport errors are network-level —
+			// the key is fine, so a retry can reuse it instead of burning
+			// capacity (and a single-key pool stays able to retry).
+			var statusErr *apiStatusError
+			if errors.As(err, &statusErr) {
+				r.pool.MarkUnavailable(slot)
+			}
 		}
 		return lastErr
 	})
@@ -134,9 +147,20 @@ func (r *Recognizer) doRequest(ctx context.Context, apiKey string, body []byte) 
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("API status %d: %s", resp.StatusCode, string(out))
+		return nil, &apiStatusError{code: resp.StatusCode, body: string(out)}
 	}
 	return out, nil
+}
+
+// apiStatusError carries the upstream HTTP status so retry decisions are made
+// on the numeric code, never on substring-matching the response body.
+type apiStatusError struct {
+	code int
+	body string
+}
+
+func (e *apiStatusError) Error() string {
+	return fmt.Sprintf("API status %d: %s", e.code, e.body)
 }
 
 func (r *Recognizer) parseSummary(data []byte, req AnalyzeRequest) (AnalyzeResponse, error) {
@@ -160,6 +184,17 @@ func isRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	s := err.Error()
-	return strings.Contains(s, "429") || strings.Contains(s, "502") || strings.Contains(s, "503")
+	var statusErr *apiStatusError
+	if errors.As(err, &statusErr) {
+		switch statusErr.code {
+		case http.StatusTooManyRequests, http.StatusInternalServerError,
+			http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		}
+		return false
+	}
+	// Transport errors (connection reset, proxy timeout) are transient — retry.
+	// Context cancellation/deadline are not: the caller gave up or the per-attempt
+	// budget was spent, and retrying a timed-out request rarely succeeds.
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }

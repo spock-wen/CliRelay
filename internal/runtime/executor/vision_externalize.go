@@ -31,7 +31,13 @@ func externalizeImages(ctx context.Context, cfg *config.Config, auth *cliproxyau
 
 	if analyzer == nil {
 		log.Warnf("vision: enabled but no recognizer available (channel %q) — replacing images with placeholders", cfg.Vision.Channel)
-		payload, _ = vision.ReplaceAllImages(payload, "[Image Registry] 无可用的图片分析模型。")
+		var err error
+		payload, err = vision.ReplaceAllImages(payload, "[Image Registry] 无可用的图片分析模型。")
+		if err != nil {
+			// A partial replacement can leave raw image bytes in the forwarded
+			// payload — surface it so the leak is not silent.
+			log.Warnf("vision: placeholder replacement failed (image bytes may leak upstream): %v", err)
+		}
 		return payload
 	}
 
@@ -54,6 +60,9 @@ func externalizeImagesCheap(cfg *config.Config, payload []byte) []byte {
 	if cfg == nil || !cfg.Vision.Enabled {
 		return payload
 	}
-	out, _ := vision.ReplaceAllImages(payload, "[Image Registry] 图片（占位）")
+	out, err := vision.ReplaceAllImages(payload, "[Image Registry] 图片（占位）")
+	if err != nil {
+		log.Warnf("vision: cheap placeholder replacement failed (image bytes may leak upstream): %v", err)
+	}
 	return out
 }
