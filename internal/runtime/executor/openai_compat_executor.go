@@ -99,6 +99,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	reporter := execCtx.Reporter()
 	defer reporter.trackFailure(execCtx.Context, &err)
 
+	// Image externalization must run in every executor before translation:
+	// OpenAI-compat channels (讯飞/glm) are the production path for image
+	// requests, and the upstream chat model must never receive raw image bytes.
+	req.Payload = externalizeImages(ctx, e.cfg, auth, opts, req.Payload)
+
 	baseURL, apiKey := e.resolveCredentials(auth)
 	if baseURL == "" {
 		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
@@ -241,6 +246,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	})
 	reporter := execCtx.Reporter()
 	defer reporter.trackFailure(execCtx.Context, &err)
+
+	// Image externalization must run in every executor before translation:
+	// OpenAI-compat channels (讯飞/glm) are the production path for image
+	// requests, and the upstream chat model must never receive raw image bytes.
+	req.Payload = externalizeImages(ctx, e.cfg, auth, opts, req.Payload)
 
 	baseURL, apiKey := e.resolveCredentials(auth)
 	if baseURL == "" {
@@ -514,6 +524,10 @@ func responsesSSEData(chunk []byte) []byte {
 }
 
 func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	// Token counting must never trigger a kimi recognition call and image
+	// blocks would break translation, so strip them to a fixed placeholder.
+	req.Payload = externalizeImagesCheap(e.cfg, req.Payload)
+
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	from := opts.SourceFormat
