@@ -7,14 +7,12 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/vision"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -27,12 +25,6 @@ import (
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
 type ClaudeExecutor struct {
 	cfg *config.Config
-
-	// recMu guards lazy construction of the shared vision recognizer (C1): one
-	// process-wide instance so the global concurrency cap, key-pool cooldown,
-	// and HTTP connection reuse apply across ALL requests, not per request.
-	recMu sync.Mutex
-	rec   *vision.Recognizer
 }
 
 const claudeToolPrefix = "proxy_"
@@ -83,49 +75,6 @@ func (e *ClaudeExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Aut
 	return httpClient.Do(httpReq)
 }
 
-// externalizeImages replaces all image content blocks with text summaries so
-// the upstream model never receives raw image bytes. Disabled vision is a
-// strict no-op; enabled vision with no recognizer degrades to placeholders.
-func (e *ClaudeExecutor) externalizeImages(ctx context.Context, auth *cliproxyauth.Auth, opts cliproxyexecutor.Options, payload []byte) []byte {
-	if e == nil || e.cfg == nil || !e.cfg.Vision.Enabled {
-		return payload
-	}
-	// Pure-text requests carry no images — skip recognizer and payload walks.
-	if len(vision.WalkPayload(payload).Parts) == 0 {
-		return payload
-	}
-	analyzer := e.newVisionRecognizer()
-	sessionKey, _ := vision.ResolveIsolatedSessionKey(opts, auth)
-
-	if analyzer == nil {
-		log.Warnf("vision: enabled but no recognizer available (channel %q) — replacing images with placeholders", e.cfg.Vision.Channel)
-		payload, _ = vision.ReplaceAllImages(payload, "[Image Registry] 无可用的图片分析模型。")
-		return payload
-	}
-
-	proc := vision.NewProcessor(analyzer)
-	procRes, _ := proc.Process(ctx, payload, sessionKey, 0)
-	payload = procRes.Payload
-
-	if vision.CurrentTurnHasImages(payload) {
-		// A3ProcessCurrentTurn never returns a non-nil error — analysis
-		// failures degrade to placeholders internally.
-		payload, _ = proc.A3ProcessCurrentTurn(ctx, payload, sessionKey, 0)
-	}
-	return payload
-}
-
-// externalizeImagesCheap replaces image blocks with a fixed placeholder WITHOUT
-// any analyzer round-trip. Used by CountTokens so token counting never triggers
-// a kimi recognition call (and a new image is not recognized twice per turn).
-func (e *ClaudeExecutor) externalizeImagesCheap(payload []byte) []byte {
-	if e == nil || e.cfg == nil || !e.cfg.Vision.Enabled {
-		return payload
-	}
-	out, _ := vision.ReplaceAllImages(payload, "[Image Registry] 图片（占位）")
-	return out
-}
-
 func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	if opts.Alt == "responses/compact" {
 		return resp, statusErr{code: http.StatusNotImplemented, msg: "/responses/compact not supported"}
@@ -145,7 +94,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	})
 	reporter := execCtx.Reporter()
 	defer reporter.trackFailure(execCtx.Context, &err)
-	req.Payload = e.externalizeImages(ctx, auth, opts, req.Payload)
+	req.Payload = externalizeImages(ctx, e.cfg, auth, opts, req.Payload)
 	body, originalTranslated := execCtx.TranslateRequestPair(req.Payload)
 	body, _ = sjson.SetBytes(body, "model", execCtx.BaseModel)
 
@@ -281,7 +230,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	})
 	reporter := execCtx.Reporter()
 	defer reporter.trackFailure(execCtx.Context, &err)
-	req.Payload = e.externalizeImages(ctx, auth, opts, req.Payload)
+	req.Payload = externalizeImages(ctx, e.cfg, auth, opts, req.Payload)
 	body, originalTranslated := execCtx.TranslateRequestPair(req.Payload)
 	body, _ = sjson.SetBytes(body, "model", execCtx.BaseModel)
 
@@ -449,7 +398,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		TargetFormat:      to,
 		TranslateAsStream: stream,
 	})
-	req.Payload = e.externalizeImagesCheap(req.Payload)
+	req.Payload = externalizeImagesCheap(e.cfg, req.Payload)
 	body, _ := execCtx.TranslateRequestPair(req.Payload)
 	body, _ = sjson.SetBytes(body, "model", execCtx.BaseModel)
 

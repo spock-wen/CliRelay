@@ -219,9 +219,11 @@ type CloakConfig struct {
 
 // VisionConfig holds server-side image externalization settings.
 type VisionConfig struct {
-	Enabled           bool   `yaml:"enabled" json:"enabled"`
-	Channel           string `yaml:"channel" json:"channel"`
-	Model             string `yaml:"model" json:"model"`
+	Enabled           bool     `yaml:"enabled" json:"enabled"`
+	Channel           string   `yaml:"channel" json:"channel"`
+	BaseURL           string   `yaml:"base-url" json:"base-url"`
+	APIKeys           []string `yaml:"api-keys" json:"api-keys"`
+	Model             string   `yaml:"model" json:"model"`
 	MaxSizeMB         int    `yaml:"max-size-mb" json:"max-size-mb"`
 	MaxDimension      int    `yaml:"max-dimension" json:"max-dimension"`
 	OCRMaxDimension   int    `yaml:"ocr-max-dimension" json:"ocr-max-dimension"`

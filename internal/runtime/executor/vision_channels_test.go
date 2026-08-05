@@ -68,3 +68,27 @@ func TestNewVisionRecognizerBuilds(t *testing.T) {
 	}
 	var _ *vision.Recognizer = r // compile-time type check
 }
+
+func TestNewVisionRecognizerBuildsFromBaseURLAndKeys(t *testing.T) {
+	v := config.DefaultVisionConfig()
+	v.Enabled = true
+	v.BaseURL = "https://kimi.example.com"
+	v.APIKeys = []string{"k1", "k2", "k3"} // multiple keys, no channel at all
+	e := NewClaudeExecutor(&config.Config{Vision: v})
+	r := e.newVisionRecognizer()
+	if r == nil {
+		t.Fatal("expected non-nil recognizer from vision.base-url + api-keys without any channel")
+	}
+	var _ *vision.Recognizer = r
+}
+
+func TestNewVisionRecognizerBaseURLWithoutKeysFallsBack(t *testing.T) {
+	v := config.DefaultVisionConfig()
+	v.Enabled = true
+	v.BaseURL = "https://kimi.example.com" // base-url set but no api-keys
+	// channel "xunfei-199" (default) does not resolve: no ClaudeKey matches → nil
+	e := NewClaudeExecutor(&config.Config{Vision: v})
+	if r := e.newVisionRecognizer(); r != nil {
+		t.Fatal("expected nil recognizer when api-keys empty and no channel resolves")
+	}
+}

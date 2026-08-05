@@ -1,7 +1,11 @@
 package executor
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -30,32 +34,75 @@ func visionChannelBaseURL(cfg *config.Config, channel string) (string, []string)
 	return baseURL, keys
 }
 
-// newVisionRecognizer returns the process-wide kimi recognizer, building it
+// visionRecognizerKey fingerprints every input that shapes a recognizer so a
+// config reload that changes any of them builds a fresh instance instead of
+// silently reusing a stale cached one. The resolved base-url + keys (from
+// vision.base-url/api-keys or the channel fallback) are included verbatim.
+func visionRecognizerKey(cfg *config.Config) string {
+	v := cfg.Vision
+	baseURL, keys := v.BaseURL, v.APIKeys
+	if baseURL == "" || len(keys) == 0 {
+		// Fallback: resolve from a configured config.yaml channel (legacy path).
+		baseURL, keys = visionChannelBaseURL(cfg, v.Channel)
+	}
+	h := sha256.New()
+	h.Write([]byte(baseURL))
+	for _, k := range keys {
+		h.Write([]byte{0})
+		h.Write([]byte(k))
+	}
+	fmt.Fprintf(h, "|%s|%d|%d|%d|%d|%d|%d|%d|%d|%d",
+		v.Model, v.MaxConcurrency, v.PerKeyConcurrency, v.KeyCooldownMs,
+		v.MaxSizeMB, v.MaxDimension, v.OCRMaxDimension, v.JPEGQuality,
+		v.AnalyzeTimeoutMs, v.Retries)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+var (
+	visionSharedRecMu  sync.Mutex
+	visionSharedRecKey string
+	visionSharedRec    *vision.Recognizer
+)
+
+// sharedVisionRecognizer returns the process-wide kimi recognizer, building it
 // lazily and caching it so the global concurrency limiter, key pool (cooldown),
-// and HTTP connection pool are shared across all requests. Returns nil when
-// vision is disabled or the configured channel is missing. A failed build is
-// NOT cached, so a later call can retry construction (e.g. after config fix).
-func (e *ClaudeExecutor) newVisionRecognizer() *vision.Recognizer {
-	if e == nil || e.cfg == nil || !e.cfg.Vision.Enabled {
+// and HTTP connection pool are shared across ALL requests and ALL executors
+// (ClaudeExecutor, OpenAICompatExecutor, ...) — not one pool per executor.
+// Returns nil when vision is disabled or no base URL + keys resolve. A failed
+// build is NOT cached, so a later call can retry construction (e.g. after a
+// config fix); a config reload that changes the resolved inputs rebuilds it.
+func sharedVisionRecognizer(cfg *config.Config) *vision.Recognizer {
+	if cfg == nil || !cfg.Vision.Enabled {
 		return nil
 	}
-	e.recMu.Lock()
-	defer e.recMu.Unlock()
-	if e.rec != nil {
-		return e.rec
+	key := visionRecognizerKey(cfg)
+	visionSharedRecMu.Lock()
+	defer visionSharedRecMu.Unlock()
+	if visionSharedRec != nil && visionSharedRecKey == key {
+		return visionSharedRec
 	}
-	r := e.buildVisionRecognizer()
-	if r != nil {
-		e.rec = r
+	r := buildVisionRecognizer(cfg)
+	if r == nil {
+		return nil
 	}
+	visionSharedRec, visionSharedRecKey = r, key
 	return r
 }
 
 // buildVisionRecognizer constructs a fresh recognizer from the current vision
-// config. Returns nil when the configured channel carries no base URL/keys.
-func (e *ClaudeExecutor) buildVisionRecognizer() *vision.Recognizer {
-	v := e.cfg.Vision
-	baseURL, keys := visionChannelBaseURL(e.cfg, v.Channel)
+// config. It prefers the vision section's own base-url + api-keys (self-contained,
+// independent of the channel system), falling back to a config.yaml channel.
+// Returns nil when neither source yields a base URL and keys.
+func buildVisionRecognizer(cfg *config.Config) *vision.Recognizer {
+	if cfg == nil {
+		return nil
+	}
+	v := cfg.Vision
+	baseURL, keys := v.BaseURL, v.APIKeys
+	if baseURL == "" || len(keys) == 0 {
+		// Fallback: resolve from a configured config.yaml channel (legacy path).
+		baseURL, keys = visionChannelBaseURL(cfg, v.Channel)
+	}
 	if baseURL == "" || len(keys) == 0 {
 		return nil
 	}
@@ -77,4 +124,21 @@ func (e *ClaudeExecutor) buildVisionRecognizer() *vision.Recognizer {
 		},
 		AnalyzeTimeout: time.Duration(v.AnalyzeTimeoutMs) * time.Millisecond,
 	})
+}
+
+// newVisionRecognizer keeps the per-executor accessor shape used across the
+// codebase and tests, delegating to the process-wide shared instance so both
+// executors share the same concurrency-limited key pool.
+func (e *ClaudeExecutor) newVisionRecognizer() *vision.Recognizer {
+	if e == nil {
+		return nil
+	}
+	return sharedVisionRecognizer(e.cfg)
+}
+
+func (e *OpenAICompatExecutor) newVisionRecognizer() *vision.Recognizer {
+	if e == nil {
+		return nil
+	}
+	return sharedVisionRecognizer(e.cfg)
 }
