@@ -258,3 +258,43 @@ func TestRecognizerRetriesTransientNetworkError(t *testing.T) {
 		t.Fatalf("upstream hit %d times, want 2 (transient network error must be retried)", got)
 	}
 }
+
+func TestRecognizerAnalyzeSurvivesCallerCancel(t *testing.T) {
+	// The recognition summary is cached in the session registry for reuse, so
+	// a caller that gives up (client disconnect / upstream timeout) must not
+	// abort an in-flight recognition. Per-attempt ctx is derived via
+	// WithoutCancel, so canceling the caller ctx mid-request still succeeds.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"SUMMARY: ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	r := NewRecognizer(RecognizerConfig{
+		BaseURL: srv.URL, APIKeys: []string{"k1"},
+		Model: "m", MaxConcurrency: 10, PerKeyConcurrency: 5, KeyCooldown: time.Minute,
+		Timeout: 5 * time.Second, Retries: 0, Preprocess: DefaultPreprocessConfig(), AnalyzeTimeout: 5 * time.Second,
+	})
+	img := base64Of(t, makeTestJPEG(t, 64, 64))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := r.Analyze(ctx, AnalyzeRequest{ImageData: img, MIMEType: "image/jpeg"})
+		result <- err
+	}()
+	// Cancel the caller ctx while the recognition is in flight (the handler
+	// sleeps 100ms). Without the WithoutCancel fix this aborts the HTTP call.
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("Analyze after caller cancel: %v, want success", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Analyze hung after caller cancel")
+	}
+}

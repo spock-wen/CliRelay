@@ -79,7 +79,11 @@ func (r *Recognizer) Analyze(ctx context.Context, req AnalyzeRequest) (AnalyzeRe
 			}
 			// Per-attempt deadline: a long queue wait must not consume the
 			// retry budget, so each HTTP attempt gets its own AnalyzeTimeout.
-			attemptCtx, cancel := context.WithTimeout(ctx, r.cfg.AnalyzeTimeout)
+			// The attempt must NOT inherit the caller's cancellation: the summary
+			// it produces is cached in the session registry for reuse, so a client
+			// disconnect or upstream timeout must not abort recognition mid-flight
+			// (WithoutCancel keeps trace values while dropping cancel + deadline).
+			attemptCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.cfg.AnalyzeTimeout)
 			out, err := r.doRequest(attemptCtx, key, body)
 			cancel()
 			release()
