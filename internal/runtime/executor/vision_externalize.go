@@ -5,6 +5,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/vision"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -20,7 +21,12 @@ import (
 // bytes that would 400. No server-side recognition is performed; if the
 // client needs image understanding on a text model, that is the client's
 // responsibility (e.g. a vision MCP tool it invokes itself).
-func externalizeImages(cfg *config.Config, auth *cliproxyauth.Auth, model string, payload []byte) []byte {
+//
+// reqModel is the executor-facing model id, which is usually the resolved
+// upstream id (e.g. "xopkimik26"). opts carries the client-requested alias
+// ("kimi-k2.6") — both are consulted against the catalog, because modalities
+// are keyed by whichever name the operator registered the model under.
+func externalizeImages(cfg *config.Config, auth *cliproxyauth.Auth, reqModel string, opts cliproxyexecutor.Options, payload []byte) []byte {
 	if cfg == nil || !cfg.Vision.Enabled {
 		return payload
 	}
@@ -32,14 +38,14 @@ func externalizeImages(cfg *config.Config, auth *cliproxyauth.Auth, model string
 	if auth != nil {
 		tenantID = auth.TenantID
 	}
-	if modelAcceptsImageInput(tenantID, model) {
+	if modelAcceptsImageInput(tenantID, reqModel, opts) {
 		return payload
 	}
 	out, err := vision.ReplaceAllImages(payload, "[图片]")
 	if err != nil {
 		// A partial replacement can leave raw image bytes in the forwarded
 		// payload — surface it so the leak is not silent.
-		log.Warnf("vision: image replacement failed (image bytes may leak upstream to text model %q): %v", model, err)
+		log.Warnf("vision: image replacement failed (image bytes may leak upstream to text model %q): %v", reqModel, err)
 	}
 	return out
 }
@@ -60,13 +66,27 @@ func externalizeImagesCheap(cfg *config.Config, payload []byte) []byte {
 }
 
 // modelAcceptsImageInput reports whether the configured model catalog marks
-// the given model as accepting image input. When the model is unknown to the
-// catalog, it is treated as text-only (the safe default: replace the image,
-// never leak bytes that would 400).
-func modelAcceptsImageInput(tenantID, model string) bool {
-	if model == "" {
-		return false
+// the request's model as accepting image input. It checks both the resolved
+// upstream id (reqModel) and the client-requested alias (from opts), because
+// modalities are keyed by whichever name the model was registered under. When
+// neither is known to the catalog, the model is treated as text-only (the
+// safe default: replace the image, never leak bytes that would 400).
+func modelAcceptsImageInput(tenantID, reqModel string, opts cliproxyexecutor.Options) bool {
+	candidates := []string{reqModel, payloadRequestedModel(opts, "")}
+	for _, m := range candidates {
+		if m == "" {
+			continue
+		}
+		if modelCatalogAcceptsImage(tenantID, m) {
+			return true
+		}
 	}
+	return false
+}
+
+// modelCatalogAcceptsImage is the single catalog lookup: true when the model
+// row exists and its input modalities include "image".
+func modelCatalogAcceptsImage(tenantID, model string) bool {
 	row, ok := usage.GetModelConfigForTenant(tenantID, model)
 	if !ok {
 		return false

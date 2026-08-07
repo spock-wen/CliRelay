@@ -102,7 +102,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	// Image externalization must run in every executor before translation:
 	// text-only upstream models reject image blocks with HTTP 400, so vision
 	// is required to strip them. Vision-capable models pass through unchanged.
-	req.Payload = externalizeImages(e.cfg, auth, req.Model, req.Payload)
+	req.Payload = externalizeImages(e.cfg, auth, req.Model, opts, req.Payload)
 
 	baseURL, apiKey := e.resolveCredentials(auth)
 	if baseURL == "" {
@@ -250,7 +250,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// Image externalization must run in every executor before translation:
 	// text-only upstream models reject image blocks with HTTP 400, so vision
 	// is required to strip them. Vision-capable models pass through unchanged.
-	req.Payload = externalizeImages(e.cfg, auth, req.Model, req.Payload)
+	req.Payload = externalizeImages(e.cfg, auth, req.Model, opts, req.Payload)
 
 	baseURL, apiKey := e.resolveCredentials(auth)
 	if baseURL == "" {
