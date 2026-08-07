@@ -216,3 +216,22 @@ type CloakConfig struct {
 	// When false, a fresh random user_id is generated for every request.
 	CacheUserID *bool `yaml:"cache-user-id,omitempty" json:"cache-user-id,omitempty"`
 }
+
+// VisionConfig holds server-side image externalization settings.
+//
+// The only knob is Enabled. When enabled, the executors replace image content
+// blocks with a text placeholder for text-only models (preventing an upstream
+// HTTP 400 "unknown variant `image_url`"), and pass image blocks through
+// unchanged for vision-capable models. No server-side recognition is done.
+type VisionConfig struct {
+	Enabled bool `yaml:"enabled" json:"enabled"`
+}
+
+// DefaultVisionConfig returns the defaults. Enabled defaults to false — vision
+// is opt-in via an explicit "enabled: true" in the vision section; this is a
+// sample/default, never an auto-enable.
+func DefaultVisionConfig() VisionConfig {
+	return VisionConfig{
+		Enabled: false,
+	}
+}

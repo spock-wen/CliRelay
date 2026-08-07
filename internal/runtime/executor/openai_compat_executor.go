@@ -99,6 +99,15 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	reporter := execCtx.Reporter()
 	defer reporter.trackFailure(execCtx.Context, &err)
 
+	// Image externalization must run in every executor before translation:
+	// OpenAI-compat channels (讯飞/glm) are the production path for image
+	// requests, and the upstream chat model must never receive raw image bytes.
+	// When a vision fallback was applied the request is deliberately routed to
+	// a vision-capable model that must receive the raw image — skip replacement.
+	if !fallback.Applied && e.provider != openCodeGoProvider {
+		req.Payload = externalizeImages(e.cfg, auth, req.Model, opts, req.Payload)
+	}
+
 	baseURL, apiKey := e.resolveCredentials(auth)
 	if baseURL == "" {
 		err = statusErr{code: http.StatusUnauthorized, msg: "missing provider baseURL"}
@@ -241,6 +250,15 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	})
 	reporter := execCtx.Reporter()
 	defer reporter.trackFailure(execCtx.Context, &err)
+
+	// Image externalization must run in every executor before translation:
+	// OpenAI-compat channels (讯飞/glm) are the production path for image
+	// requests, and the upstream chat model must never receive raw image bytes.
+	// When a vision fallback was applied the request is deliberately routed to
+	// a vision-capable model that must receive the raw image — skip replacement.
+	if !fallback.Applied && e.provider != openCodeGoProvider {
+		req.Payload = externalizeImages(e.cfg, auth, req.Model, opts, req.Payload)
+	}
 
 	baseURL, apiKey := e.resolveCredentials(auth)
 	if baseURL == "" {
@@ -514,6 +532,24 @@ func responsesSSEData(chunk []byte) []byte {
 }
 
 func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	// Mirror Execute's vision handling so the token count reflects the payload
+	// that is actually sent upstream: when a vision fallback routes the request
+	// to a vision-capable model, or for the nested OpenCodeGo executor (which
+	// owns its own image policy), the raw image reaches the upstream — count
+	// it, don't strip it.
+	fallback := opencodeGoVisionFallbackResult{Request: req}
+	if openAICompatSupportsVisionFallback(e.provider) {
+		fallback = applyVisionFallback(req, opts, openAICompatVisionFallbackModel(e.cfg, auth, e.provider))
+		if fallback.Applied {
+			req = fallback.Request
+		}
+	}
+	// Token counting must never trigger a kimi recognition call and image
+	// blocks would break translation, so strip them to a fixed placeholder.
+	if !fallback.Applied && e.provider != openCodeGoProvider {
+		req.Payload = externalizeImagesCheap(e.cfg, req.Payload)
+	}
+
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	from := opts.SourceFormat

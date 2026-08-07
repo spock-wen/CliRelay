@@ -94,6 +94,7 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	})
 	reporter := execCtx.Reporter()
 	defer reporter.trackFailure(execCtx.Context, &err)
+	req.Payload = externalizeImages(e.cfg, auth, req.Model, opts, req.Payload)
 	body, originalTranslated := execCtx.TranslateRequestPair(req.Payload)
 	body, _ = sjson.SetBytes(body, "model", execCtx.BaseModel)
 
@@ -229,6 +230,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	})
 	reporter := execCtx.Reporter()
 	defer reporter.trackFailure(execCtx.Context, &err)
+	req.Payload = externalizeImages(e.cfg, auth, req.Model, opts, req.Payload)
 	body, originalTranslated := execCtx.TranslateRequestPair(req.Payload)
 	body, _ = sjson.SetBytes(body, "model", execCtx.BaseModel)
 
@@ -396,6 +398,7 @@ func (e *ClaudeExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 		TargetFormat:      to,
 		TranslateAsStream: stream,
 	})
+	req.Payload = externalizeImagesCheap(e.cfg, req.Payload)
 	body, _ := execCtx.TranslateRequestPair(req.Payload)
 	body, _ = sjson.SetBytes(body, "model", execCtx.BaseModel)
 

@@ -148,6 +148,43 @@ func TestLoadConfigSanitizesProxyWarmupDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadConfigVisionEnabled(t *testing.T) {
+	t.Parallel()
+
+	// An explicit vision section enables the image externalization path.
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("vision:\n  enabled: true\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+
+	if !cfg.Vision.Enabled {
+		t.Fatal("vision.enabled = false, want true")
+	}
+}
+
+func TestLoadConfigVisionAbsentDisabled(t *testing.T) {
+	t.Parallel()
+
+	// No vision section at all must leave vision disabled (never auto-enable).
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("port: 8317\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig returned error: %v", err)
+	}
+	if cfg.Vision.Enabled {
+		t.Fatal("vision should be disabled when section is absent")
+	}
+}
+
 func TestSanitizeRoutingPreservesChannelGroupSettings(t *testing.T) {
 	t.Parallel()
 

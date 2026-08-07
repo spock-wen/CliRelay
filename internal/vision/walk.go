@@ -68,7 +68,17 @@ func (r *WalkResult) walkArray(payload []byte, arrayName string, items []gjson.R
 	for i, item := range items {
 		if item.Get("role").String() != "user" {
 			if arrayName == "input" && isFunctionOutputItem(item) {
+				// walkFunctionOutputItem already descends into output/content.
 				r.walkFunctionOutputItem(payload, arrayName, i, item, i > lastUserIdx)
+				continue
+			}
+			// Non-user messages (OpenAI role="tool" outputs, assistant turns
+			// carrying tool results) can embed images in their content array.
+			// Walk them as historical so raw bytes never reach the upstream
+			// model. (Anthropic tool_result blocks live in user messages and
+			// are descended into via walkContentPartAtPath.)
+			if item.Get("content").Exists() {
+				r.walkMessage(payload, arrayName, i, item, false)
 			}
 			continue
 		}
@@ -120,6 +130,34 @@ func (r *WalkResult) walkContentPart(payload []byte, arrayName string, msgIdx, p
 
 func (r *WalkResult) walkContentPartAtPath(payload []byte, arrayName string, msgIdx, pIdx int, part gjson.Result, isCurrent bool, path string) {
 	partType := part.Get("type").String()
+
+	// Anthropic tool_result blocks carry a nested content array whose parts can
+	// include images (a tool returning a screenshot). Descend so those images
+	// are externalized too — otherwise raw bytes leak into the chat model
+	// context, breaking the feature's invariant.
+	if partType == "tool_result" {
+		content := part.Get("content")
+		if content.IsArray() {
+			for ci, child := range content.Array() {
+				childPath := path + ".content." + indexStr(ci)
+				r.walkContentPartAtPath(payload, arrayName, msgIdx, ci, child, isCurrent, childPath)
+			}
+			return
+		}
+		if text := content.String(); hasDataImagePrefix(text) {
+			r.Parts = append(r.Parts, ImagePart{
+				ArrayName: arrayName,
+				MsgIdx:    msgIdx,
+				PartIdx:   pIdx,
+				Path:      path + ".content",
+				Type:      "text",
+				Data:      text,
+				IsCurrent: isCurrent,
+			})
+		}
+		return
+	}
+
 	if !isImageType(partType) && !part.Get("image_url").Exists() {
 		return
 	}
@@ -393,4 +431,20 @@ func fmtInt(n int) string {
 		n /= 10
 	}
 	return string(buf)
+}
+
+// ReplaceAllImages replaces every image content part (current and historical)
+// with a text placeholder. Used when no recognizer is available so image bytes
+// never reach the upstream model.
+func ReplaceAllImages(payload []byte, placeholder string) ([]byte, error) {
+	walk := WalkPayload(payload)
+	arrayType := detectArrayType(payload)
+	for _, part := range walk.Parts {
+		var err error
+		payload, err = ReplaceImagePartEx(payload, part, placeholder, arrayType)
+		if err != nil {
+			return payload, err
+		}
+	}
+	return payload, nil
 }
