@@ -105,7 +105,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	// When a vision fallback was applied the request is deliberately routed to
 	// a vision-capable model that must receive the raw image — skip replacement.
 	if !fallback.Applied && e.provider != openCodeGoProvider {
-		req.Payload = externalizeImages(ctx, e.cfg, auth, opts, req.Payload)
+		req.Payload = externalizeImages(e.cfg, auth, req.Model, opts, req.Payload)
 	}
 
 	baseURL, apiKey := e.resolveCredentials(auth)
@@ -257,7 +257,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	// When a vision fallback was applied the request is deliberately routed to
 	// a vision-capable model that must receive the raw image — skip replacement.
 	if !fallback.Applied && e.provider != openCodeGoProvider {
-		req.Payload = externalizeImages(ctx, e.cfg, auth, opts, req.Payload)
+		req.Payload = externalizeImages(e.cfg, auth, req.Model, opts, req.Payload)
 	}
 
 	baseURL, apiKey := e.resolveCredentials(auth)

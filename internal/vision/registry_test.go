@@ -807,7 +807,9 @@ func TestA3WithNoSessionStillReplacesImage(t *testing.T) {
 }
 
 func TestReplaceAllImages(t *testing.T) {
-	img := base64Of(t, makeTestJPEG(t, 64, 64))
+	// ReplaceAllImages keys off the content block type ("image"), not on the
+	// image bytes themselves, so a placeholder data string is sufficient.
+	const img = "ZHVtbXk=" // base64 of "dummy"
 	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image","source":{"type":"base64","data":"` + img + `","media_type":"image/jpeg"}}]},{"role":"user","content":[{"type":"image","source":{"type":"base64","data":"` + img + `","media_type":"image/jpeg"}}]}]}`)
 	out, err := ReplaceAllImages(payload, "[Image Registry] placeholder")
 	if err != nil {

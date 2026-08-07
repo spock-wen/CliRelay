@@ -218,40 +218,20 @@ type CloakConfig struct {
 }
 
 // VisionConfig holds server-side image externalization settings.
+//
+// The only knob is Enabled. When enabled, the executors replace image content
+// blocks with a text placeholder for text-only models (preventing an upstream
+// HTTP 400 "unknown variant `image_url`"), and pass image blocks through
+// unchanged for vision-capable models. No server-side recognition is done.
 type VisionConfig struct {
-	Enabled           bool     `yaml:"enabled" json:"enabled"`
-	Channel           string   `yaml:"channel" json:"channel"`
-	BaseURL           string   `yaml:"base-url" json:"base-url"`
-	APIKeys           []string `yaml:"api-keys" json:"api-keys"`
-	Model             string   `yaml:"model" json:"model"`
-	MaxSizeMB         int    `yaml:"max-size-mb" json:"max-size-mb"`
-	MaxDimension      int    `yaml:"max-dimension" json:"max-dimension"`
-	OCRMaxDimension   int    `yaml:"ocr-max-dimension" json:"ocr-max-dimension"`
-	JPEGQuality       int    `yaml:"jpeg-quality" json:"jpeg-quality"`
-	MaxConcurrency    int    `yaml:"max-concurrency" json:"max-concurrency"`
-	PerKeyConcurrency int    `yaml:"per-key-concurrency" json:"per-key-concurrency"`
-	KeyCooldownMs     int    `yaml:"key-cooldown-ms" json:"key-cooldown-ms"`
-	AnalyzeTimeoutMs  int    `yaml:"analyze-timeout-ms" json:"analyze-timeout-ms"`
-	Retries           int    `yaml:"retries" json:"retries"`
+	Enabled bool `yaml:"enabled" json:"enabled"`
 }
 
-// DefaultVisionConfig returns the defaults. Model and analyze-timeout are the
-// two fields the ops team will tune first. Enabled defaults to false — vision
+// DefaultVisionConfig returns the defaults. Enabled defaults to false — vision
 // is opt-in via an explicit "enabled: true" in the vision section; this is a
 // sample/default, never an auto-enable.
 func DefaultVisionConfig() VisionConfig {
 	return VisionConfig{
-		Enabled:           false,
-		Channel:           "xunfei-199",
-		Model:             "kimi-k2.6",
-		MaxSizeMB:         10,
-		MaxDimension:      2048,
-		OCRMaxDimension:   4096,
-		JPEGQuality:       80,
-		MaxConcurrency:    100,
-		PerKeyConcurrency: 20,
-		KeyCooldownMs:     60000,
-		AnalyzeTimeoutMs:  5000,
-		Retries:           2,
+		Enabled: false,
 	}
 }
