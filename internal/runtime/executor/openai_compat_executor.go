@@ -100,9 +100,9 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	defer reporter.trackFailure(execCtx.Context, &err)
 
 	// Image externalization must run in every executor before translation:
-	// OpenAI-compat channels (讯飞/glm) are the production path for image
-	// requests, and the upstream chat model must never receive raw image bytes.
-	req.Payload = externalizeImages(ctx, e.cfg, auth, opts, req.Payload)
+	// text-only upstream models reject image blocks with HTTP 400, so vision
+	// is required to strip them. Vision-capable models pass through unchanged.
+	req.Payload = externalizeImages(e.cfg, auth, req.Model, req.Payload)
 
 	baseURL, apiKey := e.resolveCredentials(auth)
 	if baseURL == "" {
@@ -248,9 +248,9 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	defer reporter.trackFailure(execCtx.Context, &err)
 
 	// Image externalization must run in every executor before translation:
-	// OpenAI-compat channels (讯飞/glm) are the production path for image
-	// requests, and the upstream chat model must never receive raw image bytes.
-	req.Payload = externalizeImages(ctx, e.cfg, auth, opts, req.Payload)
+	// text-only upstream models reject image blocks with HTTP 400, so vision
+	// is required to strip them. Vision-capable models pass through unchanged.
+	req.Payload = externalizeImages(e.cfg, auth, req.Model, req.Payload)
 
 	baseURL, apiKey := e.resolveCredentials(auth)
 	if baseURL == "" {

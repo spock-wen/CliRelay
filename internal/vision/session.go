@@ -33,18 +33,3 @@ func ResolveSessionKey(opts cliproxyexecutor.Options, auth *cliproxyauth.Auth) (
 	// 3. Never fallback to auth.ID for image memory — would leak across sessions
 	return "", false
 }
-
-// ResolveIsolatedSessionKey returns an auth-namespaced session key,
-// guaranteeing no cross-user image-memory leakage even when two users send
-// the same client-supplied session id. Never fallback to a bare session id:
-// if auth is unavailable, cross-turn memory is disabled (single-request only).
-func ResolveIsolatedSessionKey(opts cliproxyexecutor.Options, auth *cliproxyauth.Auth) (SessionKey, bool) {
-	base, ok := ResolveSessionKey(opts, auth)
-	if !ok {
-		return "", false
-	}
-	if auth == nil || auth.ID == "" {
-		return "", false
-	}
-	return SessionKey(auth.ID + "::" + string(base)), true
-}
