@@ -32,9 +32,7 @@ func externalizeImages(cfg *config.Config, auth *cliproxyauth.Auth, model string
 	if auth != nil {
 		tenantID = auth.TenantID
 	}
-	accepts := modelAcceptsImageInput(tenantID, model)
-	log.Infof("vision[debug]: externalizeImages model=%q tenant=%q acceptsImage=%v parts=%d", model, tenantID, accepts, len(vision.WalkPayload(payload).Parts))
-	if accepts {
+	if modelAcceptsImageInput(tenantID, model) {
 		return payload
 	}
 	out, err := vision.ReplaceAllImages(payload, "[图片]")
