@@ -19,6 +19,7 @@ import (
 	iflowprovider "github.com/router-for-me/CLIProxyAPI/v6/internal/management/oauth/providers/iflow"
 	kimiprovider "github.com/router-for-me/CLIProxyAPI/v6/internal/management/oauth/providers/kimi"
 	qwenprovider "github.com/router-for-me/CLIProxyAPI/v6/internal/management/oauth/providers/qwen"
+	cursorprovider "github.com/router-for-me/CLIProxyAPI/v6/internal/management/oauth/providers/cursor"
 	xaiprovider "github.com/router-for-me/CLIProxyAPI/v6/internal/management/oauth/providers/xai"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -386,6 +387,29 @@ func (h *Handler) RequestXAIToken(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": result.AuthURL, "state": result.State})
+}
+
+func (h *Handler) RequestCursorToken(c *gin.Context) {
+	ctx := detachedAuthContext(c)
+	_, saveRecord, registerSession, completeProvider := h.tenantOAuthBindings(c)
+
+	result, err := cursorprovider.StartOAuthLogin(cursorprovider.OAuthLoginOptions{
+		Ctx:        ctx,
+		SaveRecord: saveRecord,
+		Sessions: cursorprovider.SessionCallbacks{
+			Register:         registerSession,
+			SetError:         SetOAuthSessionError,
+			Complete:         CompleteOAuthSession,
+			CompleteProvider: completeProvider,
+		},
+	})
+	if err != nil {
+		log.WithError(err).Error("failed to start cursor oauth flow")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start oauth flow"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": result.LoginURL, "state": result.State})
 }
 
 func (h *Handler) RequestIFlowToken(c *gin.Context) {
