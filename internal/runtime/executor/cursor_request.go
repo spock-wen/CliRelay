@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/cursorproto"
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/cursorproto"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -30,12 +30,12 @@ type cursorMessage struct {
 }
 
 type cursorContentBlock struct {
-	Type     string
-	Text     string
-	Thinking string
-	ID       string
-	Name     string
-	Input    json.RawMessage
+	Type      string
+	Text      string
+	Thinking  string
+	ID        string
+	Name      string
+	Input     json.RawMessage
 	ToolUseID string
 	Content   string
 }
@@ -190,10 +190,10 @@ func buildCursorClientMessage(shape *cursorRequestShape, conversationID string, 
 		ConversationState: &cursorproto.ConversationStateStructure{
 			RootPromptMessages: rootMessages,
 		},
-		Action:             action,
-		RequestedModel:     &cursorproto.RequestedModel{ModelID: shape.Model},
-		ModelDetails:       &cursorproto.ModelDetails{ModelID: shape.Model, DisplayModelID: shape.Model, DisplayName: shape.Model},
-		ConversationID:     conversationID,
+		Action:         action,
+		RequestedModel: &cursorproto.RequestedModel{ModelID: shape.Model},
+		ModelDetails:   &cursorproto.ModelDetails{ModelID: shape.Model, DisplayModelID: shape.Model, DisplayName: shape.Model},
+		ConversationID: conversationID,
 	}
 	if len(shape.Tools) > 0 {
 		defs := make([]*cursorproto.McpToolDefinition, 0, len(shape.Tools))
@@ -225,8 +225,9 @@ func renderAssistantBlocksSplit(blocks []cursorContentBlock) (string, string) {
 				thinkingParts = append(thinkingParts, b.Thinking)
 			}
 		case "tool_use":
-			input := compactJSON(string(b.Input))
-			textParts = append(textParts, "[tool_use "+b.Name+" "+b.ID+"] "+input)
+			// Neutral prose only: bracketed tool syntax teaches the model
+			// to forge tool calls as text instead of real tool_call frames.
+			textParts = append(textParts, "Calling tool "+b.Name+".")
 		}
 	}
 	return strings.Join(textParts, "\n\n"), strings.Join(thinkingParts, "\n\n")
@@ -243,7 +244,10 @@ func renderUserBlocks(blocks []cursorContentBlock) string {
 			if content == "" {
 				content = "(empty tool result)"
 			}
-			parts = append(parts, "[tool_result "+b.ToolUseID+"]\n"+content)
+			// Plain prose, deliberately: bracketed tool_use/tool_result
+			// syntax in history teaches the model to forge tool calls as
+			// text instead of emitting real tool_call frames.
+			parts = append(parts, "Tool output:\n"+content)
 		case "image":
 			parts = append(parts, "[image omitted]")
 		}
@@ -262,8 +266,9 @@ func renderAssistantBlocks(blocks []cursorContentBlock) string {
 				parts = append(parts, "[thinking] "+b.Thinking)
 			}
 		case "tool_use":
-			input := compactJSON(string(b.Input))
-			parts = append(parts, "[tool_use "+b.Name+" "+b.ID+"] "+input)
+			// Omitted: rendering the call here teaches the model to mimic
+			// tool calls as text. The paired tool_result carries the outcome.
+			continue
 		}
 	}
 	return strings.Join(parts, "\n\n")
@@ -290,4 +295,21 @@ func cursorEnsureRequestDefaults(payload []byte, model string, maxTokens int64) 
 		payload, _ = sjson.SetBytes(payload, "max_tokens", maxTokens)
 	}
 	return payload
+}
+
+// cursorShellToolName resolves the client-side tool that should execute
+// native Cursor shell calls: a registered tool named "Bash" (case-insensitive),
+// else the first tool whose schema declares a "command" property, else "".
+func cursorShellToolName(tools []cursorTool) string {
+	for _, t := range tools {
+		if strings.EqualFold(t.Name, "bash") {
+			return t.Name
+		}
+	}
+	for _, t := range tools {
+		if strings.Contains(string(t.InputSchema), `"command"`) {
+			return t.Name
+		}
+	}
+	return ""
 }
