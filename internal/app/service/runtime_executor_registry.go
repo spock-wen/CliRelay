@@ -485,6 +485,11 @@ func FetchKimiModels(ctx context.Context, auth *coreauth.Auth, cfg *config.Confi
 	return executor.FetchKimiModels(ctx, auth, cfg)
 }
 
+func FetchCursorModels(ctx context.Context, auth *coreauth.Auth, cfg *config.Config) []*sdkmodelcatalog.ModelInfo {
+	return executor.FetchCursorModels(ctx, auth, cfg)
+}
+}
+
 func RebindTenantExecutors(base *config.Config, coreManager *coreauth.Manager, tenantID string, gateway WebsocketGateway) {
 	if base == nil || coreManager == nil {
 		return
@@ -584,6 +589,8 @@ func RegisterExecutorForAuth(coreManager *coreauth.Manager, base *config.Config,
 		register(executor.NewKimiExecutor(cfg))
 	case "xai":
 		register(executor.NewXAIExecutor(cfg))
+	case "cursor":
+		register(executor.NewCursorExecutor(cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
 		if providerKey == "" {

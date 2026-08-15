@@ -31,6 +31,7 @@ func registerManagementAuthRoutes(group *gin.RouterGroup, h *managementhandlers.
 	group.GET("/qwen-auth-url", h.RequestQwenToken)
 	group.GET("/kimi-auth-url", h.RequestKimiToken)
 	group.GET("/xai-auth-url", h.RequestXAIToken)
+	group.GET("/cursor-auth-url", h.RequestCursorToken)
 	group.GET("/iflow-auth-url", h.RequestIFlowToken)
 	group.POST("/iflow-auth-url", h.RequestIFlowCookieToken)
 	group.POST("/oauth-callback", h.PostOAuthCallback)

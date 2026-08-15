@@ -46,6 +46,8 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetOpenAIModels()
 	case "xai", "x-ai", "grok":
 		return GetXAIModels()
+	case "cursor":
+		return GetCursorModels()
 	case "qwen":
 		return GetQwenModels()
 	case "iflow":

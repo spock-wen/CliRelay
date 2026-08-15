@@ -16,6 +16,11 @@ type SDKConfig struct {
 	// Useful when the server's IPv6 route quality is poor (e.g. SIT tunnel).
 	PreferIPv4 bool `yaml:"prefer-ipv4" json:"prefer-ipv4"`
 
+	// CursorClientVersion overrides the x-cursor-client-version header sent to
+	// the Cursor backend. Cursor gates its agent protocol on this value; bump
+	// it when the backend rejects the built-in default.
+	CursorClientVersion string `yaml:"cursor-client-version,omitempty" json:"cursor-client-version,omitempty"`
+
 	// ForceModelPrefix requires explicit model prefixes (e.g., "teamA/gemini-3-pro-preview")
 	// to target prefixed credentials. When false, unprefixed model requests may use prefixed
 	// credentials as well.

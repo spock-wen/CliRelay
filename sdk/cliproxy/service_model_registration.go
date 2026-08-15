@@ -236,6 +236,8 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 		catalogRows, mappedOwners := oauthCatalogScope(a)
 		models = appendOAuthProviderModelConfigs(models, provider, authKind, catalogRows, mappedOwners)
 		models = applyExcludedModels(models, excluded)
+	case "cursor":
+		models = s.fetchCursorRegistryModels(ctx, a, excluded)
 	case "iflow":
 		models = sdkmodelcatalog.StaticModelDefinitionsByChannel("iflow")
 		models = applyExcludedModels(models, excluded)
