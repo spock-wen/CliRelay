@@ -13,6 +13,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
 	"github.com/tidwall/gjson"
 )
 
@@ -65,36 +67,52 @@ func cursorCreds(auth *cliproxyauth.Auth) (token, baseURL string) {
 	return token, baseURL
 }
 
-// cursorModelName strips an optional "cursor/" prefix from the model ID.
-func cursorModelName(model string) string {
+// cursorUpstreamModel normalizes the relay-side model ID into the bare Cursor
+// catalog ID. The request handler strips trailing context-window markers
+// ("model[1M]") and routing prefixes before dispatch, but direct API callers
+// and prefixed auth entries ("Test/model") can still reach the executor with
+// decorations intact; Cursor ignores unknown model IDs and returns an empty
+// interaction, so every decoration must be removed here.
+func cursorUpstreamModel(model string, authPrefix string) string {
 	model = strings.TrimSpace(model)
+	if prefix := strings.TrimSpace(authPrefix); prefix != "" {
+		if lower, lowerPrefix := strings.ToLower(model), strings.ToLower(prefix)+"/"; strings.HasPrefix(lower, lowerPrefix) {
+			model = model[len(prefix)+1:]
+		}
+	}
 	if strings.HasPrefix(strings.ToLower(model), "cursor/") {
-		return model[len("cursor/"):]
+		model = model[len("cursor/"):]
+	}
+	// Defensive: strip a trailing "[1M]"-style context-window marker if the
+	// payload model leaked through unnormalized.
+	if idx := strings.LastIndex(model, "["); idx > 0 && strings.HasSuffix(model, "]") {
+		model = strings.TrimSpace(model[:idx])
 	}
 	return model
 }
 
-func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
-	var resp cliproxyexecutor.Response
+func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	execCtx := newExecutionContext(ctx, e.Identifier(), e.cfg, auth, req, opts, ExecutionOptions{
+		TargetFormat: sdktranslator.FromString("claude"),
+	})
+	reporter := execCtx.Reporter()
+	defer reporter.trackFailure(execCtx.Context, &err)
+
 	token, baseURL := cursorCreds(auth)
 	if token == "" {
 		return resp, fmt.Errorf("cursor executor: auth is missing access token")
 	}
 	payload := req.Payload
-	model := cursorModelName(req.Model)
+	// Always derive the upstream model from the normalized request model:
+	// the raw payload model may carry suffixes ("[1M]") or prefixes that
+	// Cursor's catalog does not know.
+	model := cursorUpstreamModel(req.Model, authPrefixOf(auth))
 
 	shape, err := parseCursorRequest(payload)
 	if err != nil {
 		return resp, err
 	}
-	if shape.Model == "" || shape.Model == "cursor" {
-		payload = cursorEnsureRequestDefaults(payload, model, 4096)
-		shape, err = parseCursorRequest(payload)
-		if err != nil {
-			return resp, err
-		}
-		shape.Model = model
-	}
+	shape.Model = model
 
 	conversationID := shape.Conversation
 	if conversationID == "" {
@@ -127,6 +145,7 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 		assembler.Handle(ev.Message)
 	}
 	resp = cliproxyexecutor.Response{Payload: assembler.BuildNonStreamResponse(stopReason)}
+	reporter.publishWithContent(execCtx.Context, cursorUsageDetail(req.Payload, assembler), string(req.Payload), string(resp.Payload))
 	return resp, nil
 }
 
@@ -156,25 +175,24 @@ func nextCursorEvent(events <-chan cursorStreamEvent, quiescent bool) (ev cursor
 }
 
 func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	execCtx := newExecutionContext(ctx, e.Identifier(), e.cfg, auth, req, opts, ExecutionOptions{
+		TargetFormat: sdktranslator.FromString("claude"),
+	})
+	reporter := execCtx.Reporter()
+	defer reporter.trackFailure(execCtx.Context, &err)
+
 	token, baseURL := cursorCreds(auth)
 	if token == "" {
 		return nil, fmt.Errorf("cursor executor: auth is missing access token")
 	}
 	payload := req.Payload
-	model := cursorModelName(req.Model)
+	model := cursorUpstreamModel(req.Model, authPrefixOf(auth))
 
 	shape, errParse := parseCursorRequest(payload)
 	if errParse != nil {
 		return nil, errParse
 	}
-	if shape.Model == "" || shape.Model == "cursor" {
-		payload = cursorEnsureRequestDefaults(payload, model, 4096)
-		shape, errParse = parseCursorRequest(payload)
-		if errParse != nil {
-			return nil, errParse
-		}
-		shape.Model = model
-	}
+	shape.Model = model
 
 	conversationID := shape.Conversation
 	if conversationID == "" {
@@ -187,12 +205,14 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 		return nil, mapCursorTransportError(errRun)
 	}
 
+	reporter.setInputContent(string(payload))
 	out := make(chan cliproxyexecutor.StreamChunk, 16)
 	go func() {
 		defer close(out)
 		assembler := newCursorAnthropicAssembler(model)
 		assembler.ShellToolName = cursorShellToolName(shape.Tools)
 		stopReason := "end_turn"
+		streamErr := error(nil)
 		for {
 			ev, ok, quiescent := nextCursorEvent(events, assembler.ToolUseQuiescent())
 			if quiescent {
@@ -203,24 +223,32 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				break
 			}
 			if ev.Err != nil {
-				out <- cliproxyexecutor.StreamChunk{Err: mapCursorConnectError(ev.Err)}
-				return
+				streamErr = mapCursorConnectError(ev.Err)
+				out <- cliproxyexecutor.StreamChunk{Err: streamErr}
+				break
 			}
 			for _, event := range assembler.Handle(ev.Message) {
 				line, errJSON := json.Marshal(event.SSE)
 				if errJSON != nil {
 					continue
 				}
+				reporter.appendOutputChunk(line)
 				out <- cliproxyexecutor.StreamChunk{Payload: append(append([]byte("event: message\ndata: "), line...), '\n', '\n')}
 			}
+		}
+		if streamErr != nil {
+			reporter.publishFailure(execCtx.Context)
+			return
 		}
 		for _, event := range assembler.Finish(stopReason) {
 			line, errJSON := json.Marshal(event.SSE)
 			if errJSON != nil {
 				continue
 			}
+			reporter.appendOutputChunk(line)
 			out <- cliproxyexecutor.StreamChunk{Payload: append(append([]byte("event: message\ndata: "), line...), '\n', '\n')}
 		}
+		reporter.publish(execCtx.Context, cursorUsageDetail(payload, assembler))
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: headers, Chunks: out}, nil
 }
@@ -342,4 +370,24 @@ func approximateTokenCount(payload []byte) int64 {
 		return v.Int()
 	}
 	return int64(len(payload) / 4)
+}
+
+// authPrefixOf returns the auth entry's model routing prefix, if any.
+func authPrefixOf(auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	return strings.TrimSpace(auth.Prefix)
+}
+
+// cursorUsageDetail builds a usage record for the request logs. Cursor's
+// subscription protocol does not report billed token counts, so input tokens
+// are approximated from the payload (same estimate CountTokens uses) and
+// output tokens come from the assembler's token_delta accumulation. Without
+// non-zero counts the usage pipeline drops the record entirely.
+func cursorUsageDetail(payload []byte, assembler *cursorAnthropicAssembler) coreusage.Detail {
+	return coreusage.Detail{
+		InputTokens:  approximateTokenCount(payload),
+		OutputTokens: assembler.totalOutputTokens(),
+	}
 }
