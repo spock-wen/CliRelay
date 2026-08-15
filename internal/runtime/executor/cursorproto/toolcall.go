@@ -1,20 +1,26 @@
 package cursorproto
 
+import "encoding/json"
+
 // ParseMcpToolCall extracts the MCP tool name and arguments JSON from a raw
 // ToolCall blob (as carried by ToolCallStartedUpdate/ToolCallCompletedUpdate).
 //
-// ToolCall layout (from the descriptor):
-//   mcp_tool_call = field 15 (McpToolCall)
-// McpToolCall layout:
-//   args = field 1 (McpArgs)
-//   description = field 3
-// McpArgs layout:
-//   server_identifier = field 1
-//   tool_name = field 2
-//   arguments_json = field 3 (best-effort, observed as JSON string)
-//   tool_call_id = field 6
+// Observed ToolCall layout (live traffic, descriptor-corroborated):
 //
-// Returns ("", nil, false-style zeros) when the blob is not an MCP call.
+//	mcp_tool_call = field 15 (McpToolCall)
+//
+// McpToolCall layout:
+//
+//	call_spec = field 1 (message)
+//
+// CallSpec layout:
+//
+//	tool_name = field 1 (string)
+//	args = field 2, repeated (map entry: key = field 1 string,
+//	         value = field 2 message carrying the scalar at field 3)
+//	tool_call_id = field 3 (string)
+//
+// Returns ("", nil) when the blob is not an MCP call.
 func ParseMcpToolCall(toolCallRaw []byte) (name string, argsJSON []byte) {
 	b := toolCallRaw
 	for len(b) > 0 {
@@ -38,76 +44,209 @@ func ParseMcpToolCall(toolCallRaw []byte) (name string, argsJSON []byte) {
 }
 
 func parseMcpToolCall(data []byte) (string, []byte) {
-	var name string
-	var args []byte
 	b := data
 	for len(b) > 0 {
 		field, wire, rest, err := fieldHeader(b)
 		if err != nil {
-			return name, args
+			break
 		}
 		if wire != wireBytes {
 			b, err = skipField(rest, wire)
 			if err != nil {
-				return name, args
+				break
 			}
 			continue
 		}
 		raw, b2, err2 := readBytes(rest)
 		if err2 != nil {
-			return name, args
+			break
 		}
 		b = b2
-		if field == 1 { // args
-			n, a := parseMcpArgs(raw)
-			if n != "" {
-				name = n
+		if field == 1 { // call spec
+			name, args := parseMcpCallSpec(raw)
+			if name == "" {
+				return "", nil
 			}
-			if a != nil {
-				args = a
+			if len(args) == 0 {
+				return name, []byte("{}")
+			}
+			out, errM := json.Marshal(args)
+			if errM != nil {
+				return name, []byte("{}")
+			}
+			return name, out
+		}
+	}
+	return "", nil
+}
+
+// parseMcpCallSpec decodes the nested call specification: tool_name = field 1
+// (string), args = field 2 (repeated map entries), tool_call_id = field 3.
+func parseMcpCallSpec(data []byte) (string, map[string]any) {
+	var name string
+	args := map[string]any{}
+	b := data
+	for len(b) > 0 {
+		field, wire, rest, err := fieldHeader(b)
+		if err != nil {
+			break
+		}
+		if wire != wireBytes {
+			b, err = skipField(rest, wire)
+			if err != nil {
+				break
+			}
+			continue
+		}
+		raw, b2, err2 := readBytes(rest)
+		if err2 != nil {
+			break
+		}
+		b = b2
+		switch field {
+		case 1:
+			if name == "" {
+				name = string(raw)
+			}
+		case 2:
+			if k, v, ok := parseMcpArgEntry(raw); ok {
+				args[k] = v
 			}
 		}
 	}
 	return name, args
 }
 
-func parseMcpArgs(data []byte) (string, []byte) {
-	var name string
-	var args []byte
+// parseMcpArgEntry decodes one args map entry: key = field 1 string, value =
+// field 2 message carrying the scalar at field 3.
+func parseMcpArgEntry(data []byte) (string, any, bool) {
+	var key string
 	b := data
 	for len(b) > 0 {
 		field, wire, rest, err := fieldHeader(b)
 		if err != nil {
-			return name, args
+			break
 		}
-		switch {
-		case field == 2 && wire == wireBytes: // tool_name
-			name, b, err = readString(rest)
+		if wire != wireBytes {
+			b, err = skipField(rest, wire)
 			if err != nil {
-				return name, args
+				break
 			}
-		case field == 3 && wire == wireBytes: // arguments_json
-			var s string
-			s, b, err = readString(rest)
-			if err != nil {
-				return name, args
-			}
-			args = []byte(s)
-		default:
-			if wire == wireBytes {
-				var raw []byte
-				raw, b, err = readBytes(rest)
-				if err != nil {
-					return name, args
-				}
-				_ = raw
-			} else {
-				b, err = skipField(rest, wire)
-				if err != nil {
-					return name, args
-				}
+			continue
+		}
+		raw, b2, err2 := readBytes(rest)
+		if err2 != nil {
+			break
+		}
+		b = b2
+		if field == 1 {
+			key = string(raw)
+		} else if field == 2 {
+			if s := parseMcpArgValue(raw); s != "" && key != "" {
+				return key, s, true
 			}
 		}
 	}
-	return name, args
+	return "", nil, false
+}
+
+// parseMcpArgValue returns the scalar value of an arg-entry value message:
+// the first length-delimited non-empty UTF-8 payload found (observed at
+// field 3).
+func parseMcpArgValue(data []byte) string {
+	b := data
+	for len(b) > 0 {
+		_, wire, rest, err := fieldHeader(b)
+		if err != nil {
+			return ""
+		}
+		if wire != wireBytes {
+			b, err = skipField(rest, wire)
+			if err != nil {
+				return ""
+			}
+			continue
+		}
+		raw, b2, err2 := readBytes(rest)
+		if err2 != nil {
+			return ""
+		}
+		b = b2
+		if len(raw) > 0 && isUTF8(raw) {
+			return string(raw)
+		}
+	}
+	return ""
+}
+
+// ParseShellToolCall extracts the command from a native shell_tool_call
+// (ToolCall field 1 -> ShellToolCall field 1 -> ShellArgs field 1).
+// Returns ok=false when the blob is not a shell call.
+func ParseShellToolCall(toolCallRaw []byte) (command string, ok bool) {
+	b := toolCallRaw
+	for len(b) > 0 {
+		field, wire, rest, err := fieldHeader(b)
+		if err != nil {
+			return "", false
+		}
+		if field == 1 && wire == wireBytes {
+			raw, _, err2 := readBytes(rest)
+			if err2 != nil {
+				return "", false
+			}
+			return parseShellToolCall(raw)
+		}
+		b, err = skipField(rest, wire)
+		if err != nil {
+			return "", false
+		}
+	}
+	return "", false
+}
+
+func parseShellToolCall(data []byte) (string, bool) {
+	b := data
+	for len(b) > 0 {
+		field, wire, rest, err := fieldHeader(b)
+		if err != nil {
+			return "", false
+		}
+		if field == 1 && wire == wireBytes { // ShellArgs
+			raw, _, err2 := readBytes(rest)
+			if err2 != nil {
+				return "", false
+			}
+			if cmd, ok := parseShellArgs(raw); ok {
+				return cmd, true
+			}
+			return "", false
+		}
+		b, err = skipField(rest, wire)
+		if err != nil {
+			return "", false
+		}
+	}
+	return "", false
+}
+
+func parseShellArgs(data []byte) (string, bool) {
+	b := data
+	for len(b) > 0 {
+		field, wire, rest, err := fieldHeader(b)
+		if err != nil {
+			return "", false
+		}
+		if field == 1 && wire == wireBytes { // command
+			raw, _, err2 := readBytes(rest)
+			if err2 != nil {
+				return "", false
+			}
+			return string(raw), true
+		}
+		b, err = skipField(rest, wire)
+		if err != nil {
+			return "", false
+		}
+	}
+	return "", false
 }

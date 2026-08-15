@@ -17,7 +17,6 @@ func readVarintTB(b []byte) (uint64, []byte) {
 	return v, b[n:]
 }
 
-
 // loadDescriptorMessages parses the FileDescriptorProto into field tables.
 func loadDescriptorMessages(t *testing.T) map[string]map[int]string {
 	t.Helper()
@@ -168,13 +167,13 @@ func TestFieldNumbersMatchDescriptor(t *testing.T) {
 			"mcp_tools": 4, "conversation_id": 5, "custom_system_prompt": 8, "requested_model": 9,
 		},
 		"ConversationStateStructure": {"root_prompt_messages_json": 1, "turns": 8, "mode": 10},
-		"ConversationAction": {"user_message_action": 1, "resume_action": 2},
-		"UserMessageAction": {"user_message": 1},
-		"UserMessage":             {"text": 1, "message_id": 2, "mode": 4},
-		"RequestedModel":          {"model_id": 1, "max_mode": 2},
-		"McpTools":                {"mcp_tools": 1},
-		"McpToolDefinition":       {"name": 1, "description": 2, "input_schema_json": 6},
-		"AgentServerMessage":      {"interaction_update": 1, "conversation_checkpoint_update": 3, "interaction_query": 7},
+		"ConversationAction":         {"user_message_action": 1, "resume_action": 2},
+		"UserMessageAction":          {"user_message": 1},
+		"UserMessage":                {"text": 1, "message_id": 2, "mode": 4},
+		"RequestedModel":             {"model_id": 1, "max_mode": 2},
+		"McpTools":                   {"mcp_tools": 1},
+		"McpToolDefinition":          {"name": 1, "description": 2, "input_schema_json": 6},
+		"AgentServerMessage":         {"interaction_update": 1, "conversation_checkpoint_update": 3, "interaction_query": 7},
 		"InteractionUpdate": {
 			"text_delta": 1, "tool_call_started": 2, "tool_call_completed": 3,
 			"thinking_delta": 4, "thinking_completed": 5, "token_delta": 8,
@@ -353,6 +352,74 @@ func TestDecodeAgentServerMessage(t *testing.T) {
 	}
 	if !msg.InteractionUpdate.TurnEnded {
 		t.Fatal("turn_ended not set")
+	}
+}
+
+func TestDecodeToolCallEventsWithRealisticIDs(t *testing.T) {
+	// call_id / model_call_id are plain string fields; realistic Cursor IDs
+	// ("toolu_...") must decode instead of being dropped as undecodable.
+	callID := "toolu_01ABCdefGHIjklMNOpqrSTUvwx"
+
+	// tool_call_started: interaction_update field 2 { call_id=1, tool_call=2 }
+	started := &encoder{}
+	started.string(1, callID)
+	started.message(2, &rawMarshaler{(&encoder{}).buf})
+	upd := &encoder{}
+	upd.message(2, &rawMarshaler{started.buf})
+	top := &encoder{}
+	top.message(1, &rawMarshaler{upd.buf})
+	msg, err := DecodeAgentServerMessage(top.buf)
+	if err != nil {
+		t.Fatalf("decode started: %v", err)
+	}
+	if msg.InteractionUpdate == nil || msg.InteractionUpdate.ToolCallStarted == nil {
+		t.Fatal("tool_call_started missing")
+	}
+	if got := msg.InteractionUpdate.ToolCallStarted.CallID; got != callID {
+		t.Fatalf("call_id = %q, want %q", got, callID)
+	}
+
+	// tool_call_delta: interaction_update field 15 { call_id=1, delta=2 }
+	delta := &encoder{}
+	delta.string(1, callID)
+	d := &encoder{}
+	d.string(1, "{\"cmd\"")
+	delta.message(2, &rawMarshaler{d.buf})
+	upd2 := &encoder{}
+	upd2.message(15, &rawMarshaler{delta.buf})
+	top2 := &encoder{}
+	top2.message(1, &rawMarshaler{upd2.buf})
+	msg2, err := DecodeAgentServerMessage(top2.buf)
+	if err != nil {
+		t.Fatalf("decode delta: %v", err)
+	}
+	if msg2.InteractionUpdate == nil || msg2.InteractionUpdate.ToolCallDelta == nil {
+		t.Fatal("tool_call_delta missing")
+	}
+	if got := msg2.InteractionUpdate.ToolCallDelta.CallID; got != callID {
+		t.Fatalf("delta call_id = %q, want %q", got, callID)
+	}
+
+	// tool_call_completed: interaction_update field 3 { call_id=1, model_call_id=3 }
+	completed := &encoder{}
+	completed.string(1, callID)
+	completed.string(3, "mc_12345")
+	upd3 := &encoder{}
+	upd3.message(3, &rawMarshaler{completed.buf})
+	top3 := &encoder{}
+	top3.message(1, &rawMarshaler{upd3.buf})
+	msg3, err := DecodeAgentServerMessage(top3.buf)
+	if err != nil {
+		t.Fatalf("decode completed: %v", err)
+	}
+	if msg3.InteractionUpdate == nil || msg3.InteractionUpdate.ToolCallCompleted == nil {
+		t.Fatal("tool_call_completed missing")
+	}
+	if got := msg3.InteractionUpdate.ToolCallCompleted.CallID; got != callID {
+		t.Fatalf("completed call_id = %q, want %q", got, callID)
+	}
+	if got := msg3.InteractionUpdate.ToolCallCompleted.ModelCallID; got != "mc_12345" {
+		t.Fatalf("completed model_call_id = %q, want mc_12345", got)
 	}
 }
 

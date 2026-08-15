@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	cursorauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/cursor"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
 
@@ -110,14 +110,49 @@ func (e *CursorExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	}
 
 	assembler := newCursorAnthropicAssembler(model)
-	for ev := range events {
+	assembler.ShellToolName = cursorShellToolName(shape.Tools)
+	stopReason := "end_turn"
+	for {
+		ev, ok, quiescent := nextCursorEvent(events, assembler.ToolUseQuiescent())
+		if quiescent {
+			stopReason = "tool_use"
+			break
+		}
+		if !ok {
+			break
+		}
 		if ev.Err != nil {
 			return resp, mapCursorConnectError(ev.Err)
 		}
 		assembler.Handle(ev.Message)
 	}
-	resp = cliproxyexecutor.Response{Payload: assembler.BuildNonStreamResponse("end_turn")}
+	resp = cliproxyexecutor.Response{Payload: assembler.BuildNonStreamResponse(stopReason)}
 	return resp, nil
+}
+
+// cursorToolQuiescence is how long the executor waits after a tool call
+// completes before finalizing the response. Cursor keeps the stream open to
+// receive exec results; the window absorbs parallel tool calls that are
+// still streaming so they are not truncated.
+const cursorToolQuiescence = 500 * time.Millisecond
+
+// nextCursorEvent reads the next stream event. When quiescent is set (a tool
+// call has completed), it waits at most cursorToolQuiescence for further
+// activity before reporting quiescent=true so the caller can hand the
+// tool_use back to the client instead of blocking forever.
+func nextCursorEvent(events <-chan cursorStreamEvent, quiescent bool) (ev cursorStreamEvent, ok bool, timedOut bool) {
+	if !quiescent {
+		ev, ok = <-events
+		return ev, ok, false
+	}
+	timer := time.NewTimer(cursorToolQuiescence)
+	defer timer.Stop()
+	select {
+	case ev, ok = <-events:
+		return ev, ok, false
+	case <-timer.C:
+		return cursorStreamEvent{}, false, true
+	}
 }
 
 func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
@@ -156,7 +191,17 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	go func() {
 		defer close(out)
 		assembler := newCursorAnthropicAssembler(model)
-		for ev := range events {
+		assembler.ShellToolName = cursorShellToolName(shape.Tools)
+		stopReason := "end_turn"
+		for {
+			ev, ok, quiescent := nextCursorEvent(events, assembler.ToolUseQuiescent())
+			if quiescent {
+				stopReason = "tool_use"
+				break
+			}
+			if !ok {
+				break
+			}
 			if ev.Err != nil {
 				out <- cliproxyexecutor.StreamChunk{Err: mapCursorConnectError(ev.Err)}
 				return
@@ -169,7 +214,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				out <- cliproxyexecutor.StreamChunk{Payload: append(append([]byte("event: message\ndata: "), line...), '\n', '\n')}
 			}
 		}
-		for _, event := range assembler.Finish("end_turn") {
+		for _, event := range assembler.Finish(stopReason) {
 			line, errJSON := json.Marshal(event.SSE)
 			if errJSON != nil {
 				continue

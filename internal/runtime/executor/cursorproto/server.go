@@ -13,20 +13,20 @@ type AgentServerMessage struct {
 
 // KvServerMessage is the server-side blob storage channel.
 type KvServerMessage struct {
-	ID         uint32
-	GetBlobID  []byte
-	WantGet    bool
-	SetBlobID  []byte
-	SetBlob    []byte
-	WantSet    bool
+	ID        uint32
+	GetBlobID []byte
+	WantGet   bool
+	SetBlobID []byte
+	SetBlob   []byte
+	WantSet   bool
 }
 
 // ExecServerMessage carries server-initiated execution requests.
 type ExecServerMessage struct {
-	ID          uint32
-	ExecID      string
+	ID                 uint32
+	ExecID             string
 	WantRequestContext bool
-	Raw         []byte
+	Raw                []byte
 }
 
 // DecodeAgentServerMessage parses one server frame.
@@ -98,22 +98,22 @@ func DecodeAgentServerMessage(data []byte) (*AgentServerMessage, error) {
 
 // InteractionUpdate is one streaming event inside AgentServerMessage.
 type InteractionUpdate struct {
-	TextDelta          string
-	HasTextDelta       bool
-	ThinkingDelta      string
-	HasThinkingDelta   bool
-	ThinkingCompleted  bool
-	ToolCallStarted    *ToolCallEvent
-	ToolCallDelta      *ToolCallDeltaEvent
-	ToolCallCompleted  *ToolCallEvent
-	TokenDelta         int32
-	HasTokenDelta      bool
-	TurnEnded          bool
-	Heartbeat          bool
-	StepStarted        bool
-	StepCompleted      bool
-	Summary            string
-	HasSummary         bool
+	TextDelta         string
+	HasTextDelta      bool
+	ThinkingDelta     string
+	HasThinkingDelta  bool
+	ThinkingCompleted bool
+	ToolCallStarted   *ToolCallEvent
+	ToolCallDelta     *ToolCallDeltaEvent
+	ToolCallCompleted *ToolCallEvent
+	TokenDelta        int32
+	HasTokenDelta     bool
+	TurnEnded         bool
+	Heartbeat         bool
+	StepStarted       bool
+	StepCompleted     bool
+	Summary           string
+	HasSummary        bool
 }
 
 func decodeInteractionUpdate(data []byte) (*InteractionUpdate, error) {
@@ -199,7 +199,7 @@ func decodeInteractionUpdate(data []byte) (*InteractionUpdate, error) {
 
 // ToolCallEvent describes a tool call start/completion.
 type ToolCallEvent struct {
-	CallID     string
+	CallID      string
 	ModelCallID string
 	// For completed MCP tool calls: the raw ToolCall blob (opaque passthrough).
 	ToolCallRaw []byte
@@ -217,7 +217,7 @@ func decodeToolCallEvent(data []byte) (*ToolCallEvent, error) {
 		}
 		switch {
 		case field == 1 && wire == wireBytes: // call_id
-			ev.CallID, b, err = decodeStringField(rest, wire)
+			ev.CallID, b, err = readString(rest)
 			if err != nil {
 				return nil, err
 			}
@@ -229,7 +229,7 @@ func decodeToolCallEvent(data []byte) (*ToolCallEvent, error) {
 			ev.ToolCallRaw = raw
 			b = b2
 		case field == 3 && wire == wireBytes: // model_call_id
-			ev.ModelCallID, b, err = decodeStringField(rest, wire)
+			ev.ModelCallID, b, err = readString(rest)
 			if err != nil {
 				return nil, err
 			}
@@ -259,7 +259,7 @@ func decodeToolCallDeltaEvent(data []byte) (*ToolCallDeltaEvent, error) {
 		}
 		switch {
 		case field == 1 && wire == wireBytes: // call_id
-			ev.CallID, b, err = decodeStringField(rest, wire)
+			ev.CallID, b, err = readString(rest)
 			if err != nil {
 				return nil, err
 			}
@@ -271,7 +271,7 @@ func decodeToolCallDeltaEvent(data []byte) (*ToolCallDeltaEvent, error) {
 			ev.ArgsPartial = extractDeepestString(raw)
 			b = b2
 		case field == 3 && wire == wireBytes: // model_call_id
-			_, b, err = decodeStringField(rest, wire)
+			_, b, err = readString(rest)
 			if err != nil {
 				return nil, err
 			}
