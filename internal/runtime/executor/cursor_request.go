@@ -9,7 +9,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/cursorproto"
 	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 // cursorRequestShape is the Anthropic Messages payload the executor receives
@@ -284,17 +283,6 @@ func compactJSON(raw string) string {
 		return raw
 	}
 	return buf.String()
-}
-
-// cursorEnsureRequestDefaults patches required Anthropic fields if absent.
-func cursorEnsureRequestDefaults(payload []byte, model string, maxTokens int64) []byte {
-	if gjson.GetBytes(payload, "model").String() == "" {
-		payload, _ = sjson.SetBytes(payload, "model", model)
-	}
-	if !gjson.GetBytes(payload, "max_tokens").Exists() && maxTokens > 0 {
-		payload, _ = sjson.SetBytes(payload, "max_tokens", maxTokens)
-	}
-	return payload
 }
 
 // cursorShellToolName resolves the client-side tool that should execute

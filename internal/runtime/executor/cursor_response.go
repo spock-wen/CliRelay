@@ -35,6 +35,15 @@ type cursorAnthropicAssembler struct {
 	toolUseDoneAt time.Time
 }
 
+// totalOutputTokens exposes the accumulated output token count for usage
+// reporting.
+func (a *cursorAnthropicAssembler) totalOutputTokens() int64 {
+	if a == nil {
+		return 0
+	}
+	return a.outputTokens
+}
+
 type cursorToolAccumulator struct {
 	CallID string
 	Name   string
