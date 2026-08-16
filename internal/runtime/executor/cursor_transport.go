@@ -175,6 +175,24 @@ func (t *cursorTransport) RunStream(ctx context.Context, baseURL, token string, 
 		_, errWrite := pw.Write(frame)
 		writeErr <- errWrite
 	}()
+
+	// Protocol replies (kv blob echo, context results) must be written in
+	// order but must never block the read loop: a stalled pw.Write — the
+	// upstream not reading our reply while it keeps streaming frames —
+	// freezes frame decoding and turns incremental deltas into one burst.
+	// replies serializes writes on a background goroutine.
+	replyCh := make(chan []byte, 32)
+	go func() {
+		// Exits when the pipe is closed (ctx cancel or stream end) and the
+		// pending Write fails; drains senders until they observe ctx.Done.
+		for buf := range replyCh {
+			if _, errWrite := pw.Write(buf); errWrite != nil {
+				for range replyCh {
+				}
+				return
+			}
+		}
+	}()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, pr)
 	if err != nil {
 		_ = pw.Close()
@@ -203,6 +221,9 @@ func (t *cursorTransport) RunStream(ctx context.Context, baseURL, token string, 
 	go func() {
 		defer close(out)
 		defer close(done)
+		// The read loop is the only replyCh sender; closing it here lets the
+		// reply writer exit after the last in-flight reply is written.
+		defer close(replyCh)
 		var frameBuf []byte
 		for {
 			chunk := make([]byte, 32*1024)
@@ -231,10 +252,13 @@ func (t *cursorTransport) RunStream(ctx context.Context, baseURL, token string, 
 					}
 					// Full-duplex protocol: answer KV blob requests and exec
 					// context requests inline, otherwise the server stalls.
+					// Hand replies to the writer goroutine — never write
+					// synchronously here.
 					if reply := t.protocolReply(serverMsg); reply != nil {
-						frame := cursorproto.EncodeEnvelopeFrame(cursorproto.EnvelopeFlagData, reply.Encode())
-						if _, errWrite := pw.Write(frame); errWrite != nil {
-							log.Debugf("cursor run: reply write failed: %v", errWrite)
+						select {
+						case replyCh <- cursorproto.EncodeEnvelopeFrame(cursorproto.EnvelopeFlagData, reply.Encode()):
+						case <-ctx.Done():
+							return
 						}
 					}
 					select {
