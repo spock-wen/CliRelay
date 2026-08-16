@@ -142,8 +142,15 @@ func parseMcpArgEntry(data []byte) (string, any, bool) {
 		if field == 1 {
 			key = string(raw)
 		} else if field == 2 {
-			if s := parseMcpArgValue(raw); s != "" && key != "" {
-				return key, s, true
+			value := parseMcpArgValue(raw)
+			if value == "" && len(raw) > 0 && isUTF8(raw) {
+				// The descriptor declares ArgsEntry.value as plain bytes;
+				// scalar arguments (numbers, bools) can arrive as their
+				// literal byte representation instead of a nested message.
+				value = string(raw)
+			}
+			if value != "" && key != "" {
+				return key, value, true
 			}
 		}
 	}

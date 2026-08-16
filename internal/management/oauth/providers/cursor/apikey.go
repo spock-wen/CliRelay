@@ -18,6 +18,7 @@ import (
 // APIKeyLoginOptions carries the import flow dependencies.
 type APIKeyLoginOptions struct {
 	Ctx        context.Context
+	ProxyURL   string
 	SaveRecord func(context.Context, *coreauth.Auth) (string, error)
 }
 
@@ -38,7 +39,7 @@ func AuthenticateAPIKey(opts APIKeyLoginOptions, apiKey string) (*APIKeyLoginRes
 	if key == "" {
 		return nil, fmt.Errorf("cursor api key: key is required")
 	}
-	if !strings.HasPrefix(key, "crsr_") {
+	if !strings.HasPrefix(key, "crsr_") || len(key) <= len("crsr_") {
 		return nil, fmt.Errorf("cursor api key: unexpected key format (want crsr_... prefix)")
 	}
 	if opts.SaveRecord == nil {
@@ -51,7 +52,7 @@ func AuthenticateAPIKey(opts APIKeyLoginOptions, apiKey string) (*APIKeyLoginRes
 	exchangeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	authClient := cursorauth.NewAuth(nil)
+	authClient := cursorauth.NewAuthWithProxyURL(nil, opts.ProxyURL)
 	pair, err := authClient.ExchangeAPIKey(exchangeCtx, key)
 	if err != nil {
 		return nil, err
