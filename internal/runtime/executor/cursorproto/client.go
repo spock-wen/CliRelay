@@ -357,10 +357,18 @@ func (m *McpTools) encode() []byte {
 }
 
 // McpToolDefinition is a single function tool (JSON schema in InputSchemaJSON).
+// Wire fields per .cursor-agent-descriptor.bin: name=1 (display name),
+// description=2, input_schema=3 (bytes), provider_identifier=4,
+// tool_name=5 (the name the model calls), input_schema_json=6.
 type McpToolDefinition struct {
 	Name            string
 	Description     string
 	InputSchemaJSON string
+	// ToolName is the callable tool name the server echoes back in tool
+// call events. Cursor's descriptor distinguishes display name (field 1)
+// from the routing name (field 5); sending only field 1 makes the server
+// resolve calls against the wrong registered tool.
+	ToolName string
 }
 
 func (m *McpToolDefinition) encode() []byte {
@@ -373,6 +381,9 @@ func (m *McpToolDefinition) encode() []byte {
 	}
 	if m.InputSchemaJSON != "" {
 		e.string(6, m.InputSchemaJSON)
+	}
+	if m.ToolName != "" {
+		e.string(5, m.ToolName)
 	}
 	return e.buf
 }

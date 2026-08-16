@@ -203,6 +203,7 @@ func buildCursorClientMessage(shape *cursorRequestShape, conversationID string, 
 			}
 			defs = append(defs, &cursorproto.McpToolDefinition{
 				Name:            tool.Name,
+				ToolName:        tool.Name,
 				Description:     tool.Description,
 				InputSchemaJSON: schema,
 			})
