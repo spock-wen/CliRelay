@@ -86,9 +86,9 @@ func NewLoginParams() (*LoginParams, error) {
 	}
 	loginUUID := uuid.NewString()
 	query := url.Values{
-		"challenge":     {pkce.Challenge},
-		"uuid":          {loginUUID},
-		"mode":          {"login"},
+		"challenge":      {pkce.Challenge},
+		"uuid":           {loginUUID},
+		"mode":           {"login"},
 		"redirectTarget": {"cli"},
 	}
 	return &LoginParams{
@@ -215,6 +215,46 @@ func (a *AuthClient) RefreshTokens(ctx context.Context, refreshToken string) (*T
 	}
 	if strings.TrimSpace(out.RefreshToken) == "" {
 		out.RefreshToken = refreshToken
+	}
+	return &out, nil
+}
+
+// ExchangeAPIKey exchanges a long-lived dashboard API key ("crsr_...") for a
+// session token pair. The exchanged access token is short-lived (~1h) and the
+// returned refresh token cannot itself be re-exchanged, so callers must keep
+// the API key and re-exchange on demand.
+func (a *AuthClient) ExchangeAPIKey(ctx context.Context, apiKey string) (*TokenPair, error) {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return nil, fmt.Errorf("cursor api key: key is required")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.baseURL+RefreshPath, strings.NewReader("{}"))
+	if err != nil {
+		return nil, fmt.Errorf("cursor api key: create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("cursor api key: request failed: %w", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("cursor api key: read response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("cursor api key: status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var out TokenPair
+	if errJSON := json.Unmarshal(body, &out); errJSON != nil {
+		return nil, fmt.Errorf("cursor api key: parse response: %w", errJSON)
+	}
+	if strings.TrimSpace(out.AccessToken) == "" {
+		return nil, fmt.Errorf("cursor api key: response missing accessToken")
 	}
 	return &out, nil
 }
