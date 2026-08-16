@@ -44,6 +44,17 @@ func (a *cursorAnthropicAssembler) totalOutputTokens() int64 {
 	return a.outputTokens
 }
 
+// eventName returns the Anthropic SSE event name for a synthesized payload.
+// The official Messages API frames every event as "event: <type>" and some
+// clients (Claude Code included) dispatch on that name; emitting a constant
+// name makes them buffer the whole stream.
+func (e cursorEvent) eventName() string {
+	if v, ok := e.SSE["type"].(string); ok && v != "" {
+		return v
+	}
+	return "message"
+}
+
 type cursorToolAccumulator struct {
 	CallID string
 	Name   string

@@ -233,7 +233,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					continue
 				}
 				reporter.appendOutputChunk(line)
-				out <- cliproxyexecutor.StreamChunk{Payload: append(append([]byte("event: message\ndata: "), line...), '\n', '\n')}
+				out <- cliproxyexecutor.StreamChunk{Payload: append(append([]byte("event: "+event.eventName()+"\ndata: "), line...), '\n', '\n')}
 			}
 		}
 		if streamErr != nil {
@@ -246,7 +246,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				continue
 			}
 			reporter.appendOutputChunk(line)
-			out <- cliproxyexecutor.StreamChunk{Payload: append(append([]byte("event: message\ndata: "), line...), '\n', '\n')}
+			out <- cliproxyexecutor.StreamChunk{Payload: append(append([]byte("event: "+event.eventName()+"\ndata: "), line...), '\n', '\n')}
 		}
 		reporter.publish(execCtx.Context, cursorUsageDetail(payload, assembler))
 	}()
