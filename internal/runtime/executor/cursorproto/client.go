@@ -3,8 +3,8 @@ package cursorproto
 // AgentClientMessage is the top-level full-duplex frame the client sends to
 // AgentService.Run. Only run_request is used by this client.
 type AgentClientMessage struct {
-	RunRequest       *AgentRunRequest
-	KvClientMessage  *KvClientMessage
+	RunRequest        *AgentRunRequest
+	KvClientMessage   *KvClientMessage
 	ExecClientMessage *ExecClientMessage
 }
 
@@ -21,7 +21,7 @@ func (m *AgentClientMessage) Encode() []byte { return m.encode() }
 
 // KvClientMessage answers server KV requests (blob storage protocol).
 type KvClientMessage struct {
-	ID      uint32
+	ID uint32
 	// exactly one of the results below
 	GetBlobData []byte
 	HaveGetBlob bool
@@ -64,7 +64,7 @@ type AgentRunRequest struct {
 // requestContextResult; other exec variants are rejected server-side via an
 // error result so the turn fails fast instead of hanging.
 type ExecClientMessage struct {
-	ID  uint32
+	ID uint32
 	// RequestContextResult carries the client environment + tools when set.
 	RequestContextResult *RequestContextFull
 	// ErrorMessage reports a failed exec variant with the given message.
@@ -102,6 +102,7 @@ func (m *RequestContextFull) encode() []byte {
 	}
 	return e.buf
 }
+
 // AgentRunRequest drives a full agent turn.
 
 func (m *AgentRunRequest) encode() []byte {
@@ -224,7 +225,7 @@ func (m *ResumeAction) encode() []byte { return nil }
 
 // UserMessageAction delivers a new user message.
 type UserMessageAction struct {
-	UserMessage   *UserMessage
+	UserMessage    *UserMessage
 	RequestContext *RequestContext
 }
 
@@ -280,11 +281,13 @@ func (m *RequestContextEnv) encode() []byte {
 	return e.buf
 }
 
-// UserMessage carries the user prompt text.
+// UserMessage carries the user prompt text. selected_context (field 3)
+// carries image attachments for the current message.
 type UserMessage struct {
-	Text      string
-	MessageID string
-	Mode      int32
+	Text            string
+	MessageID       string
+	Mode            int32
+	SelectedContext *SelectedContext
 }
 
 func (m *UserMessage) encode() []byte {
@@ -295,8 +298,65 @@ func (m *UserMessage) encode() []byte {
 	if m.MessageID != "" {
 		e.string(2, m.MessageID)
 	}
+	if m.SelectedContext != nil {
+		e.message(3, m.SelectedContext)
+	}
 	if m.Mode != 0 {
 		e.int32(4, m.Mode)
+	}
+	return e.buf
+}
+
+// SelectedContext is UserMessage.selected_context (field 3). Only the image
+// list is used by the relay; Cursor clients also send files, terminals, etc.
+type SelectedContext struct {
+	Images []*SelectedImage
+}
+
+func (m *SelectedContext) encode() []byte {
+	e := &encoder{}
+	for _, img := range m.Images {
+		e.message(1, img)
+	}
+	return e.buf
+}
+
+// SelectedImage is one image attachment. Wire fields per
+// .cursor-agent-descriptor.bin: blob_id=1, uuid=2, path=3, dimension=4,
+// mime_type=7, data=8 (data_or_blob_id oneof — inline data uses field 8).
+type SelectedImage struct {
+	Data     []byte
+	MimeType string
+	Width    int32
+	Height   int32
+}
+
+func (m *SelectedImage) encode() []byte {
+	e := &encoder{}
+	if len(m.Data) > 0 {
+		e.bytes(8, m.Data)
+	}
+	if m.MimeType != "" {
+		e.string(7, m.MimeType)
+	}
+	if m.Width > 0 && m.Height > 0 {
+		e.message(4, &imageDimension{Width: m.Width, Height: m.Height})
+	}
+	return e.buf
+}
+
+type imageDimension struct {
+	Width  int32
+	Height int32
+}
+
+func (m *imageDimension) encode() []byte {
+	e := &encoder{}
+	if m.Width > 0 {
+		e.int32(1, m.Width)
+	}
+	if m.Height > 0 {
+		e.int32(2, m.Height)
 	}
 	return e.buf
 }
@@ -365,9 +425,9 @@ type McpToolDefinition struct {
 	Description     string
 	InputSchemaJSON string
 	// ToolName is the callable tool name the server echoes back in tool
-// call events. Cursor's descriptor distinguishes display name (field 1)
-// from the routing name (field 5); sending only field 1 makes the server
-// resolve calls against the wrong registered tool.
+	// call events. Cursor's descriptor distinguishes display name (field 1)
+	// from the routing name (field 5); sending only field 1 makes the server
+	// resolve calls against the wrong registered tool.
 	ToolName string
 }
 
@@ -420,8 +480,8 @@ func EncodeTurn(agent *AgentConversationTurnStructure) []byte {
 
 // ConversationStep is one assistant step inside a turn.
 type ConversationStep struct {
-	AssistantText  string
-	ThinkingText   string
+	AssistantText string
+	ThinkingText  string
 }
 
 func (m *ConversationStep) encode() []byte {
