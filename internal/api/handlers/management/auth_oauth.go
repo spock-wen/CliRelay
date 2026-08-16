@@ -447,6 +447,40 @@ func (h *Handler) RequestCursorToken(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "url": result.LoginURL, "state": result.State})
 }
 
+// RequestCursorAPIKeyToken exchanges a dashboard API key ("crsr_...") for a
+// session token pair and persists an auth_kind=api_key record.
+func (h *Handler) RequestCursorAPIKeyToken(c *gin.Context) {
+	ctx := requestAuthContext(c)
+	_, saveRecord, _, _ := h.tenantOAuthBindings(c)
+
+	var payload struct {
+		APIKey string `json:"api_key"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil || payload.APIKey == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "api_key is required"})
+		return
+	}
+
+	result, err := cursorprovider.AuthenticateAPIKey(cursorprovider.APIKeyLoginOptions{
+		Ctx:        ctx,
+		SaveRecord: saveRecord,
+	}, payload.APIKey)
+	if err != nil {
+		log.WithError(err).Error("failed to import cursor api key")
+		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":     "ok",
+		"saved_path": result.SavedPath,
+		"email":      result.Email,
+		"user_id":    result.UserID,
+		"expired":    result.Expired,
+		"type":       "cursor",
+	})
+}
+
 func (h *Handler) RequestIFlowToken(c *gin.Context) {
 	ctx := detachedAuthContext(c)
 	authDir, saveRecord, registerSession, completeProvider := h.tenantOAuthBindings(c)

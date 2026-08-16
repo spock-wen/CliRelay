@@ -328,6 +328,7 @@ func expectedManagementRoutes() []string {
 		"GET /v0/management/codex-api-key",
 		"GET /v0/management/codex-auth-url",
 		"GET /v0/management/cursor-auth-url",
+		"POST /v0/management/cursor-auth-url",
 		"GET /v0/management/codex-oauth-admission",
 		"GET /v0/management/config",
 		"GET /v0/management/config.yaml",
