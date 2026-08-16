@@ -262,22 +262,36 @@ func (e *CursorExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Aut
 	return resp, nil
 }
 
-// Refresh exchanges the refresh token for a new access token.
+// Refresh exchanges the refresh token for a new access token. Auth records
+// imported via dashboard API key (auth_kind=api_key) re-exchange the stored
+// key instead: the exchange response's refresh token is single-use-invalid.
 func (e *CursorExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
 	if auth == nil {
 		return nil, fmt.Errorf("cursor executor: auth is nil")
 	}
+	var apiKey string
 	var refreshToken string
 	if auth.Metadata != nil {
+		if v, ok := auth.Metadata["api_key"].(string); ok {
+			apiKey = strings.TrimSpace(v)
+		}
 		if v, ok := auth.Metadata["refresh_token"].(string); ok {
 			refreshToken = strings.TrimSpace(v)
 		}
 	}
-	if refreshToken == "" {
+	if apiKey == "" && refreshToken == "" {
 		return auth, nil
 	}
 	svc := cursorauth.NewAuthWithProxyURL(e.cfg, auth.ProxyURL)
-	pair, err := svc.RefreshTokens(ctx, refreshToken)
+	var pair *cursorauth.TokenPair
+	var err error
+	authKind := "oauth"
+	if apiKey != "" {
+		pair, err = svc.ExchangeAPIKey(ctx, apiKey)
+		authKind = "api_key"
+	} else {
+		pair, err = svc.RefreshTokens(ctx, refreshToken)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -285,9 +299,11 @@ func (e *CursorExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 		auth.Metadata = make(map[string]any)
 	}
 	auth.Metadata["type"] = "cursor"
-	auth.Metadata["auth_kind"] = "oauth"
+	auth.Metadata["auth_kind"] = authKind
 	auth.Metadata["access_token"] = pair.AccessToken
-	auth.Metadata["refresh_token"] = pair.RefreshToken
+	if apiKey == "" {
+		auth.Metadata["refresh_token"] = pair.RefreshToken
+	}
 	if subject, userID, email := cursorauth.ParseTokenIdentity(pair.AccessToken); subject != "" {
 		auth.Metadata["sub"] = subject
 		if userID != "" {
@@ -307,7 +323,7 @@ func (e *CursorExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)
 	}
-	auth.Attributes["auth_kind"] = "oauth"
+	auth.Attributes["auth_kind"] = authKind
 	if strings.TrimSpace(auth.Attributes["base_url"]) == "" {
 		auth.Attributes["base_url"] = cursorauth.APIBaseURL
 	}
