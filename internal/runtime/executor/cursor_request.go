@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 
@@ -37,6 +38,9 @@ type cursorContentBlock struct {
 	Input     json.RawMessage
 	ToolUseID string
 	Content   string
+	// Image payload for type=image blocks (base64 source).
+	ImageData     []byte
+	ImageMimeType string
 }
 
 type cursorTool struct {
@@ -95,6 +99,14 @@ func parseCursorRequest(payload []byte) (*cursorRequestShape, error) {
 				if raw := block.Get("input").Raw; raw != "" {
 					b.Input = json.RawMessage(raw)
 				}
+				if b.Type == "image" {
+					if src := block.Get("source"); src.Exists() && src.Get("type").String() == "base64" {
+						if decoded, errDecode := base64.StdEncoding.DecodeString(src.Get("data").String()); errDecode == nil {
+							b.ImageData = decoded
+							b.ImageMimeType = src.Get("media_type").String()
+						}
+					}
+				}
 				if raw := block.Get("content").Raw; raw != "" && block.Get("content").Type == gjson.String {
 					b.Content = block.Get("content").String()
 				} else if block.Get("content").IsArray() {
@@ -129,6 +141,7 @@ func parseCursorRequest(payload []byte) (*cursorRequestShape, error) {
 //   - model            -> requested_model.model_id
 func buildCursorClientMessage(shape *cursorRequestShape, conversationID string, blobStore *cursorSession) *cursorproto.AgentClientMessage {
 	var lastUserText string
+	var lastUserImages []*cursorproto.SelectedImage
 	for _, msg := range shape.Messages {
 		if msg.Role == "user" {
 			text := msg.Content
@@ -136,15 +149,29 @@ func buildCursorClientMessage(shape *cursorRequestShape, conversationID string, 
 				text = renderUserBlocks(msg.Blocks)
 			}
 			lastUserText = text
+			lastUserImages = nil
+			for _, b := range msg.Blocks {
+				if b.Type == "image" && len(b.ImageData) > 0 {
+					lastUserImages = append(lastUserImages, &cursorproto.SelectedImage{
+						Data:     b.ImageData,
+						MimeType: b.ImageMimeType,
+					})
+				}
+			}
 		}
+	}
+
+	userMessage := &cursorproto.UserMessage{
+		Text:      lastUserText,
+		MessageID: uuid.NewString(),
+	}
+	if len(lastUserImages) > 0 {
+		userMessage.SelectedContext = &cursorproto.SelectedContext{Images: lastUserImages}
 	}
 
 	action := &cursorproto.ConversationAction{
 		UserMessageAction: &cursorproto.UserMessageAction{
-			UserMessage: &cursorproto.UserMessage{
-				Text:      lastUserText,
-				MessageID: uuid.NewString(),
-			},
+			UserMessage: userMessage,
 		},
 	}
 	if lastUserText == "" {
