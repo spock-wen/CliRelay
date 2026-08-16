@@ -102,8 +102,13 @@ func (s refreshService) checkRefreshes(ctx context.Context) {
 	snapshot := s.snapshotAuths()
 	for _, auth := range snapshot {
 		typ, _ := auth.AccountInfo()
+		// Plain api-key auths never expire, but provider key exchanges can
+		// mint short-lived tokens (e.g. cursor dashboard keys → 1h session
+		// tokens). Those carry an expiry and must still be refreshed.
 		if typ == "api_key" {
-			continue
+			if _, hasExpiry := auth.ExpirationTime(); !hasExpiry {
+				continue
+			}
 		}
 		if !s.shouldRefresh(auth, now) {
 			continue

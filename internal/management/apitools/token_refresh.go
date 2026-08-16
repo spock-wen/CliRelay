@@ -11,6 +11,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api/bodyutil"
 	claudeauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude"
+	cursorauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/cursor"
 	geminiAuth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -59,6 +60,8 @@ func (s *Service) ResolveTokenForAuth(ctx context.Context, auth *coreauth.Auth) 
 		return s.refreshKimiOAuthAccessToken(ctx, auth)
 	case "xai", "x-ai", "grok":
 		return s.refreshXAIOAuthAccessToken(ctx, auth)
+	case "cursor":
+		return s.refreshCursorOAuthAccessToken(ctx, auth)
 	default:
 		return TokenValueForAuth(auth), nil
 	}
@@ -170,6 +173,154 @@ func (s *Service) refreshXAIOAuthAccessToken(ctx context.Context, auth *coreauth
 	}
 
 	return strings.TrimSpace(tokenData.AccessToken), nil
+}
+
+// refreshCursorOAuthAccessToken keeps management api-call / quota probes usable
+// after OAuth import by exchanging the stored refresh token.
+func (s *Service) refreshCursorOAuthAccessToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if auth == nil {
+		return "", nil
+	}
+	if authKind := strings.ToLower(stringValue(auth.Metadata, "auth_kind")); authKind == "api_key" {
+		return s.refreshCursorAPIKeyToken(ctx, auth)
+	}
+	metadata := auth.Metadata
+	if len(metadata) == 0 {
+		return "", fmt.Errorf("cursor oauth metadata missing")
+	}
+	current := strings.TrimSpace(TokenValueFromMetadata(metadata))
+	if current != "" && !cursorTokenNeedsRefresh(metadata) {
+		return current, nil
+	}
+	refreshToken := stringValue(metadata, "refresh_token")
+	if refreshToken == "" {
+		if current != "" {
+			return current, nil
+		}
+		return "", fmt.Errorf("cursor refresh token missing")
+	}
+	cfg := s.cfg
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	svc := cursorauth.NewAuthWithProxyURL(cfg, auth.ProxyURL)
+	pair, errRefresh := svc.RefreshTokens(ctx, refreshToken)
+	if errRefresh != nil {
+		return "", errRefresh
+	}
+	if pair == nil || strings.TrimSpace(pair.AccessToken) == "" {
+		return "", fmt.Errorf("cursor oauth token refresh returned empty access_token")
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	now := time.Now()
+	auth.Metadata["type"] = "cursor"
+	auth.Metadata["auth_kind"] = "oauth"
+	auth.Metadata["access_token"] = strings.TrimSpace(pair.AccessToken)
+	if strings.TrimSpace(pair.RefreshToken) != "" {
+		auth.Metadata["refresh_token"] = strings.TrimSpace(pair.RefreshToken)
+	}
+	if subject, userID, email := cursorauth.ParseTokenIdentity(pair.AccessToken); subject != "" {
+		auth.Metadata["sub"] = subject
+		if userID != "" {
+			auth.Metadata["user_id"] = userID
+		}
+		if email != "" {
+			auth.Metadata["email"] = email
+		}
+	}
+	if exp, ok := cursorauth.ParseTokenExpiry(pair.AccessToken); ok {
+		auth.Metadata["expired"] = exp.Format(time.RFC3339)
+	}
+	if stringValue(auth.Metadata, "base_url") == "" {
+		auth.Metadata["base_url"] = cursorauth.APIBaseURL
+	}
+	auth.Metadata["last_refresh"] = now.UTC().Format(time.RFC3339)
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["auth_kind"] = "oauth"
+	if strings.TrimSpace(auth.Attributes["base_url"]) == "" {
+		auth.Attributes["base_url"] = cursorauth.APIBaseURL
+	}
+	if s != nil && s.authManager != nil {
+		auth.LastRefreshedAt = now
+		auth.UpdatedAt = now
+		_, _ = s.authManager.Update(ctx, auth)
+	}
+	return strings.TrimSpace(pair.AccessToken), nil
+}
+
+// refreshCursorAPIKeyToken re-exchanges a stored dashboard API key when the
+// minted session token is expired (or missing), mirroring executor.Refresh.
+func (s *Service) refreshCursorAPIKeyToken(ctx context.Context, auth *coreauth.Auth) (string, error) {
+	metadata := auth.Metadata
+	if len(metadata) == 0 {
+		return "", fmt.Errorf("cursor api key metadata missing")
+	}
+	apiKey := strings.TrimSpace(stringValue(metadata, "api_key"))
+	current := strings.TrimSpace(TokenValueFromMetadata(metadata))
+	if current != "" && !cursorTokenNeedsRefresh(metadata) {
+		return current, nil
+	}
+	if apiKey == "" {
+		if current != "" {
+			return current, nil
+		}
+		return "", fmt.Errorf("cursor api key missing")
+	}
+	cfg := s.cfg
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
+	svc := cursorauth.NewAuthWithProxyURL(cfg, auth.ProxyURL)
+	pair, errExchange := svc.ExchangeAPIKey(ctx, apiKey)
+	if errExchange != nil {
+		return "", errExchange
+	}
+	if pair == nil || strings.TrimSpace(pair.AccessToken) == "" {
+		return "", fmt.Errorf("cursor api key exchange returned empty access_token")
+	}
+	now := time.Now()
+	metadata["type"] = "cursor"
+	metadata["auth_kind"] = "api_key"
+	metadata["access_token"] = strings.TrimSpace(pair.AccessToken)
+	if strings.TrimSpace(pair.RefreshToken) != "" {
+		metadata["refresh_token"] = strings.TrimSpace(pair.RefreshToken)
+	}
+	if exp, ok := cursorauth.ParseTokenExpiry(pair.AccessToken); ok {
+		metadata["expired"] = exp.Format(time.RFC3339)
+	}
+	metadata["last_refresh"] = now.UTC().Format(time.RFC3339)
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["auth_kind"] = "api_key"
+	if s != nil && s.authManager != nil {
+		auth.LastRefreshedAt = now
+		auth.UpdatedAt = now
+		_, _ = s.authManager.Update(ctx, auth)
+	}
+	return strings.TrimSpace(pair.AccessToken), nil
+}
+
+func cursorTokenNeedsRefresh(metadata map[string]any) bool {
+	const skew = 30 * time.Second
+	expireKeys := []string{"expired", "expire", "expires_at"}
+	for _, key := range expireKeys {
+		raw := stringValue(metadata, key)
+		if raw == "" {
+			continue
+		}
+		if ts, errParse := time.Parse(time.RFC3339, raw); errParse == nil {
+			return time.Now().After(ts.Add(-skew))
+		}
+	}
+	return false
 }
 
 func xaiTokenNeedsRefresh(metadata map[string]any) bool {

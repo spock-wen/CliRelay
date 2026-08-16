@@ -194,6 +194,8 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = s.fetchXAIRegistryModels(ctx, a, excluded)
+	case "cursor":
+		models = s.fetchCursorRegistryModels(ctx, a, excluded)
 	case "iflow":
 		models = sdkmodelcatalog.StaticModelDefinitionsByChannel("iflow")
 		models = applyExcludedModels(models, excluded)

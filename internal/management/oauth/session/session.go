@@ -249,6 +249,8 @@ func NormalizeProvider(provider string) (string, error) {
 		return "qwen", nil
 	case "xai", "x-ai", "x.ai", "grok":
 		return "xai", nil
+	case "cursor":
+		return "cursor", nil
 	default:
 		return "", ErrUnsupportedFlow
 	}
