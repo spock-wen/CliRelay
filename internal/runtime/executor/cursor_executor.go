@@ -209,6 +209,17 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	out := make(chan cliproxyexecutor.StreamChunk, 16)
 	go func() {
 		defer close(out)
+		// send aborts when the consumer disappears (request canceled): an
+		// unguarded send would block this goroutine — and the transport
+		// resources it holds — until ctx cancellation anyway.
+		send := func(chunk cliproxyexecutor.StreamChunk) bool {
+			select {
+			case out <- chunk:
+				return true
+			case <-ctx.Done():
+				return false
+			}
+		}
 		assembler := newCursorAnthropicAssembler(model)
 		assembler.ShellToolName = cursorShellToolName(shape.Tools)
 		stopReason := "end_turn"
@@ -224,7 +235,7 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 			}
 			if ev.Err != nil {
 				streamErr = mapCursorConnectError(ev.Err)
-				out <- cliproxyexecutor.StreamChunk{Err: streamErr}
+				send(cliproxyexecutor.StreamChunk{Err: streamErr})
 				break
 			}
 			for _, event := range assembler.Handle(ev.Message) {
@@ -233,7 +244,9 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 					continue
 				}
 				reporter.appendOutputChunk(line)
-				out <- cliproxyexecutor.StreamChunk{Payload: append(append([]byte("event: "+event.eventName()+"\ndata: "), line...), '\n', '\n')}
+				if !send(cliproxyexecutor.StreamChunk{Payload: append(append([]byte("event: "+event.eventName()+"\ndata: "), line...), '\n', '\n')}) {
+					return
+				}
 			}
 		}
 		if streamErr != nil {
@@ -246,7 +259,9 @@ func (e *CursorExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 				continue
 			}
 			reporter.appendOutputChunk(line)
-			out <- cliproxyexecutor.StreamChunk{Payload: append(append([]byte("event: "+event.eventName()+"\ndata: "), line...), '\n', '\n')}
+			if !send(cliproxyexecutor.StreamChunk{Payload: append(append([]byte("event: "+event.eventName()+"\ndata: "), line...), '\n', '\n')}) {
+				return
+			}
 		}
 		reporter.publish(execCtx.Context, cursorUsageDetail(payload, assembler))
 	}()

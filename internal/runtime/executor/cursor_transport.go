@@ -180,11 +180,12 @@ func (t *cursorTransport) RunStream(ctx context.Context, baseURL, token string, 
 	// order but must never block the read loop: a stalled pw.Write — the
 	// upstream not reading our reply while it keeps streaming frames —
 	// freezes frame decoding and turns incremental deltas into one burst.
-	// replies serializes writes on a background goroutine.
+	// The writer serializes writes on a background goroutine and exits when
+	// replyCh closes (stream end / error paths) or the pipe write fails.
 	replyCh := make(chan []byte, 32)
+	replyWriterDone := make(chan struct{})
 	go func() {
-		// Exits when the pipe is closed (ctx cancel or stream end) and the
-		// pending Write fails; drains senders until they observe ctx.Done.
+		defer close(replyWriterDone)
 		for buf := range replyCh {
 			if _, errWrite := pw.Write(buf); errWrite != nil {
 				for range replyCh {
@@ -193,15 +194,22 @@ func (t *cursorTransport) RunStream(ctx context.Context, baseURL, token string, 
 			}
 		}
 	}()
+	// abandon closes the pipe and the reply channel so the frame writer and
+	// the reply writer both terminate on early-exit paths.
+	abandon := func() {
+		_ = pw.Close()
+		close(replyCh)
+		<-replyWriterDone
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, pr)
 	if err != nil {
-		_ = pw.Close()
+		abandon()
 		return nil, nil, err
 	}
 	req.Header = t.headers(token, "application/connect+proto")
 	resp, err := t.client.Do(req)
 	if err != nil {
-		_ = pw.Close()
+		abandon()
 		return nil, nil, err
 	}
 	go func() {
@@ -212,7 +220,7 @@ func (t *cursorTransport) RunStream(ctx context.Context, baseURL, token string, 
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		_ = resp.Body.Close()
-		_ = pw.Close()
+		abandon()
 		return nil, nil, fmt.Errorf("cursor run: status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 
@@ -222,8 +230,10 @@ func (t *cursorTransport) RunStream(ctx context.Context, baseURL, token string, 
 		defer close(out)
 		defer close(done)
 		// The read loop is the only replyCh sender; closing it here lets the
-		// reply writer exit after the last in-flight reply is written.
+		// reply writer exit after the last in-flight reply is written, and
+		// closing the pipe releases the request body on normal end.
 		defer close(replyCh)
+		defer func() { _ = pw.Close() }()
 		var frameBuf []byte
 		for {
 			chunk := make([]byte, 32*1024)
