@@ -488,7 +488,6 @@ func FetchKimiModels(ctx context.Context, auth *coreauth.Auth, cfg *config.Confi
 func FetchCursorModels(ctx context.Context, auth *coreauth.Auth, cfg *config.Config) []*sdkmodelcatalog.ModelInfo {
 	return executor.FetchCursorModels(ctx, auth, cfg)
 }
-}
 
 func RebindTenantExecutors(base *config.Config, coreManager *coreauth.Manager, tenantID string, gateway WebsocketGateway) {
 	if base == nil || coreManager == nil {
