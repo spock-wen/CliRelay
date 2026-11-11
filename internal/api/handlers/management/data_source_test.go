@@ -85,7 +85,7 @@ func TestGetDataSourceMembers(t *testing.T) {
 	h := &Handler{cfg: &config.Config{}}
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
-	c.Request = httptest.NewRequest(http.MethodGet, "/data-source/members?page=1&pageSize=2", nil)
+	c.Request = httptest.NewRequest(http.MethodGet, "/data-source/members?page=1&pageSize=100", nil)
 	h.GetDataSourceMembers(c)
 
 	if rec.Code != http.StatusOK {
@@ -106,22 +106,35 @@ func TestGetDataSourceMembers(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if payload.Total != 3 || payload.Page != 1 || payload.PageSize != 2 {
-		t.Errorf("paging = total=%d page=%d size=%d, want 3/1/2", payload.Total, payload.Page, payload.PageSize)
+	if payload.Total != 21 || payload.Page != 1 || payload.PageSize != 100 {
+		t.Errorf("paging = total=%d page=%d size=%d, want 21/1/100", payload.Total, payload.Page, payload.PageSize)
 	}
-	if len(payload.Members) != 2 {
-		t.Fatalf("members len = %d, want 2; body=%s", len(payload.Members), rec.Body.String())
+	if len(payload.Members) != 21 {
+		t.Fatalf("members len = %d, want 21; body=%s", len(payload.Members), rec.Body.String())
 	}
-	// Ordered by username_normalized: mac, wen_guorong.
-	first := payload.Members[0]
-	if first.Email != "mac@hihope.com" {
-		t.Errorf("first email = %q, want mac@hihope.com", first.Email)
+	byName := map[string]int{}
+	for i, m := range payload.Members {
+		byName[m.Name] = i
 	}
-	if first.Name != "Mac" || first.Role != "member" || first.Status != "active" {
-		t.Errorf("first member = %+v", first)
+	member := func(name string) (id, email, role, status string, ok bool) {
+		i, ok := byName[name]
+		if !ok {
+			return "", "", "", "", false
+		}
+		m := payload.Members[i]
+		return m.ID, m.Email, m.Role, m.Status, true
 	}
-	if second := payload.Members[1]; second.Email != "wen_guorong@hihope.com" || second.Name != "文国荣" {
-		t.Errorf("second member = %+v", second)
+	_, macEmail, macRole, macStatus, macOK := member("Mac")
+	if !macOK || macEmail != "mac@hoperun.com" || macRole != "member" || macStatus != "active" {
+		t.Errorf("Mac email=%q role=%q status=%q ok=%v", macEmail, macRole, macStatus, macOK)
+	}
+	_, wenEmail, _, _, wenOK := member("文国荣")
+	if !wenOK || wenEmail != "wen_guorong@hoperun.com" {
+		t.Errorf("文国荣 email=%q ok=%v", wenEmail, wenOK)
+	}
+	zhangID, zhangEmail, zhangRole, _, zhangOK := member("张倩")
+	if !zhangOK || zhangEmail != "zhang_qian6@hoperun.com" || zhangID != "usage:zhang_qian" || zhangRole != "member" {
+		t.Errorf("张倩 id=%q email=%q role=%q ok=%v", zhangID, zhangEmail, zhangRole, zhangOK)
 	}
 }
 
@@ -157,6 +170,13 @@ func TestGetDataSourceUsageEvents(t *testing.T) {
 		usage.TokenStats{InputTokens: 50, OutputTokens: 10, TotalTokens: 60},
 		"", "",
 	)
+	// Removed account inside the window: must not be reported.
+	usage.InsertLog(
+		"sk-5", "丛悦", "glm-5.2", "cli", "", "",
+		false, now.Add(-time.Minute), 10, 5,
+		usage.TokenStats{InputTokens: 1, OutputTokens: 1, TotalTokens: 2},
+		"", "",
+	)
 
 	start := now.Add(-24 * time.Hour).Format(time.RFC3339)
 	end := now.Add(time.Hour).Format(time.RFC3339)
@@ -190,8 +210,8 @@ func TestGetDataSourceUsageEvents(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	// Window matches 2 rows (文国荣 + empty-name); the empty-name row is
-	// excluded at the SQL layer so total matches the rows actually returned.
+	// Window matches 文国荣, an empty name, and removed account 丛悦. The latter
+	// two are excluded at the SQL layer so total matches the returned rows.
 	if payload.Total != 1 {
 		t.Fatalf("total = %d, want 1; body=%s", payload.Total, rec.Body.String())
 	}
@@ -199,8 +219,8 @@ func TestGetDataSourceUsageEvents(t *testing.T) {
 		t.Fatalf("usages len = %d, want 1; body=%s", len(payload.Usages), rec.Body.String())
 	}
 	first := payload.Usages[0]
-	if first.UserEmail != "wen_guorong@hihope.com" {
-		t.Errorf("userEmail = %q, want wen_guorong@hihope.com", first.UserEmail)
+	if first.UserEmail != "wen_guorong@hoperun.com" {
+		t.Errorf("userEmail = %q, want wen_guorong@hoperun.com", first.UserEmail)
 	}
 	if first.Source != "CLI" || first.Operation != "Agent" || first.Credits != 0 || first.CostCurrency != "USD" {
 		t.Errorf("fixed fields = %+v", first)
@@ -210,6 +230,29 @@ func TestGetDataSourceUsageEvents(t *testing.T) {
 	}
 	if first.Model != "deepseek-v4-flash" {
 		t.Errorf("model = %q", first.Model)
+	}
+}
+
+func TestTokenHubEmailFor(t *testing.T) {
+	cases := []struct {
+		name string
+		want string
+	}{
+		{"文国荣", "wen_guorong@hoperun.com"},
+		{"闫鹏", "yan_peng1@hoperun.com"},
+		{"单文泽", "shan_wenze@hoperun.com"},
+		{"汪伟", "wang_wei10@hoperun.com"},
+		{"王威", "wang_wei02@hoperun.com"},
+		{"王永海", "wang_yonghai@runkaihong.com.cn"},
+		{"  付思丽  ", "fu_sili1@hoperun.com"},
+		{"Mac", "mac@hoperun.com"},
+		{"测试用户", "ce_shiyonghu@hoperun.com"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := tokenHubEmailFor(tc.name); got != tc.want {
+			t.Errorf("tokenHubEmailFor(%q) = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 

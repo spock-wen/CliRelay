@@ -593,6 +593,20 @@ func buildWhereClause(params LogQueryParams) (string, []interface{}) {
 	if params.SkipEmptyAPIKeyName {
 		conditions = append(conditions, `trim(coalesce(api_key_name, '')) <> ''`)
 	}
+	if len(params.ExcludeAPIKeyNames) > 0 {
+		placeholders := make([]string, 0, len(params.ExcludeAPIKeyNames))
+		for _, name := range params.ExcludeAPIKeyNames {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			placeholders = append(placeholders, "?")
+			args = append(args, name)
+		}
+		if len(placeholders) > 0 {
+			conditions = append(conditions, "trim(coalesce(api_key_name, '')) NOT IN ("+strings.Join(placeholders, ",")+")")
+		}
+	}
 
 	// API Key multi-value filter
 	if len(params.APIKeys) > 0 {

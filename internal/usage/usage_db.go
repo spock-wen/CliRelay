@@ -64,6 +64,7 @@ type LogQueryParams struct {
 	AuthIndexes         []string // optional auth_index IN (...) filter
 	ChannelNames        []string // optional channel_name IN (...) filter
 	SkipEmptyAPIKeyName bool     // exclude rows with blank api_key_name at the SQL layer
+	ExcludeAPIKeyNames  []string // exclude these api_key_name values at the SQL layer
 	// Optional precise legacy matches for renamed auth channels whose stored
 	// channel_name was a shared provider/source value.
 	AuthIndexChannelNames map[string][]string

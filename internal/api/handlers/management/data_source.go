@@ -16,7 +16,7 @@ import (
 // 鉴权由现有 h.Middleware() 处理（cps_* session token + RBAC，复用 request_logs.read）。
 
 const (
-	tokenHubEmailDomain       = "hihope.com"
+	tokenHubEmailDomain       = "hoperun.com"
 	dataSourceDefaultPage     = 1
 	dataSourceDefaultPageSize = 100
 	dataSourceMaxPageSize     = 500
@@ -102,6 +102,7 @@ func (h *Handler) GetDataSourceUsageEvents(c *gin.Context) {
 		Page:                page,
 		Size:                pageSize,
 		SkipEmptyAPIKeyName: true,
+		ExcludeAPIKeyNames:  usage.DataSourceExcludedMemberNames(),
 		// Failed requests are not real usage; exclude them so TokenHub only
 		// receives successful calls.
 		Statuses: []string{"success"},
@@ -141,10 +142,14 @@ func (h *Handler) GetDataSourceUsageEvents(c *gin.Context) {
 }
 
 func tokenHubEmailFor(displayName string) string {
-	if strings.TrimSpace(displayName) == "" {
+	name := strings.TrimSpace(displayName)
+	if name == "" {
 		return ""
 	}
-	return util.NameToPinyin(displayName) + "@" + tokenHubEmailDomain
+	if email, ok := tokenHubRealEmails[name]; ok {
+		return email
+	}
+	return util.NameToPinyin(name) + "@" + tokenHubEmailDomain
 }
 
 // parseDataSourceTimeRange parses the required ISO-8601 startDate/endDate pair
