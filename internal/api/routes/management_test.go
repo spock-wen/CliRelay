@@ -26,7 +26,7 @@ func TestRegisterManagementRouteTable(t *testing.T) {
 		routes[key] = route
 	}
 
-	if got, want := len(routes), 412; got != want {
+	if got, want := len(routes), 414; got != want {
 		t.Fatalf("route count = %d, want %d", got, want)
 	}
 	if got, want := sortedRouteKeys(routes), expectedManagementRoutes(); !slices.Equal(got, want) {
@@ -177,6 +177,8 @@ func TestManagementRoutePermissionsComplete(t *testing.T) {
 	locked := []struct {
 		method, path, want string
 	}{
+		{http.MethodGet, "/v0/management/data-source/members", "request_logs.read"},
+		{http.MethodGet, "/v0/management/data-source/usage-events", "request_logs.read"},
 		{http.MethodGet, "/v0/management/request-error-logs", "system.logs.read"},
 		{http.MethodGet, "/v0/management/request-error-logs/err.log", "system.logs.read"},
 		{http.MethodGet, "/v0/management/request-log-by-id/req-1", "system.logs.read"},
@@ -702,6 +704,8 @@ func expectedManagementRoutes() []string {
 		"PUT /v0/management/usage-statistics-enabled",
 		"PUT /v0/management/vertex-api-key",
 		"PUT /v0/management/ws-auth",
+		"GET /v0/management/data-source/members",
+		"GET /v0/management/data-source/usage-events",
 	}
 	slices.Sort(routes)
 	return routes

@@ -328,6 +328,14 @@ func permissionForManagementRequest(method, path string) string {
 		return "providers.read"
 	case strings.HasPrefix(relative, "/api-call"):
 		return "providers.test"
+	case strings.HasPrefix(relative, "/data-source"):
+		// TokenHub polls with the existing 观察者 role (request_logs.read).
+		// A new permission would 403 that account. Writes stay fail-closed.
+		// The path is not tenant-scoped: these handlers read the system tenant.
+		if write {
+			return ""
+		}
+		return "request_logs.read"
 	default:
 		// Fail closed: unmapped routes get no permission (middleware rejects "").
 		return ""

@@ -71,6 +71,10 @@ func TestPermissionForManagementRequest(t *testing.T) {
 		{http.MethodGet, "/v0/management/request-log", "system.config.read"},
 		{http.MethodPut, "/v0/management/request-log", "system.config.write"},
 		{http.MethodGet, "/v0/management/ws-auth", "system.config.read"},
+		// TokenHub's observer role already has request_logs.read. Writes stay closed.
+		{http.MethodGet, "/v0/management/data-source/members", "request_logs.read"},
+		{http.MethodGet, "/v0/management/data-source/usage-events", "request_logs.read"},
+		{http.MethodPost, "/v0/management/data-source/members", ""},
 		// Fail closed: unmapped routes get no permission.
 		{http.MethodGet, "/v0/management/totally-unknown-route", ""},
 		{http.MethodPost, "/v0/management/totally-unknown-route", ""},
