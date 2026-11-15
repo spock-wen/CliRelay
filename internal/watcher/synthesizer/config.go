@@ -622,6 +622,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["models_hash"] = hash
 			}
 			addCodexToolBridgeAttr(attrs, compat.CodexToolBridge)
+			addWireAPIAttr(attrs, compat.WireAPI)
 			addConfigHeadersToAttrs(compat.Headers, attrs)
 			addProviderBindingAttrs(attrs, compat.ID, entry.ID)
 			addDisableCoolingAttr(attrs, compat.DisableCooling)
@@ -656,6 +657,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				attrs["models_hash"] = hash
 			}
 			addCodexToolBridgeAttr(attrs, compat.CodexToolBridge)
+			addWireAPIAttr(attrs, compat.WireAPI)
 			addConfigHeadersToAttrs(compat.Headers, attrs)
 			addProviderBindingAttrs(attrs, compat.ID, "")
 			addDisableCoolingAttr(attrs, compat.DisableCooling)

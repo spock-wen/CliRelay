@@ -238,6 +238,13 @@ type OpenAICompatibility struct {
 	// is fixed rather than taken from the request, so leave it off unless Codex
 	// Desktop uses those plugins through this upstream. Default: false.
 	CodexToolBridge bool `yaml:"codex-tool-bridge,omitempty" json:"codex-tool-bridge,omitempty"`
+
+	// WireAPI selects how this provider is called. Empty keeps Chat Completions.
+	// "responses" forwards an incoming Responses request to {base-url}/responses
+	// without translating it into Chat Completions, so Codex namespace tools
+	// such as functions/exec stay intact. Chat Completions clients still use
+	// {base-url}/chat/completions.
+	WireAPI string `yaml:"wire-api,omitempty" json:"wire-api,omitempty"`
 }
 
 // OpenAICompatibilityAPIKey represents an API key configuration with optional proxy setting.
@@ -270,6 +277,10 @@ type OpenAICompatibilityModel struct {
 
 func (m OpenAICompatibilityModel) GetName() string  { return m.Name }
 func (m OpenAICompatibilityModel) GetAlias() string { return m.Alias }
+
+// OpenAICompatWireAPIResponses is the only non-default wire-api value. It
+// forwards Responses requests to the provider without a Chat Completions translation.
+const OpenAICompatWireAPIResponses = "responses"
 
 // OpenCodeGoKey represents an OpenCode Go plan API key.
 // The upstream endpoint is fixed to https://opencode.ai/zen/go/v1.

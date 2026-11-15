@@ -87,6 +87,11 @@ func ConvertClaudeRequestToCodex(modelName string, inputRawJSON []byte, _ bool) 
 		for i := 0; i < len(messageResults); i++ {
 			messageResult := messageResults[i]
 			messageRole := messageResult.Get("role").String()
+			// Codex rejects role "system" in input ("System messages are not allowed").
+			// Claude Code sends that role for mid-conversation system turns.
+			if strings.EqualFold(messageRole, "system") {
+				messageRole = "developer"
+			}
 
 			var contentBuf bytes.Buffer
 			contentFirst := true
