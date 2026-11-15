@@ -31,6 +31,40 @@ func TestConvertClaudeRequestToCodex_StripsDeferLoading(t *testing.T) {
 	})
 }
 
+func TestConvertClaudeRequestToCodex_SystemRoleBecomesDeveloper(t *testing.T) {
+	input := []byte(`{
+		"model":"gpt-6.1-sol",
+		"max_tokens":16,
+		"system":[{"type":"text","text":"Be brief."}],
+		"messages":[
+			{"role":"user","content":"first"},
+			{"role":"system","content":[{"type":"text","text":"Stay brief."}]},
+			{"role":"user","content":"ping"}
+		]
+	}`)
+	out := ConvertClaudeRequestToCodex("gpt-6.1-sol", input, true)
+	inputItems := gjson.GetBytes(out, "input")
+	if !inputItems.IsArray() || len(inputItems.Array()) != 4 {
+		t.Fatalf("input items = %s", inputItems.Raw)
+	}
+	roles := make([]string, 0, 4)
+	inputItems.ForEach(func(_, item gjson.Result) bool {
+		roles = append(roles, item.Get("role").String())
+		return true
+	})
+	if roles[0] != "developer" || roles[2] != "developer" {
+		t.Fatalf("roles = %v, want developer at the system turns", roles)
+	}
+	for _, role := range roles {
+		if role == "system" {
+			t.Fatalf("system role leaked into codex input: %v", roles)
+		}
+	}
+	if gjson.GetBytes(out, "input.2.content.0.text").String() != "Stay brief." {
+		t.Fatalf("mid-conversation text = %s", out)
+	}
+}
+
 func TestConvertClaudeRequestToCodex_EmptyToolsOmitsToolChoice(t *testing.T) {
 	input := []byte(`{
 		"model":"claude-haiku-4-5",

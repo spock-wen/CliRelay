@@ -10,6 +10,15 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// NormalizeOpenAICompatWireAPI returns "responses" or empty. Any other value,
+// including "chat", keeps the provider on Chat Completions.
+func NormalizeOpenAICompatWireAPI(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), OpenAICompatWireAPIResponses) {
+		return OpenAICompatWireAPIResponses
+	}
+	return ""
+}
+
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.
 func (cfg *Config) SanitizePayloadRules() {
 	if cfg == nil {
@@ -155,6 +164,7 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Name = strings.TrimSpace(e.Name)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.WireAPI = NormalizeOpenAICompatWireAPI(e.WireAPI)
 		e.Headers = NormalizeHeaders(e.Headers)
 		for j := range e.APIKeyEntries {
 			e.APIKeyEntries[j].ProxyURL = strings.TrimSpace(e.APIKeyEntries[j].ProxyURL)

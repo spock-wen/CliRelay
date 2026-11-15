@@ -176,3 +176,12 @@ func addCodexToolBridgeAttr(attrs map[string]string, enabled bool) {
 	}
 	attrs["codex_tool_bridge"] = "true"
 }
+
+// addWireAPIAttr records an upstream protocol override. Only "responses" is
+// written; every other value leaves the credential on Chat Completions.
+func addWireAPIAttr(attrs map[string]string, wireAPI string) {
+	if attrs == nil || config.NormalizeOpenAICompatWireAPI(wireAPI) != config.OpenAICompatWireAPIResponses {
+		return
+	}
+	attrs["wire_api"] = config.OpenAICompatWireAPIResponses
+}

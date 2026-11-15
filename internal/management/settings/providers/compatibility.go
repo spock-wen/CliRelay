@@ -16,6 +16,7 @@ type OpenAICompatibilityPatch struct {
 	Models          *[]config.OpenAICompatibilityModel  `json:"models"`
 	Headers         *map[string]string                  `json:"headers"`
 	CodexToolBridge *bool                               `json:"codex-tool-bridge"`
+	WireAPI         *string                             `json:"wire-api"`
 	DisableCooling  patchfield.NullableBool             `json:"disable-cooling"`
 }
 
@@ -103,6 +104,9 @@ func (s *Service) PatchOpenAICompatibility(index *int, name *string, patch OpenA
 	}
 	if patch.CodexToolBridge != nil {
 		entry.CodexToolBridge = *patch.CodexToolBridge
+	}
+	if patch.WireAPI != nil {
+		entry.WireAPI = config.NormalizeOpenAICompatWireAPI(*patch.WireAPI)
 	}
 	patch.DisableCooling.Apply(&entry.DisableCooling)
 	NormalizeOpenAICompatibilityEntry(&entry)

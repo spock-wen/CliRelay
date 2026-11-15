@@ -1,0 +1,75 @@
+# Backend-only image. The management panel is mounted at runtime from
+# MANAGEMENT_PANEL_DIR and is not built into this image.
+FROM --platform=$BUILDPLATFORM golang:1.26.11-alpine AS backend-builder
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+COPY updater/go.mod ./updater/go.mod
+ENV GOPROXY=https://goproxy.cn,direct
+ENV GOSUMDB=sum.golang.google.cn
+RUN go mod download
+
+COPY . .
+
+ARG TARGETOS=linux
+ARG TARGETARCH
+ARG VERSION=dev
+ARG COMMIT=none
+ARG BUILD_DATE=unknown
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+  -ldflags="-s -w \
+    -X 'github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo.Version=${VERSION}' \
+    -X 'github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo.Commit=${COMMIT}' \
+    -X 'github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo.BuildDate=${BUILD_DATE}'" \
+  -o ./CLIProxyAPI ./cmd/server/
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+  -ldflags="-s -w" \
+  -o ./clirelay-compose-migrate ./cmd/composemigrate/
+
+RUN cd ./updater && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+  -ldflags="-s -w" \
+  -o /app/clirelay-updater .
+
+FROM alpine:3.22.0
+
+RUN apk add --no-cache tzdata ca-certificates docker-cli docker-cli-compose su-exec
+
+RUN addgroup -S -g 10001 clirelay \
+  && adduser -S -D -H -u 10001 -h /CLIProxyAPI -s /sbin/nologin -G clirelay clirelay \
+  && mkdir -p /CLIProxyAPI/panel /CLIProxyAPI/auths /CLIProxyAPI/logs /CLIProxyAPI/data \
+  && chown -R clirelay:clirelay /CLIProxyAPI
+
+COPY --from=backend-builder --chown=clirelay:clirelay /app/CLIProxyAPI /CLIProxyAPI/CLIProxyAPI
+COPY --from=backend-builder --chown=clirelay:clirelay /app/clirelay-updater /CLIProxyAPI/clirelay-updater
+COPY --from=backend-builder --chown=clirelay:clirelay /app/clirelay-compose-migrate /CLIProxyAPI/clirelay-compose-migrate
+
+COPY --chown=clirelay:clirelay panel/ /CLIProxyAPI/panel/
+COPY --chown=clirelay:clirelay config.example.yaml /CLIProxyAPI/config.example.yaml
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY scripts/init-compose-env.sh /usr/local/bin/clirelay-init-env
+
+WORKDIR /CLIProxyAPI
+
+EXPOSE 8317
+
+ENV TZ=Asia/Shanghai \
+    MANAGEMENT_PANEL_DIR=/CLIProxyAPI/panel \
+    AUTH_PATH=/CLIProxyAPI/auths \
+    CLIRELAY_LOCALE=zh
+
+RUN sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh /usr/local/bin/clirelay-init-env \
+  && chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/clirelay-init-env \
+  && cp /usr/share/zoneinfo/${TZ} /etc/localtime \
+  && echo "${TZ}" > /etc/timezone
+
+USER root
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD wget -q -T 2 -O /dev/null http://127.0.0.1:8317/healthz
+
+CMD ["./CLIProxyAPI"]
