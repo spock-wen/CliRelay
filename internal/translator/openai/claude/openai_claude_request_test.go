@@ -802,3 +802,81 @@ func TestConvertClaudeRequestToOpenAI_ToolsAndToolChoiceNameInvariantsGenerated(
 		})
 	}
 }
+
+func TestConvertClaudeRequestToOpenAI_GLM53ReplacesImagesWithText(t *testing.T) {
+	inputJSON := `{
+		"model": "glm-5.3",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "Read", "input": {"file_path": "shot.png"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_1", "content": [
+						{"type": "text", "text": "read ok"},
+						{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+					]},
+					{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "BBBB"}},
+					{"type": "text", "text": "继续"}
+				]
+			}
+		]
+	}`
+
+	for _, modelName := range []string{"glm-5.3", "glm-5.3(high)"} {
+		t.Run(modelName, func(t *testing.T) {
+			result := string(ConvertClaudeRequestToOpenAI(modelName, []byte(inputJSON), false))
+			if strings.Contains(result, "image_url") || strings.Contains(result, "AAAA") || strings.Contains(result, "BBBB") {
+				t.Fatalf("glm-5.3 should not forward image payloads: %s", result)
+			}
+			parsed := gjson.Parse(result)
+			if got := parsed.Get("messages.1.content").String(); got != "read ok\n\n"+glm53ImagePlaceholder {
+				t.Fatalf("tool content = %q", got)
+			}
+			if got := parsed.Get("messages.2.content.0.type").String(); got != "text" {
+				t.Fatalf("user image part type = %q", got)
+			}
+			if got := parsed.Get("messages.2.content.0.text").String(); got != glm53ImagePlaceholder {
+				t.Fatalf("user image placeholder = %q", got)
+			}
+			if got := parsed.Get("messages.2.content.1.text").String(); got != "继续" {
+				t.Fatalf("user text = %q", got)
+			}
+		})
+	}
+}
+
+func TestConvertClaudeRequestToOpenAI_GLM53FlashKeepsImages(t *testing.T) {
+	inputJSON := `{
+		"model": "glm-5.3-flash",
+		"messages": [
+			{
+				"role": "assistant",
+				"content": [
+					{"type": "tool_use", "id": "call_1", "name": "Read", "input": {"file_path": "shot.png"}}
+				]
+			},
+			{
+				"role": "user",
+				"content": [
+					{"type": "tool_result", "tool_use_id": "call_1", "content": [
+						{"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+					]}
+				]
+			}
+		]
+	}`
+
+	result := string(ConvertClaudeRequestToOpenAI("glm-5.3-flash", []byte(inputJSON), false))
+	parsed := gjson.Parse(result)
+	if got := parsed.Get("messages.1.content.0.type").String(); got != "image_url" {
+		t.Fatalf("flash tool image type = %q, body %s", got, result)
+	}
+	if !strings.Contains(parsed.Get("messages.1.content.0.image_url.url").String(), "AAAA") {
+		t.Fatalf("flash should keep the image payload: %s", result)
+	}
+}

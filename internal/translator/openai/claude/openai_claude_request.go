@@ -14,6 +14,11 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// glm53ImagePlaceholder replaces an image block when the upstream model is
+// glm-5.3. That model accepts only content type "text". glm-5.3-flash is left
+// unchanged because it accepts image_url.
+const glm53ImagePlaceholder = "此处有一张图片，当前模型无法查看"
+
 // ConvertClaudeRequestToOpenAI parses and transforms an Anthropic API request into OpenAI Chat Completions API format.
 // It extracts the model name, system instruction, message contents, and tool declarations
 // from the raw JSON request and returns them in the format expected by the OpenAI API.
@@ -26,6 +31,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 
 	// Model mapping
 	out, _ = sjson.Set(out, "model", modelName)
+	omitImages := glm53OmitsImages(modelName)
 
 	// Max tokens
 	if maxTokens := root.Get("max_tokens"); maxTokens.Exists() {
@@ -104,7 +110,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 			if system.IsArray() {
 				systemResults := system.Array()
 				for i := 0; i < len(systemResults); i++ {
-					if contentItem, ok := convertClaudeContentPart(systemResults[i]); ok {
+					if contentItem, ok := convertClaudeContentPart(systemResults[i], omitImages); ok {
 						systemMsgJSON, _ = sjson.SetRaw(systemMsgJSON, "content.-1", contentItem)
 						hasSystemContent = true
 					}
@@ -149,7 +155,7 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						// Explicitly ignore redacted_thinking - never map to reasoning_content (AC2)
 
 					case "text", "image":
-						if contentItem, ok := convertClaudeContentPart(part); ok {
+						if contentItem, ok := convertClaudeContentPart(part, omitImages); ok {
 							contentItems = append(contentItems, contentItem)
 						}
 
@@ -186,7 +192,9 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 						}
 						toolResultJSON := `{"role":"tool","tool_call_id":"","content":""}`
 						toolResultJSON, _ = sjson.Set(toolResultJSON, "tool_call_id", toolUseID)
-						if parsed := common.ParseToolResult(part.Get("content")); parsed.HasImage() {
+						if parsed := common.ParseToolResult(part.Get("content")); parsed.HasImage() && omitImages {
+							toolResultJSON, _ = sjson.Set(toolResultJSON, "content", glm53ToolResultText(parsed))
+						} else if parsed.HasImage() {
 							toolResultJSON, _ = sjson.SetRaw(toolResultJSON, "content", common.ToChatContent(parsed))
 						} else {
 							toolResultJSON, _ = sjson.Set(toolResultJSON, "content", convertClaudeToolResultContentToString(part.Get("content")))
@@ -343,7 +351,26 @@ func ConvertClaudeRequestToOpenAI(modelName string, inputRawJSON []byte, stream 
 	return common.OutputFormatFromClaude(root).WriteChat([]byte(out))
 }
 
-func convertClaudeContentPart(part gjson.Result) (string, bool) {
+func glm53OmitsImages(modelName string) bool {
+	base := strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName)
+	return strings.EqualFold(base, "glm-5.3")
+}
+
+func glm53ToolResultText(parsed common.ToolResult) string {
+	var parts []string
+	for _, part := range parsed.Parts {
+		if part.Image != nil {
+			continue
+		}
+		if strings.TrimSpace(part.Text) != "" {
+			parts = append(parts, part.Text)
+		}
+	}
+	parts = append(parts, glm53ImagePlaceholder)
+	return strings.Join(parts, "\n\n")
+}
+
+func convertClaudeContentPart(part gjson.Result, omitImages bool) (string, bool) {
 	partType := part.Get("type").String()
 
 	switch partType {
@@ -357,6 +384,11 @@ func convertClaudeContentPart(part gjson.Result) (string, bool) {
 		return textContent, true
 
 	case "image":
+		if omitImages {
+			textContent := `{"type":"text","text":""}`
+			textContent, _ = sjson.Set(textContent, "text", glm53ImagePlaceholder)
+			return textContent, true
+		}
 		var imageURL string
 
 		if source := part.Get("source"); source.Exists() {
