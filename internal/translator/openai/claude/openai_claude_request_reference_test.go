@@ -101,7 +101,7 @@ func convertClaudeRequestToOpenAIReference(modelName string, inputRawJSON []byte
 			if system.IsArray() {
 				systemResults := system.Array()
 				for i := 0; i < len(systemResults); i++ {
-					if contentItem, ok := convertClaudeContentPart(systemResults[i]); ok {
+					if contentItem, ok := convertClaudeContentPart(systemResults[i], false); ok {
 						systemMsgJSON, _ = sjson.SetRaw(systemMsgJSON, "content.-1", contentItem)
 						hasSystemContent = true
 					}
@@ -146,7 +146,7 @@ func convertClaudeRequestToOpenAIReference(modelName string, inputRawJSON []byte
 						// Explicitly ignore redacted_thinking - never map to reasoning_content (AC2)
 
 					case "text", "image":
-						if contentItem, ok := convertClaudeContentPart(part); ok {
+						if contentItem, ok := convertClaudeContentPart(part, false); ok {
 							contentItems = append(contentItems, contentItem)
 						}
 

@@ -2,7 +2,13 @@
 
 上游基线是 kittors/CliRelay v0.6.1，提交 `8d8ba075`（2026-11-10，PR #1275）。`internal/v0.6.1` 在这之上有已提交的 TokenHub（`a195e908`）。该工作区里还有未提交的 `wire-api`、Responses 透传用量、Chat 流用量，以及 GLM 的 `stop` 数组。
 
-这些代码补丁已经重放到 `internal/v0.6.3`（上游 v0.6.3 是 `6c358782`），并推到 `origin/internal/v0.6.3`：
+这些代码补丁已经重放到 `internal/v0.6.3`（上游 v0.6.3 是 `6c358782`），并推到 `origin/internal/v0.6.3`。2026-11-19 又重放到 `internal/v0.6.5`（上游 v0.6.5 是 `1c3d76fe`），还没有部署：
+
+- TokenHub：`1e5d9ea6`
+- `wire-api`、Responses 透传用量、Chat 流用量、`Dockerfile.backend`、Claude 消息角色 `system` → `developer`：`edfadb38`
+- `glm-5.3` 把图片块换成文本，`glm-5.3-flash` 仍发 `image_url`：`3c6b3b34`
+
+`internal/v0.6.3` 上的对应提交是：
 
 - TokenHub：`1d3d5630`（`a195e908` 的拣选）。
 - `wire-api`、Responses 透传用量、Chat 流用量、`Dockerfile.backend`，以及 Claude 消息角色 `system` → `developer`：`cfd4d5ca`。
